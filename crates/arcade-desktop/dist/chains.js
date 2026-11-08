@@ -208,7 +208,7 @@
       li.innerHTML = `<div class="sh"><span class="sn"></span><span class="sd"></span></div><div class="bar"><i></i></div>`;
       li.querySelector(".sn").textContent = s.name;
       const rate = s.rate == null ? "measuring…" : `${s.rate >= 10 ? Math.round(s.rate).toLocaleString() : s.rate.toFixed(1)} blocks/s`;
-      li.querySelector(".sd").textContent = s.info ? s.detail : p >= 100 ? `done · ${rate} · ${s.detail}` : `${p.toFixed(1)}% · ${rate} · ${(s.at ?? 0).toLocaleString()} of ${(s.of ?? 0).toLocaleString()} · ${s.detail}`;
+      li.querySelector(".sd").textContent = s.info ? s.detail : p >= 100 ? `done · ${rate} · ${s.detail}` : `${p.toFixed(1)}% · ${rate}${s.at ? ` · ${s.at.toLocaleString()} of ${(s.of ?? 0).toLocaleString()}` : ""} · ${s.detail}`;
       if (s.current) li.querySelector(".sn").textContent = `${s.name} (now)`;
       li.querySelector(".bar > i").style.width = p + "%";
       // Remove-index buttons on index stages.

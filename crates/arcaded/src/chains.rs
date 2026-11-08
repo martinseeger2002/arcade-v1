@@ -512,12 +512,20 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
             } else if !note.is_empty() {
                 (note, 0.0)
             } else if peer.saturating_sub(tip) > arcade_chaindb::sync::DEFER_BEHIND as u64 {
-                ("kept aside while catching up, then built in one sorted pass (much faster)".to_string(), 0.0)
+                ("written in one sorted pass once the chain has caught up (much faster than writing each block's rows in place)".to_string(), 0.0)
             } else {
                 ("waiting to be built".to_string(), 0.0)
             };
-            stages.push(json!({"name": "Addresses", "index": ix, "detail": detail, "overall_pct": if pending { blocks_pct * 0.9 } else { blocks_pct },
-                               "pct": p_, "at": tip, "of": peer}));
+            if pending {
+                // Two steps: rows are taken from each block as it is stored (into a log), then
+                // the index is written in one sorted pass after the catch-up.
+                stages.push(json!({"name": "Addresses · collect", "detail": "taken from each block as it is stored (received coins, spends, history)",
+                                   "overall_pct": blocks_pct, "pct": blocks_pct, "at": tip, "of": peer}));
+                stages.push(json!({"name": "Addresses · build", "index": ix, "detail": detail, "overall_pct": blocks_pct * 0.9,
+                                   "pct": p_, "at": 0, "of": peer}));
+            } else {
+                stages.push(json!({"name": "Addresses", "index": ix, "detail": detail, "overall_pct": blocks_pct, "pct": p_, "at": tip, "of": peer}));
+            }
             continue;
         }
         let name = indexer_name(ix);
@@ -559,8 +567,7 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
             continue;
         }
         let name = st["name"].as_str().unwrap_or("").to_string();
-        // A deferred address build isn't moving yet (its "at" mirrors the blocks).
-        let at = if st["name"] == "Addresses" && st["pct"].as_f64() == Some(0.0) { 0 } else { st["at"].as_u64().unwrap_or(0) };
+        let at = st["at"].as_u64().unwrap_or(0);
         if let Some(r) = stage_rate(key, &name, at) {
             st["rate"] = json!((r * 10.0).round() / 10.0);
         }
