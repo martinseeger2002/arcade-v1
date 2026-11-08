@@ -289,7 +289,12 @@ pub(crate) fn coin_at<R: Rd>(r: &R, params: &ChainParams, b: u32, p: u32, vout: 
     }))
 }
 
-static TIMES: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+/// Nanoseconds: [core writes, protocol indexes, whole write incl. commit, block bytes stored,
+/// spends (finding each spent coin), new coins + tx index, undo records].
+static TIMES: [std::sync::atomic::AtomicU64; 7] = [const { std::sync::atomic::AtomicU64::new(0) }; 7];
+fn tadd(i: usize, t: std::time::Instant) {
+    TIMES[i].fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+}
 
 pub struct ChainDb {
     pub store: Store,
@@ -980,6 +985,11 @@ impl ChainDb {
         [0, 1, 2].map(|i| TIMES[i].load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    /// The write broken down: [block bytes, spends, new coins + tx index, undo] (nanoseconds).
+    pub fn connect_parts() -> [u64; 4] {
+        [3, 4, 5, 6].map(|i| TIMES[i].load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     pub(crate) fn connect_blocks_with(&self, params: &ChainParams, blocks: &[Block], check: bool, defer: bool) -> Result<Tip> {
         let c = params.chain_no;
         // Far behind (defer), protocol indexes are left out of the commit: they fall behind
@@ -1005,7 +1015,7 @@ impl ChainDb {
                 w.put(STATE, &k_state(c, crate::addrbuild::PENDING), b"1")?;
             }
             for b in blocks {
-                tip = Some(connect_one(w, params, b, tip, &ixs, check, addr)?);
+                tip = Some(connect_one(w, params, b, tip, &ixs, check, addr, !defer)?);
             }
             tip.ok_or_else(|| other("nothing connected"))
         });
@@ -1077,7 +1087,11 @@ enum Addr {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>, ixs: &[Arc<dyn Indexer>], check: bool, addr: Addr) -> Result<Tip> {
+/// `undo`: keep the block's undo record. Far behind (deferring) there is none: those blocks
+/// are more than DEFER_BEHIND (20,000) deep, far past the UNDO_DEPTH (1,000) a reorg may undo,
+/// and their records would only be deleted again later.
+#[allow(clippy::too_many_arguments)]
+fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>, ixs: &[Arc<dyn Indexer>], check: bool, addr: Addr, undo: bool) -> Result<Tip> {
     let c = params.chain_no;
     let hash = blk.hash();
     let height = match tip {
@@ -1113,6 +1127,7 @@ fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>
             r
         }
     };
+    let t_store = std::time::Instant::now();
     if hrec.b == 0 {
         hrec.b = next_b(w, c)?;
         w.put(BLOCK_META, &k_block(c, hrec.b), &block_meta(blk))?;
@@ -1121,6 +1136,7 @@ fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>
         }
     }
     let b = hrec.b;
+    tadd(3, t_store);
 
     // Index changes, undo-logged.
     let l = Logged::new(w);
@@ -1146,8 +1162,11 @@ fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>
         settle_mempool(w, params, tx)?;
         let mut bp = b.to_be_bytes().to_vec();
         bp.extend_from_slice(&p.to_be_bytes());
+        let t_ix = std::time::Instant::now();
         l.dup_add(TXS, &k_txs(c, &t12), &bp)?;
+        tadd(5, t_ix);
 
+        let t_sp = std::time::Instant::now();
         if !tx.is_coinbase() {
             for (vin, inp) in tx.inputs.iter().enumerate() {
                 let missing = || {
@@ -1181,7 +1200,9 @@ fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>
                 }
             }
         }
+        tadd(4, t_sp);
         prevouts.push(pv);
+        let t_out = std::time::Instant::now();
         // Block 0's outputs are never coins (Bitcoin-family rule).
         if height == 0 {
             continue;
@@ -1208,6 +1229,7 @@ fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>
                 }
             }
         }
+        tadd(5, t_out);
     }
 
     // Protocol indexes, in the same commit; only those exactly caught up to the parent.
@@ -1236,8 +1258,9 @@ fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>
     let new_tip = Tip { hash, height, b };
     l.put(STATE, &k_state(c, "tip"), &encode_tip(&new_tip))?;
 
+    let t_undo = std::time::Instant::now();
     let ops = l.into_ops();
-    if height > 0 {
+    if height > 0 && undo {
         w.put(UNDO, &k_block(c, b), &undo::encode(&ops))?;
     }
     // Drop the undo record that just left the window.
@@ -1246,6 +1269,7 @@ fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>
             w.del(UNDO, &k_block(c, be_u32(&v, 32)))?;
         }
     }
+    tadd(6, t_undo);
     Ok(new_tip)
 }
 

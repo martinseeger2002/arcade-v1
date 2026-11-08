@@ -66,6 +66,8 @@ pub struct Syncer<'a> {
 
 /// Blocks behind the best header from which address rows are logged and built later.
 pub const DEFER_BEHIND: u32 = 20_000;
+// Deferred blocks keep no undo record: they must lie beyond the reorg window.
+const _: () = assert!(crate::db::UNDO_DEPTH < DEFER_BEHIND);
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Progress {
@@ -322,6 +324,7 @@ impl<'a> Syncer<'a> {
                     blocks.push(b);
                 }
                 let before = ChainDb::connect_times();
+                let parts0 = ChainDb::connect_parts();
                 let t_w = std::time::Instant::now();
                 // One commit per run of blocks up to COMMIT_TXS transactions: a commit that
                 // changes more pages than the database keeps in memory spills them to disk
@@ -341,6 +344,13 @@ impl<'a> Syncer<'a> {
                 let wrote = t_w.elapsed();
                 let after = ChainDb::connect_times();
                 if std::env::var_os("ARCADE_SYNC_TIMES").is_some() {
+                    let parts = ChainDb::connect_parts();
+                    let d = |i: usize| (parts[i] - parts0[i]) as f64 / 1e9;
+                    let inner = d(0) + d(1) + d(2) + d(3);
+                    eprintln!(
+                        "  write parts: blocks {:.1}s · spends {:.1}s · new coins + tx index {:.1}s · undo {:.1}s · commit and the rest {:.1}s",
+                        d(0), d(1), d(2), d(3), (wrote.as_secs_f64() - inner).max(0.0)
+                    );
                     eprintln!(
                         "sync {} at {}: {} blocks, {} txs · waiting for them {:.2}s · checks {:.2}s · write {:.2}s (indexes {:.2}s){}",
                         self.params.key, height, blocks.len(), ntx, got.as_secs_f64(), checked.as_secs_f64(), wrote.as_secs_f64(),
