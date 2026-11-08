@@ -68,7 +68,7 @@ const JOB_BYTES: usize = 24 << 20;
 /// Blocks per job for the recent block size (a small first job measures it).
 fn job_len(avg_block: usize) -> u32 {
     if avg_block == 0 {
-        return 20;
+        return 100;
     }
     ((JOB_BYTES / avg_block.max(1)) as u32).clamp(10, JOB)
 }
@@ -109,9 +109,16 @@ pub struct Prefetched<'p> {
     /// Headers of jobs pulled but not yet handed to the syncer, in order. A job pulled early
     /// (because a block batch needed it) must still give its headers, or nothing after links.
     heads: VecDeque<HeaderEntry>,
+    last_diag: Instant,
 }
 
 impl Prefetched<'_> {
+    /// Whether the next job in height order is already finished.
+    fn ready_next(&self) -> bool {
+        let st = self.pool.s.lock().unwrap();
+        st.ready.contains_key(&st.want)
+    }
+
     /// The next finished job in height order (waits up to `wait`): its headers, in order.
     fn pull(&mut self, wait: Duration) -> Result<usize, String> {
         let deadline = Instant::now() + wait;
@@ -130,6 +137,16 @@ impl Prefetched<'_> {
                     self.cache.insert(b.id, raw);
                 }
                 return Ok(n);
+            }
+            if std::env::var_os("ARCADE_SYNC_TIMES").is_some() && self.last_diag.elapsed() > Duration::from_secs(30) {
+                self.last_diag = Instant::now();
+                let first_ready = st.ready.keys().next().copied();
+                let fl = st.inflight.get(&want).map(|(h, since, d)| format!("{} blocks for {:.0}s{}", h.len(), since.elapsed().as_secs_f64(), if *d { " (2 copies)" } else { "" }));
+                let queued = st.queue.iter().any(|j| j.start == want);
+                eprintln!(
+                    "  psync waiting for {want}: in flight {} · queued {queued} · ready {} jobs from {:?} ({} MB) · queue {} (front {:?}) · workers {} (p2p {})",
+                    fl.unwrap_or_else(|| "no".into()), st.ready.len(), first_ready, st.ready_bytes >> 20, st.queue.len(), st.queue.front().map(|j| j.start), st.workers, st.p2p
+                );
             }
             if st.workers == 0 && Instant::now() + Duration::from_secs(150) > deadline {
                 // Nobody working for a while (the recruiter had 30 s to bring someone).
@@ -157,6 +174,11 @@ impl BlockSource for Prefetched<'_> {
     fn get_headers(&mut self, _locator: &[Hash256]) -> Result<Vec<HeaderEntry>, String> {
         if self.heads.is_empty() {
             self.pull(Duration::from_secs(420))?;
+        }
+        // Then every job already finished in order, so a round stores a big batch even when
+        // jobs are small (one job a round made many tiny commits).
+        while self.heads.len() < 2000 && self.ready_next() {
+            self.pull(Duration::from_secs(1))?;
         }
         // Everything pulled so far, in order (the syncer takes up to 2,000 per round).
         let n = self.heads.len().min(2000);
@@ -416,7 +438,7 @@ pub fn run(node: &Node, p: &'static ChainParams, syncer: &Syncer, top: u32, on_p
             }
         });
         // The ordered side, on this thread.
-        let mut pre = Prefetched { pool: &pool, cache: HashMap::new(), p, heads: VecDeque::new() };
+        let mut pre = Prefetched { pool: &pool, cache: HashMap::new(), p, heads: VecDeque::new(), last_diag: Instant::now() };
         let mut last_note = Instant::now();
         let mut stalls = 0;
         let (mut waited, mut stored) = (Duration::ZERO, Duration::ZERO);

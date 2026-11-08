@@ -81,6 +81,11 @@ pub fn run(node: std::sync::Arc<Node>) {
     // Not right after a start: chains are usually catching up then.
     std::thread::sleep(Duration::from_secs(15 * 60));
     loop {
+        // Measuring reads every table end to end: not while a chain is catching up (it
+        // competes for the disk and pushes the sync's pages out of memory).
+        while catching_up(&node) {
+            std::thread::sleep(Duration::from_secs(600));
+        }
         match measure(&node) {
             Ok(m) => {
                 *node.my_sizes.lock().unwrap() = m;
@@ -201,4 +206,10 @@ pub fn for_chain(node: &Node, key: &str) -> Value {
         "copies": crate::shares::copies(),
         "indexes": ix,
     })
+}
+
+fn catching_up(node: &Node) -> bool {
+    let mut chains: Vec<&'static arcade_chain::params::ChainParams> = vec![node.params];
+    chains.extend(node.extra.lock().unwrap().values().map(|r| r.params));
+    chains.iter().any(|p| node.far_behind(p))
 }
