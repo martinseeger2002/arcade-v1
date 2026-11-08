@@ -152,6 +152,7 @@ impl Node {
     /// Remember a coin peer that worked (shared with the mesh on every link).
     pub fn note_coin_peer(&self, chain_key: &str, addr: &str) {
         self.coin_peers.lock().unwrap().entry(chain_key.to_string()).or_default().insert(addr.to_string());
+        crate::peerbook::ok(self, chain_key, addr);
     }
 
     /// Coin peers for a chain: shared and learned ones first, then fixed peers, then DNS seeds.
@@ -165,7 +166,20 @@ impl Node {
         best.max(told).saturating_sub(tip) > arcade_chaindb::sync::DEFER_BEHIND
     }
 
+    /// Coin peers to try, best first: the address book's (worked before, then newly heard of),
+    /// then shared, fixed and seeded ones. Peers resting after failures are left out.
     pub fn coin_candidates(&self, p: &arcade_chain::params::ChainParams) -> Vec<String> {
+        let mut v = crate::peerbook::candidates(self, p.net);
+        for a in self.coin_candidates_static(p) {
+            if !v.contains(&a) && !crate::peerbook::is_resting(self, p.net, &a) {
+                v.push(a);
+            }
+        }
+        v
+    }
+
+    /// Shared, fixed and DNS-seeded peers (no address book).
+    pub fn coin_candidates_static(&self, p: &arcade_chain::params::ChainParams) -> Vec<String> {
         use std::net::ToSocketAddrs;
         let mut v: Vec<String> = self.coin_peers.lock().unwrap().get(p.net).map(|s| s.iter().cloned().collect()).unwrap_or_default();
         for f in p.fixed_peers {

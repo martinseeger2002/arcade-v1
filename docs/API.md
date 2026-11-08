@@ -214,6 +214,7 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 
 | method | route | needs | params | what |
 |---|---|---|---|---|
+| `chains.peers` | `/api/v1/chains/peers` | read | key | A chain's P2P address book: nodes known, working in the last day, resting after failures; the working ones and the next to try. |
 | `chains.list` | `/api/v1/chains/list` | public | — | Every chain V1.0 knows, installed or not, with sizes reported by arcades. |
 | `chains.status` | `/api/v1/chains/status` | public | key | One chain's staged progress. |
 | `chains.offers` | `/api/v1/chains/offers` | public | — | Chains other arcades offer over the mesh. |
@@ -224,6 +225,15 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 | `chains.index_add` | `/api/v1/chains/index_add` | admin | key, index | Add an index to a chain. |
 | `chains.index_remove` | `/api/v1/chains/index_remove` | admin | key, index | Remove an index from a chain. |
 | `chains.remove` | `/api/v1/chains/remove` | admin | key | Remove a chain and its data. |
+
+### Borrow
+
+| method | route | needs | params | what |
+|---|---|---|---|---|
+| `borrow.status` | `/api/v1/borrow/status` | read | — | Borrowed coins: the switches, and per chain its lenders, tip, floor, tip mismatch and your balance. |
+| `borrow.set` | `/api/v1/borrow/set` | admin | on, chain? | Turn borrowing on or off: for every coin (no chain) or for one chain (off removes its borrowed data). |
+| `borrow.coins` | `/api/v1/borrow/coins` | read | chain | Your coins on a borrowed chain (from blocks read since the floor, and the lender's coin scan). |
+| `borrow.send` | `/api/v1/borrow/send` | local | chain, to, amount, from?, send? | Pay amount (satoshis) on a borrowed chain, signed here; send: true broadcasts to every lender, otherwise only built and shown. |
 
 ### Mining
 

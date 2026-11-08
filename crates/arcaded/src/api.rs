@@ -419,6 +419,11 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         }
         c if c.starts_with("explorer.") => crate::explorer::handle(node, c, &req),
         "chains.offers" => Ok(json!(node.offers.lock().unwrap().iter().map(|(id, o)| json!({"node": id, "addr": o.addr, "at": o.at, "bk": o.bk, "cr": o.cr})).collect::<Vec<_>>())),
+        "chains.peers" => {
+            let p = arcade_chain::params::by_key(&s("key").ok_or("key required")?).ok_or("unknown chain")?;
+            let (known, good, resting) = crate::peerbook::summary(node, p.net);
+            Ok(json!({"chain": p.key, "known": known, "working": good, "resting": resting, "good": crate::peerbook::good(node, p.net, 50), "next": node.coin_candidates(p).into_iter().take(10).collect::<Vec<_>>()}))
+        }
         "chains.list" => Ok(crate::chains::list(node)),
         "chains.sizes" => {
             // Measure now (instead of waiting for the six-hourly pass) and show the result.

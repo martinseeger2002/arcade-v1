@@ -368,7 +368,7 @@ pub static FLOPCOIN_MAIN: ChainParams = ChainParams {
     bip44_coin_type: 3,
     protocol_version: 70016,
     dns_seeds: &["seed.flopcoin.net", "seed2.flopcoin.net"],
-    fixed_peers: &["216.45.61.204:32552"],
+    fixed_peers: &["216.45.61.204:32552", "204.12.227.26:32552", "23.95.140.13:32552"],
     checkpoints: &[],
     coinbase_maturity: 240,
     index_start: 914_000,
@@ -557,6 +557,18 @@ pub static ALL_CHAINS: &[&ChainParams] =
     ];
 
 /// A chain by its mesh name (what the existing arcades call it).
+impl ChainParams {
+    /// The user agent sent in the P2P version message. Flopcoin Core 2.0 drops any peer whose
+    /// user agent isn't "/Floptoshi:X.Y.Z/" (1.3 or later) right after the handshake
+    /// (net_processing.cpp IsCompatibleVersion, from its V3 fork at 111,000).
+    pub fn user_agent(&self) -> &'static str {
+        match self.key {
+            "flop" => "/Floptoshi:2.0.0/",
+            _ => "/arcade:1.0.0/",
+        }
+    }
+}
+
 pub fn by_net(net: &str) -> Option<&'static ChainParams> {
     ALL_CHAINS.iter().copied().find(|p| p.net == net)
 }

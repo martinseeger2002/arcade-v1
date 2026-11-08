@@ -31,6 +31,7 @@ mod msgsvc;
 mod grpsvc;
 mod feedsvc;
 mod node;
+mod peerbook;
 mod psync;
 mod realtime;
 mod rpc;
@@ -153,6 +154,10 @@ fn main() {
     {
         let n = node.clone();
         std::thread::Builder::new().name("rooms".into()).spawn(move || realtime::run(n)).unwrap();
+    }
+    {
+        let n = node.clone();
+        std::thread::Builder::new().name("peerbook".into()).spawn(move || peerbook::run(n)).unwrap();
     }
     {
         let n = node.clone();

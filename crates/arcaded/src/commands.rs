@@ -153,6 +153,7 @@ cmds! {
     "explorer.tag" Public "chain?, tag" "A @tag's page: addresses (with linked and imported wallets) and balances.";
     "explorer.search" Public "chain?, q" "Search: block, tx, address, @tag, inscription, token, name.";
     // Chains
+    "chains.peers" Read "key" "A chain's P2P address book: nodes known, working in the last day, resting after failures; the working ones and the next to try.";
     "chains.list" Public "" "Every chain V1.0 knows, installed or not, with sizes reported by arcades.";
     "chains.status" Public "key" "One chain's staged progress.";
     "chains.offers" Public "" "Chains other arcades offer over the mesh.";

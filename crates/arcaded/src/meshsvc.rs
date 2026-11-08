@@ -45,13 +45,27 @@ fn share(node: &Node, link: &mut Link) -> Result<(), LinkError> {
     if !a.is_empty() {
         link.send(&Frame::new(json!({"t": "addrs", "a": a})))?;
     }
-    let nets: serde_json::Map<String, Value> = node
+    let mut nets: serde_json::Map<String, Value> = node
         .coin_peers
         .lock()
         .unwrap()
         .iter()
         .map(|(k, v)| (k.clone(), json!(v.iter().take(30).collect::<Vec<_>>())))
         .collect();
+    // Peers that worked for us in the last day come first.
+    for p in arcade_chain::params::ALL_CHAINS.iter() {
+        let good = crate::peerbook::good(node, p.net, 30);
+        if good.is_empty() {
+            continue;
+        }
+        let mut v: Vec<Value> = good.into_iter().map(Value::String).collect();
+        for x in nets.get(p.net).and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            if v.len() < 30 && !v.contains(&x) {
+                v.push(x);
+            }
+        }
+        nets.insert(p.net.to_string(), Value::Array(v));
+    }
     if !nets.is_empty() {
         link.send(&Frame::new(json!({"t": "pp", "nets": nets})))?;
     }
@@ -130,16 +144,19 @@ pub fn chain_announced(node: &Arc<Node>) -> usize {
 fn on_coin_peers(node: &Node, h: &Value) {
     let Some(nets) = h["nets"].as_object() else { return };
     for (key, list) in nets {
-        if arcade_chain::params::by_key(key).is_none() {
-            continue;
-        }
+        let Some(p) = arcade_chain::params::by_net(key).or_else(|| arcade_chain::params::by_key(key)) else { continue };
+        let mut learned = Vec::new();
         for a in list.as_array().into_iter().flatten().take(30) {
             if let Some(s) = a.as_str() {
-                if s.parse::<std::net::SocketAddr>().is_ok() {
-                    node.note_coin_peer(key, s);
+                if let Ok(sa) = s.parse::<std::net::SocketAddr>() {
+                    if arcade_chain::p2p::public_ip(&sa.ip()) {
+                        node.coin_peers.lock().unwrap().entry(key.clone()).or_default().insert(s.to_string());
+                        learned.push((s.to_string(), arcade_app::now()));
+                    }
                 }
             }
         }
+        crate::peerbook::learn(node, p.net, &learned, "mesh");
     }
 }
 

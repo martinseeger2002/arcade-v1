@@ -85,6 +85,39 @@ fn net_addr(out: &mut Vec<u8>, addr: Option<SocketAddr>) {
     out.extend_from_slice(&port.to_be_bytes());
 }
 
+/// An addr message: (address, last seen) for each public IPv4/IPv6 entry.
+pub fn parse_addr(payload: &[u8]) -> Vec<(SocketAddr, u32)> {
+    let mut r = Reader::new(payload);
+    let Ok(n) = r.varint() else { return Vec::new() };
+    let mut out = Vec::new();
+    for _ in 0..n.min(1000) {
+        let (Ok(time), Ok(_services), Ok(ip), Ok(port)) = (r.u32(), r.u64(), r.bytes(16), r.bytes(2)) else { break };
+        let ip: [u8; 16] = ip.try_into().unwrap();
+        let port = u16::from_be_bytes([port[0], port[1]]);
+        let v6 = std::net::Ipv6Addr::from(ip);
+        let ip: std::net::IpAddr = match v6.to_ipv4_mapped() {
+            Some(v4) => v4.into(),
+            None => v6.into(),
+        };
+        if port == 0 || !public_ip(&ip) {
+            continue;
+        }
+        out.push((SocketAddr::new(ip, port), time));
+    }
+    out
+}
+
+/// A routable address (not private, loopback, link-local, multicast or documentation).
+pub fn public_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(a) => !(a.is_private() || a.is_loopback() || a.is_link_local() || a.is_unspecified() || a.is_broadcast() || a.is_multicast() || a.is_documentation() || a.octets()[0] == 100 && (a.octets()[1] & 0xc0) == 64 || a.octets()[0] == 0),
+        std::net::IpAddr::V6(a) => {
+            let s = a.segments();
+            !(a.is_loopback() || a.is_unspecified() || a.is_multicast() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || s[0] == 0x2001 && s[1] == 0x0db8 || s[0] == 0xfd87)
+        }
+    }
+}
+
 pub fn version_payload(params: &ChainParams, peer: Option<SocketAddr>, start_height: i32, relay: bool) -> Vec<u8> {
     let mut p = Vec::new();
     p.extend_from_slice(&params.protocol_version.to_le_bytes());
@@ -95,7 +128,7 @@ pub fn version_payload(params: &ChainParams, peer: Option<SocketAddr>, start_hei
     net_addr(&mut p, None);
     let nonce: u64 = now as u64 ^ 0x5eed_a5ca_de00_0001 ^ (std::process::id() as u64) << 32;
     p.extend_from_slice(&nonce.to_le_bytes());
-    let ua = b"/arcade:1.0.0/";
+    let ua = params.user_agent().as_bytes();
     write_varint(&mut p, ua.len() as u64);
     p.extend_from_slice(ua);
     p.extend_from_slice(&start_height.to_le_bytes());
@@ -281,6 +314,36 @@ impl Peer {
         Ok(out)
     }
 
+    /// Ask the peer which other nodes it knows (getaddr) and collect the addresses it sends
+    /// within `wait` (Core answers with up to 1,000, in one or more addr messages).
+    pub fn get_addrs(&mut self, wait: Duration) -> Result<Vec<(SocketAddr, u32)>> {
+        self.send("getaddr", &[])?;
+        let deadline = std::time::Instant::now() + wait;
+        let mut out = Vec::new();
+        let old = self.stream.read_timeout().ok().flatten();
+        while std::time::Instant::now() < deadline {
+            let left = deadline.saturating_duration_since(std::time::Instant::now()).max(Duration::from_millis(50));
+            self.stream.set_read_timeout(Some(left))?;
+            match self.recv() {
+                Ok(m) if m.command == "addr" => {
+                    out.extend(parse_addr(&m.payload));
+                    // A big answer is the reply to getaddr; small ones are gossip.
+                    if out.len() >= 100 {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(P2pError::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break,
+                Err(e) => {
+                    let _ = self.stream.set_read_timeout(old);
+                    return if out.is_empty() { Err(e) } else { Ok(out) };
+                }
+            }
+        }
+        let _ = self.stream.set_read_timeout(old);
+        Ok(out)
+    }
+
     pub fn set_read_timeout(&self, d: Duration) -> Result<()> {
         self.stream.set_read_timeout(Some(d))?;
         Ok(())
@@ -300,6 +363,19 @@ impl Peer {
 mod tests {
     use super::*;
     use crate::params::PEPECOIN_TEST;
+
+    #[test]
+    fn addr_parses_public_only() {
+        let mut p = vec![3u8];
+        for (ip, port) in [([0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 8, 8, 4, 4], 22556u16), ([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 1, 2], 22556), ([0x26, 0x05, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 32552)] {
+            p.extend_from_slice(&1_700_000_000u32.to_le_bytes());
+            p.extend_from_slice(&1u64.to_le_bytes());
+            p.extend_from_slice(&ip);
+            p.extend_from_slice(&port.to_be_bytes());
+        }
+        let v: Vec<String> = parse_addr(&p).into_iter().map(|(a, _)| a.to_string()).collect();
+        assert_eq!(v, vec!["8.8.4.4:22556".to_string(), "[2605:1::1]:32552".to_string()]);
+    }
 
     #[test]
     fn message_roundtrip() {
