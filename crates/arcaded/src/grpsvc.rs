@@ -126,15 +126,21 @@ fn members_of(node: &Node, names: &[String]) -> Result<Vec<Value>, String> {
 
 /// Seal and send one invite to every member (and ourselves), from our key.
 fn send_invites(node: &Node, g: &Value) -> Result<(Vec<String>, u64), String> {
+    send_invites_first(node, g, &[])
+}
+
+/// As send_invites, with these members' invites first (people just added).
+fn send_invites_first(node: &Node, g: &Value, first: &[String]) -> Result<(Vec<String>, u64), String> {
     let k = crate::msgsvc::keys(node)?;
     let text = format!("{INVITE}{}", g);
     let body = Body::text(&text).encode();
     let mut payloads = Vec::new();
     let me = hex::encode(k.public_bytes());
     let mut keys: Vec<String> = g["members"].as_array().cloned().unwrap_or_default().iter().filter_map(|m| m["key"].as_str().map(String::from)).collect();
-    if !keys.contains(&me) {
-        keys.push(me);
-    }
+    keys.retain(|k| *k != me);
+    // Newcomers first, then everyone else, our own copy last.
+    keys.sort_by_key(|k| !first.contains(k));
+    keys.push(me);
     for key in keys {
         let pk: [u8; 32] = hex::decode(&key).ok().and_then(|b| b.try_into().ok()).ok_or("bad member key")?;
         payloads.extend(env::private(&k.secret, &crypto_box::PublicKey::from(pk), &body));
@@ -391,8 +397,10 @@ pub fn add(node: &Node, id: &str, names: &[String]) -> Result<Value, String> {
         return Err("at most 50 members at a time".into());
     }
     let mut members = g["members"].as_array().cloned().unwrap_or_default();
+    let mut added = Vec::new();
     for m in members_of(node, names)? {
         if !members.iter().any(|x| x["key"] == m["key"]) {
+            added.push(m["key"].as_str().unwrap_or("").to_string());
             members.push(m);
         }
     }
@@ -404,7 +412,7 @@ pub fn add(node: &Node, id: &str, names: &[String]) -> Result<Value, String> {
         o.remove("left");
         o.remove("mine_left");
     }
-    let (txids, fee) = send_invites(node, &sent)?;
+    let (txids, fee) = send_invites_first(node, &sent, &added)?;
     put(node, &g)?;
     let mut info = g.clone();
     if let Some(o) = info.as_object_mut() {

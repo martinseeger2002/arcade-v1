@@ -24,6 +24,7 @@ pub enum BuildError {
     PayloadTooLarge(usize),
 }
 
+#[derive(Debug, Clone)]
 pub struct TxOutSpec {
     pub value: u64,
     pub script: Vec<u8>,

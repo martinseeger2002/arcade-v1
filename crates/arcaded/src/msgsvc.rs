@@ -522,6 +522,11 @@ pub fn send_payloads(node: &Node, payloads: &[Vec<u8>]) -> Result<(Vec<String>, 
 }
 
 /// As send_payloads, with extra outputs on the first transaction (a tip's payment).
+fn coins_text(p: &arcade_chain::params::ChainParams, sats: u64) -> String {
+    let v = format!("{:.8}", sats as f64 / 1e8);
+    format!("{} {} coins", v.trim_end_matches('0').trim_end_matches('.'), p.name)
+}
+
 pub fn send_payloads_with(node: &Node, payloads: &[Vec<u8>], mut extra: Vec<arcade_wallet::tx::TxOutSpec>) -> Result<(Vec<String>, u64), String> {
     let p = node.params;
     let (_, _, sk) = sender_key(node)?;
@@ -529,6 +534,26 @@ pub fn send_payloads_with(node: &Node, payloads: &[Vec<u8>], mut extra: Vec<arca
     let script = arcade_wallet::keys::p2pkh_script_for(&pk);
     let mut txids = Vec::new();
     let mut fees = 0u64;
+    // Check the whole batch can be paid for before sending any of it: running out partway
+    // leaves some people with the message and others without (a group invite half sent).
+    if payloads.len() > 1 {
+        let coins = crate::claims::spendable(node, &script);
+        let have: u64 = coins.iter().map(|c| c.value).sum();
+        let mut need = 0u64;
+        for pl in payloads {
+            let tx = arcade_wallet::tx::build_arcade(p, &arcade_wallet::tx::any_data(pl), extra.clone(), &sk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST, arcade_app::now() as u32)
+                .map_err(|e| format!("could not build the message transaction: {e}"))?;
+            let ins: u64 = tx.inputs.iter().filter_map(|i| coins.iter().find(|c| c.outpoint == i.prevout).map(|c| c.value)).sum();
+            let back: u64 = tx.outputs.iter().filter(|o| o.script_pubkey == script).map(|o| o.value).sum();
+            need += ins.saturating_sub(back);
+        }
+        if need > have {
+            return Err(format!(
+                "this needs about {} in {} transactions and the wallet has {}: nothing was sent",
+                coins_text(p, need), payloads.len(), coins_text(p, have)
+            ));
+        }
+    }
     for pl in payloads {
         let coins = crate::claims::spendable(node, &script);
         let tx = arcade_wallet::tx::build_arcade(p, &arcade_wallet::tx::any_data(pl), std::mem::take(&mut extra), &sk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST, arcade_app::now() as u32)
