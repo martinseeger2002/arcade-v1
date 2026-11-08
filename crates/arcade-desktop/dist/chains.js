@@ -53,7 +53,7 @@
   // switch, and Install… or Manage….
   function coinRow(c, bc, globalOn) {
     bc = bc || {};
-    const borrowed = !c.installed && bc.borrowed;
+    const borrowed = !!bc.borrowed;
     const el = document.createElement("div");
     el.className = "brow" + (c.installed || borrowed ? "" : " off");
     const info = document.createElement("div"); info.className = "bi";
@@ -66,6 +66,11 @@
       const pct = Math.floor(c.overall || 0);
       d.textContent = c.home ? `Installed · home chain · ${c.mode} · ${(c.indexes || []).join(", ")}` : `Installed · ${pct}% · ${String(c.state || "").split(" [")[0]} · ${c.mode}`;
       if (!c.home && pct < 100) { const bar = document.createElement("div"); bar.className = "bar"; const i = document.createElement("i"); i.style.width = pct + "%"; bar.append(i); info.append(bar); }
+      if (borrowed) {
+        const nl = (bc.lenders || []).length;
+        l.textContent = `Until it catches up, the borrowed copy answers balances and sends (${nl} lender${nl === 1 ? "" : "s"}, ${String(bc.state || "").replace(/^Borrowed · /, "")}).`;
+        info.append(l);
+      }
     } else if (borrowed) {
       d.textContent = `${bc.state || "Borrowed"} · from block ${(bc.floor ?? 0).toLocaleString()} · ${bc.coins || 0} coin${bc.coins === 1 ? "" : "s"}${bc.scan ? " · " + bc.scan : ""}`;
       l.textContent = (bc.lenders || []).length ? "Lenders: " + bc.lenders.map((x) => `${x.addr} (tip ${(x.tip || 0).toLocaleString()}${x.fails ? `, ${x.fails} recent failure${x.fails === 1 ? "" : "s"}` : ""})`).join(" · ") : "No lender right now";

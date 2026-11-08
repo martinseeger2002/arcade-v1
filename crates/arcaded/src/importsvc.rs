@@ -128,7 +128,8 @@ pub fn list(node: &Node) -> Value {
         .map(|mut e| {
             let bal = by_key(e["chain"].as_str().unwrap_or("")).and_then(|p| {
                 let installed = p.chain_no == node.params.chain_no || node.extra.lock().unwrap().contains_key(p.key);
-                let borrowed = !installed && crate::borrow::is_borrowed(p.key);
+                // A borrowed copy answers while an installed chain catches up.
+                let borrowed = crate::borrow::is_borrowed(p.key);
                 if !borrowed && (!installed || !node.chain.addresses_on(p.chain_no).unwrap_or(false)) {
                     return None;
                 }

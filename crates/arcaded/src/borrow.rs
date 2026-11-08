@@ -13,7 +13,8 @@
 //! a checked block) before it is kept. Tips, unspent status (gettxout) and the mempool are taken
 //! on trust; with several lenders their tips are compared and a disagreement is shown.
 //!
-//! An installed chain (Chains & Coins) always wins: nothing is borrowed for it.
+//! An installed chain (Chains & Coins) takes over once it is ready (caught up, its address
+//! rows built); until then its borrowed copy keeps running and answers balances and sends.
 
 use crate::node::Node;
 use arcade_chain::params::{by_key, by_net, check_block_work, check_header, ChainParams, PowCheck, ALL_CHAINS};
@@ -685,13 +686,28 @@ fn disconnect(node: &Node, p: &ChainParams) -> Result<bool, String> {
 
 // ---------------- following a borrowed chain ----------------
 
+/// An installed chain ready to take over from its borrowed copy: caught up to within 10 blocks
+/// of the best height anyone tells us (headers, peers, lenders), and its address rows built.
+pub fn installed_ready(node: &Node, p: &ChainParams) -> bool {
+    let run = node.extra.lock().unwrap().get(p.key).cloned();
+    let Some(run) = run else { return false };
+    let c = p.chain_no;
+    let tip = node.chain.tip(c).ok().flatten().map(|t| t.height).unwrap_or(0);
+    let best = node.chain.best_header(c).ok().flatten().and_then(|h| node.chain.header(c, &h).ok().flatten()).map(|r| r.height).unwrap_or(0);
+    let told = run.peer_tip.load(Ordering::Relaxed);
+    let lent = node.offers_for(p.key).iter().map(|o| o.3 as u32).max().unwrap_or(0);
+    let top = best.max(told).max(lent);
+    let addresses_ready = !node.chain.addresses_on(c).unwrap_or(true) || !node.chain.addresses_pending(c).unwrap_or(true);
+    tip > 0 && tip + 10 >= top && addresses_ready
+}
+
 /// Start, keep and stop borrowing per chain (called every 20 s and on every switch).
 pub fn manage(node: &Node) {
     let c = cfg(node);
     let installed: BTreeSet<String> = node.extra.lock().unwrap().keys().cloned().collect();
     for p in ALL_CHAINS.iter().copied() {
         let home = p.chain_no == node.params.chain_no;
-        let on = chain_on(&c, p.key) && !home && !installed.contains(p.key);
+        let on = chain_on(&c, p.key) && !home && !(installed.contains(p.key) && installed_ready(node, p));
         let running = ST.runs.lock().unwrap().get(p.key).cloned();
         match (on, running) {
             (true, None) => {
@@ -709,7 +725,7 @@ pub fn manage(node: &Node) {
             (false, Some(run)) => {
                 run.stop.store(true, Ordering::Relaxed);
                 ST.runs.lock().unwrap().remove(p.key);
-                let why = if installed.contains(p.key) { "it is installed now" } else { "switched off" };
+                let why = if installed.contains(p.key) { "its installed copy has caught up" } else { "switched off" };
                 let _ = node.app.event("borrow", &format!("stopped borrowing {} ({why}); its borrowed data is removed", p.name));
                 let n = node.self_arc();
                 let key = p.key;

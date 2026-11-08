@@ -78,7 +78,8 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             if keys.is_empty() && node.app.has_wallet().map_err(|e| e.to_string())? {
                 keys.push(node.app.tag_key(cp, 0).map_err(|e| e.to_string())?.0);
             }
-            let installed = (cp.chain_no == p.chain_no || node.extra.lock().unwrap().contains_key(cp.key)) && node.chain.addresses_on(cp.chain_no).unwrap_or(false);
+            // A borrowed copy answers while the installed one catches up.
+            let installed = !crate::borrow::is_borrowed(cp.key) && (cp.chain_no == p.chain_no || node.extra.lock().unwrap().contains_key(cp.key)) && node.chain.addresses_on(cp.chain_no).unwrap_or(false);
             Ok(json!(keys.iter().map(|k| {
                 let script = arcade_wallet::keys::p2pkh_script_for(&arcade_wallet::secp256k1::PublicKey::from_slice(&hex::decode(&k.pubkey).unwrap()).unwrap());
                 json!({"index": k.index, "address": k.address, "tag": if cp.chain_no == p.chain_no { k.tag.clone() } else { None },
@@ -100,7 +101,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             let mut v = crate::links::mine(node, &chain)?;
             // Borrowed chains: balances from the borrowed coins.
             if let Some(cp) = arcade_chain::params::by_key(&chain).filter(|cp| crate::borrow::is_borrowed(cp.key)) {
-                for l in v.iter_mut().filter(|l| l["balance"].is_null()) {
+                for l in v.iter_mut() {
                     if let Some(sc) = l["address"].as_str().and_then(|a| arcade_ledger::address::decode_base58check(a)).and_then(|(_, h)| <[u8; 20]>::try_from(h).ok()).map(|h| arcade_ledger::address::p2pkh_script(&h)) {
                         l["balance"] = json!(crate::borrow::balance(node, cp, &sc));
                     }
