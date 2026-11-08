@@ -62,13 +62,32 @@ fn open_app(app: tauri::AppHandle, id: String, title: String, frame: String) -> 
         .inner_size(1000.0, 720.0)
         .min_inner_size(320.0, 240.0)
         .build()
-        .map(|_| ())
+        .map(|w| heal(&w))
         .map_err(|e| e.to_string())
+}
+
+/// If a window's web process dies (it crashed, or the system ended it), reload the page instead
+/// of leaving the window blank.
+fn heal(w: &tauri::WebviewWindow) {
+    #[cfg(target_os = "linux")]
+    let _ = w.with_webview(|wv| {
+        use webkit2gtk::WebViewExt;
+        wv.inner().connect_web_process_terminated(|v, reason| {
+            eprintln!("arcade-desktop: web process ended ({reason:?}); reloading the page");
+            v.reload();
+        });
+    });
 }
 
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            {
+                use tauri::Manager;
+                if let Some(w) = app.get_webview_window("main") {
+                    heal(&w);
+                }
+            }
             // ARCADE_DEMO=chains: open the Chains & Coins mockup and run a sample install
             // (for screenshots).
             if std::env::var("ARCADE_DEMO").ok().as_deref() == Some("chains") {

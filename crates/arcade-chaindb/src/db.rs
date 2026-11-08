@@ -387,11 +387,14 @@ fn coin_c<R: Rd>(r: &R, params: &ChainParams, cc: &CoinCache, b: u32, p: u32, vo
 
 /// Write the cache to the database in sorted order, and mark the coins complete up to `tip`.
 fn flush_cache(w: &WriteTxn, c: u16, cc: &mut CoinCache, tip: &Tip) -> Result<()> {
+    let t0 = std::time::Instant::now();
+    let (n_coins, n_txs, n_spent, n_bs) = (cc.coins.len(), cc.txs.values().map(|v| v.len()).sum::<usize>(), cc.spent.len(), cc.by_script_del.len());
     let mut coins: Vec<(Vec<u8>, Vec<u8>)> = std::mem::take(&mut cc.coins).into_iter().collect();
     coins.sort_unstable();
     for (k, v) in &coins {
         w.put(OUTPUTS, k, v)?;
     }
+    let t_coins = t0.elapsed();
     let mut txs: Vec<([u8; 12], Vec<[u8; 8]>)> = std::mem::take(&mut cc.txs).into_iter().collect();
     txs.sort_unstable();
     for (t12, bps) in &txs {
@@ -400,17 +403,25 @@ fn flush_cache(w: &WriteTxn, c: u16, cc: &mut CoinCache, tip: &Tip) -> Result<()
             w.put(TXS, &k, bp)?;
         }
     }
+    let t_txs = t0.elapsed();
     let mut spent: Vec<Vec<u8>> = std::mem::take(&mut cc.spent).into_iter().collect();
     spent.sort_unstable();
     for k in &spent {
         w.del(OUTPUTS, k)?;
     }
+    let t_spent = t0.elapsed();
     let mut bs = std::mem::take(&mut cc.by_script_del);
     bs.sort_unstable();
     for k in &bs {
         w.del(BY_SCRIPT, k)?;
     }
     w.put(STATE, &k_state(c, "coins_at"), &encode_tip(tip))?;
+    if std::env::var_os("ARCADE_SYNC_TIMES").is_some() {
+        eprintln!(
+            "  flush parts: {n_coins} coins {:.1}s · {n_txs} tx index rows {:.1}s · {n_spent} older coins deleted {:.1}s · {n_bs} address rows deleted {:.1}s",
+            t_coins.as_secs_f64(), (t_txs - t_coins).as_secs_f64(), (t_spent - t_txs).as_secs_f64(), (t0.elapsed() - t_spent).as_secs_f64()
+        );
+    }
     cc.bytes = 0;
     cc.since = None;
     Ok(())
@@ -1194,6 +1205,15 @@ impl ChainDb {
             if addr == Addr::Log && !blocks.is_empty() {
                 w.put(STATE, &k_state(c, crate::addrbuild::PENDING), b"1")?;
             }
+            // Where the address log began: coins made since have no address row to delete
+            // (theirs was logged), so spending them skips that lookup.
+            let log_from: Option<u32> = if addr == Addr::Log {
+                let pre = k_chain(c);
+                let first = w.scan_prefix_limit(ADDR_LOG, &pre, 1)?.first().map(|(k, _)| be_u32(k, 2));
+                Some(first.unwrap_or_else(|| tip.map(|t| t.height + 1).unwrap_or(0)))
+            } else {
+                None
+            };
             let mut caches = self.caches.lock().unwrap();
             let cc = caches.entry(c).or_default();
             // Up near the tip again: the cache goes to the database first.
@@ -1203,7 +1223,7 @@ impl ChainDb {
                 }
             }
             for b in blocks {
-                tip = Some(connect_one(w, params, b, tip, &ixs, check, addr, !defer, if defer { Some(&mut *cc) } else { None })?);
+                tip = Some(connect_one(w, params, b, tip, &ixs, check, addr, !defer, if defer { Some(&mut *cc) } else { None }, log_from)?);
             }
             let t = tip.ok_or_else(|| other("nothing connected"))?;
             if !defer {
@@ -1301,6 +1321,7 @@ fn connect_one(
     addr: Addr,
     undo: bool,
     mut cache: Option<&mut CoinCache>,
+    log_from: Option<u32>,
 ) -> Result<Tip> {
     let c = params.chain_no;
     let hash = blk.hash();
@@ -1414,9 +1435,12 @@ fn connect_one(
                     Addr::Log => {
                         // A coin from before the log began has its address row in place
                         // already (a missing row costs a read, no write).
-                        match cache.as_deref_mut() {
-                            Some(cc) => cc.by_script_del.push(k_by_script(c, &sid, pb, pp, inp.prevout.vout)),
-                            None => l.del(BY_SCRIPT, &k_by_script(c, &sid, pb, pp, inp.prevout.vout))?,
+                        // Only coins from before the log began have an address row in place.
+                        if log_from.is_none_or(|f| coin.height < f) {
+                            match cache.as_deref_mut() {
+                                Some(cc) => cc.by_script_del.push(k_by_script(c, &sid, pb, pp, inp.prevout.vout)),
+                                None => l.del(BY_SCRIPT, &k_by_script(c, &sid, pb, pp, inp.prevout.vout))?,
+                            }
                         }
                         log(crate::addrbuild::SPEND, &ok, &sp)?;
                         log(crate::addrbuild::HIST, &k_hist(c, &sid, height, &t12), &crate::addrbuild::hist_val(0, coin.value))?;
