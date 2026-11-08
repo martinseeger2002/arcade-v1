@@ -34,7 +34,12 @@ pub const TABLES: [&str; 4] = [SCRIPT_HIST, BY_SCRIPT, SPENDS, ADDR_LOG];
 pub const HIST: u8 = b'H';
 pub const SPEND: u8 = b'S';
 pub const COIN: u8 = b'B';
-const KINDS: [(u8, &str); 3] = [(HIST, SCRIPT_HIST), (SPEND, SPENDS), (COIN, BY_SCRIPT)];
+/// A tx index row put off by the coin cache (a tx whose outputs were all spent before the
+/// cache flushed: nothing needs to find it until the chain has caught up).
+pub const TXROW: u8 = b'T';
+/// While a chain's log holds TXROW rows, some txs can't be found by id yet (STATE flag).
+pub const TXS_PENDING: &str = "txs_pending";
+const KINDS: [(u8, &str); 4] = [(HIST, SCRIPT_HIST), (SPEND, SPENDS), (COIN, BY_SCRIPT), (TXROW, TXS)];
 
 /// Bytes of rows sorted in memory per run file.
 const RUN_BYTES: usize = if cfg!(test) { 3000 } else { 512 << 20 };
@@ -105,6 +110,22 @@ impl ChainDb {
 
     /// Delete up to `max` address rows of a chain; 0 when none are left.
     pub fn clear_address_rows_batch(&self, c: u16, max: usize) -> Result<usize> {
+        // Tx index rows waiting in the log belong in the tx index, addresses or not.
+        let pre = k_chain(c);
+        let moved = self.store.write(|w| {
+            let mut n = 0usize;
+            for (k, v) in w.scan_prefix_limit(ADDR_LOG, &pre, max.max(1))? {
+                if v.first() == Some(&TXROW) {
+                    w.put(TXS, key_of(&v[1..]), val_of(&v[1..]))?;
+                    w.del(ADDR_LOG, &k)?;
+                    n += 1;
+                }
+            }
+            Ok(n)
+        })?;
+        if moved > 0 {
+            return Ok(moved);
+        }
         let t: Vec<String> = TABLES.iter().map(|s| s.to_string()).collect();
         self.clear_rows_batch(c, &t, max)
     }
@@ -159,11 +180,11 @@ impl ChainDb {
         let done = (|| {
             for (i, (kind, table)) in KINDS.iter().enumerate() {
                 let files: Vec<&PathBuf> = runs.iter().filter(|(k, _)| k == kind).map(|(_, p)| p).collect();
-                if !self.merge_into(c, *kind, table, &files, stop, &mut |s| note(format!("building addresses: step {} of 4, {s}", i + 2)))? {
+                if !self.merge_into(c, *kind, table, &files, stop, &mut |s| note(format!("building addresses: step {} of 6, {s}", i + 2)))? {
                     return Ok(false);
                 }
             }
-            note("building addresses: step 4 of 4, clearing the log".into());
+            note("building addresses: step 6 of 6, clearing the log".into());
             if backfill.is_some() {
                 self.store.write(|w| w.del(STATE, &k_state(c, BACKFILL)).map(|_| ()))?;
             }
@@ -182,15 +203,15 @@ impl ChainDb {
         use std::sync::Mutex;
         let c = params.chain_no;
         struct Acc {
-            bufs: [Vec<Vec<u8>>; 3],
+            bufs: [Vec<Vec<u8>>; 4],
             bytes: usize,
             files: Vec<(u8, PathBuf)>,
             done: u64,
         }
         let acc = Mutex::new(Acc { bufs: Default::default(), bytes: 0, files: std::mem::take(runs), done: 0 });
-        let push = |acc: &Mutex<Acc>, mut local: [Vec<Vec<u8>>; 3], bytes: usize, blocks: u64| -> Result<()> {
+        let push = |acc: &Mutex<Acc>, mut local: [Vec<Vec<u8>>; 4], bytes: usize, blocks: u64| -> Result<()> {
             let mut a = acc.lock().unwrap();
-            for i in 0..3 {
+            for i in 0..4 {
                 a.bufs[i].append(&mut local[i]);
             }
             a.bytes += bytes;
@@ -216,7 +237,7 @@ impl ChainDb {
                     return Ok(());
                 }
                 let to = (from + SPAN - 1).min(upto);
-                let mut local: [Vec<Vec<u8>>; 3] = Default::default();
+                let mut local: [Vec<Vec<u8>>; 4] = Default::default();
                 let mut bytes = 0usize;
                 self.store.read(|r| {
                     for h in from..=to {
@@ -339,7 +360,7 @@ impl ChainDb {
         let pre = k_chain(c);
         let first = self.store.read(|r| r.scan_prefix_limit(ADDR_LOG, &pre, 1))?.first().map(|(k, _)| be_u32(k, 2)).unwrap_or(0);
         let mut runs: Vec<(u8, PathBuf)> = Vec::new();
-        let mut bufs: [Vec<Vec<u8>>; 3] = Default::default();
+        let mut bufs: [Vec<Vec<u8>>; 4] = Default::default();
         let mut bytes = 0usize;
         let mut after: Option<Vec<u8>> = None;
         let mut rows = 0u64;
@@ -365,7 +386,7 @@ impl ChainDb {
                 rows += 1;
             }
             let h = be_u32(after.as_ref().unwrap(), 2).min(upto);
-            note(format!("building addresses: step 1 of 4, sorting the log ({rows} rows, block {} of {upto})", h.max(first)));
+            note(format!("building addresses: step 1 of 6, sorting the log ({rows} rows, block {} of {upto})", h.max(first)));
             if bytes >= RUN_BYTES {
                 flush_runs(c, "log", tmp, &mut bufs, &mut runs)?;
                 bytes = 0;
@@ -411,7 +432,7 @@ impl ChainDb {
                 heap.push(std::cmp::Reverse((key_of(&rec2).to_vec(), i, rec2)));
             }
             cur = Some(match cur.take() {
-                Some(prev) if key_of(&prev) == key.as_slice() => combine(kind, &prev, &rec),
+                Some(prev) if key_of(&prev) == key.as_slice() && kind != TXROW => combine(kind, &prev, &rec),
                 Some(prev) => {
                     batch.push(prev);
                     rec
@@ -425,7 +446,7 @@ impl ChainDb {
                 written += self.write_batch(c, kind, table, &batch)?;
                 batch.clear();
                 let pct = if total > 0 { read_bytes * 100 / total } else { 100 };
-                note(format!("{} {pct}% ({written} rows)", match kind { HIST => "address history", SPEND => "spends", _ => "address coins" }));
+                note(format!("{} {pct}% ({written} rows)", match kind { HIST => "address history", SPEND => "spends", TXROW => "transaction index", _ => "address coins" }));
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
@@ -497,6 +518,7 @@ impl ChainDb {
                 if n == 0 {
                     if page.is_empty() {
                         w.del(STATE, &k_state(c, PENDING))?;
+                        w.del(STATE, &k_state(c, TXS_PENDING))?;
                     }
                     return Ok(false);
                 }
@@ -510,7 +532,7 @@ impl ChainDb {
 }
 
 /// Sort each kind's rows and write them as one run file each.
-fn flush_runs(c: u16, from: &str, tmp: &Path, bufs: &mut [Vec<Vec<u8>>; 3], runs: &mut Vec<(u8, PathBuf)>) -> Result<()> {
+fn flush_runs(c: u16, from: &str, tmp: &Path, bufs: &mut [Vec<Vec<u8>>; 4], runs: &mut Vec<(u8, PathBuf)>) -> Result<()> {
     for (i, (kind, _)) in KINDS.iter().enumerate() {
         let b = &mut bufs[i];
         if b.is_empty() {

@@ -313,6 +313,8 @@ pub(crate) struct CoinCache {
     by_script_del: Vec<Vec<u8>>,
     bytes: usize,
     since: Option<std::time::Instant>,
+    /// Addresses are being logged: tx index rows of fully spent txs can be logged too.
+    log_txs: bool,
 }
 
 impl CoinCache {
@@ -397,11 +399,33 @@ fn flush_cache(w: &WriteTxn, c: u16, cc: &mut CoinCache, tip: &Tip) -> Result<()
     let t_coins = t0.elapsed();
     let mut txs: Vec<([u8; 12], Vec<[u8; 8]>)> = std::mem::take(&mut cc.txs).into_iter().collect();
     txs.sort_unstable();
+    // A tx with a coin left is written now (a later spend must find it); one whose outputs
+    // were all spent in the cache is logged and indexed after the catch-up, in one sorted
+    // pass with the addresses (most of a busy stretch: each would be a random write now).
+    let left: std::collections::HashSet<(u32, u32)> =
+        if cc.log_txs { coins.iter().map(|(k, _)| (be_u32(k, 2), be_u32(k, 6))).collect() } else { Default::default() };
+    let mut logged = 0u32;
     for (t12, bps) in &txs {
         let k = k_txs(c, t12);
         for bp in bps {
-            w.put(TXS, &k, bp)?;
+            if cc.log_txs && !left.contains(&(be_u32(bp, 0), be_u32(bp, 4))) {
+                let mut lk = k_chain(c);
+                lk.extend_from_slice(&tip.height.to_be_bytes());
+                lk.extend_from_slice(&(0x8000_0000u32 + logged).to_be_bytes());
+                let mut v = Vec::with_capacity(3 + k.len() + 8);
+                v.push(crate::addrbuild::TXROW);
+                v.extend_from_slice(&(k.len() as u16).to_be_bytes());
+                v.extend_from_slice(&k);
+                v.extend_from_slice(bp);
+                w.put(ADDR_LOG, &lk, &v)?;
+                logged += 1;
+            } else {
+                w.put(TXS, &k, bp)?;
+            }
         }
+    }
+    if logged > 0 {
+        w.put(STATE, &k_state(c, crate::addrbuild::TXS_PENDING), b"1")?;
     }
     let t_txs = t0.elapsed();
     let mut spent: Vec<Vec<u8>> = std::mem::take(&mut cc.spent).into_iter().collect();
@@ -418,7 +442,7 @@ fn flush_cache(w: &WriteTxn, c: u16, cc: &mut CoinCache, tip: &Tip) -> Result<()
     w.put(STATE, &k_state(c, "coins_at"), &encode_tip(tip))?;
     if std::env::var_os("ARCADE_SYNC_TIMES").is_some() {
         eprintln!(
-            "  flush parts: {n_coins} coins {:.1}s · {n_txs} tx index rows {:.1}s · {n_spent} older coins deleted {:.1}s · {n_bs} address rows deleted {:.1}s",
+            "  flush parts: {n_coins} coins {:.1}s · {n_txs} tx index rows ({logged} put off) {:.1}s · {n_spent} older coins deleted {:.1}s · {n_bs} address rows deleted {:.1}s",
             t_coins.as_secs_f64(), (t_txs - t_coins).as_secs_f64(), (t_spent - t_txs).as_secs_f64(), (t0.elapsed() - t_spent).as_secs_f64()
         );
     }
@@ -603,6 +627,10 @@ impl ChainDb {
         let ix = self.indexers.read().unwrap().iter().find(|(ch, i)| *ch == c && i.name() == name).map(|(_, i)| i.clone())
             .ok_or_else(|| other(format!("no indexer {name}")))?;
         let Some(tip) = self.tip(c)? else { return Ok(0) };
+        // Tx index rows still in the log: protocol indexes look txs up by id; wait for them.
+        if self.store.read(|r| r.get(STATE, &k_state(c, crate::addrbuild::TXS_PENDING)))?.is_some() {
+            return Ok(0);
+        }
         let start = match self.indexed_to(c, name)? {
             Some(h) => h + 1,
             None => ix.start_height(params),
@@ -1216,6 +1244,9 @@ impl ChainDb {
             };
             let mut caches = self.caches.lock().unwrap();
             let cc = caches.entry(c).or_default();
+            if defer {
+                cc.log_txs = addr == Addr::Log;
+            }
             // Up near the tip again: the cache goes to the database first.
             if !defer && !cc.is_empty() {
                 if let Some(t) = tip {

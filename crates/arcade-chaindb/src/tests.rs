@@ -470,6 +470,10 @@ fn coin_cache_matches_direct_and_survives_a_crash() {
     assert!(!f.db.coins_settled(c), "the cache holds the stretch");
     assert!(f.db.store.read(|r| r.scan_prefix(OUTPUTS, b"")).unwrap().len() < 3, "nothing but genesis's coin written yet");
     f.db.flush_coins(c).unwrap();
+    assert!(f.db.store.read(|r| r.get(STATE, &k_state(c, crate::addrbuild::TXS_PENDING))).unwrap().is_some(), "spent txs' index rows put off");
+    assert_eq!(f.db.backfill(f.p, "none", 1).unwrap_or(0), 0);
+    build(&f);
+    assert!(f.db.store.read(|r| r.get(STATE, &k_state(c, crate::addrbuild::TXS_PENDING))).unwrap().is_none(), "built");
     let mut want = coin_tables(&direct.db);
     let got = coin_tables(&f.db);
     // BY_SCRIPT: the direct run writes address rows live; the deferred one only deletes old ones.
@@ -481,6 +485,7 @@ fn coin_cache_matches_direct_and_survives_a_crash() {
     f.db.connect_blocks_with(f.p, &blocks[..25], true, true).unwrap();
     f.db.connect_blocks(f.p, &blocks[25..]).unwrap();
     assert!(f.db.coins_settled(c));
+    build(&f);
     assert_eq!(coin_tables(&f.db)[..2], coin_tables(&direct.db)[..2], "cached then live = direct");
 
     // A crash before a flush: reopened, the tip is wound back to the last flush, and the
