@@ -743,6 +743,15 @@ pub fn manage(node: &Node) {
 /// The borrowing thread: started at boot, it keeps borrowed chains in step.
 pub fn start(node: Arc<Node>) {
     let _ = NODE.set(Arc::downgrade(&node));
+    // Lenders close a link that is silent for 45 s (the original's DEAD_AFTER): answer their
+    // pings every few seconds, whatever the chains' loops are busy with.
+    std::thread::Builder::new()
+        .name("borrow pings".into())
+        .spawn(|| loop {
+            std::thread::sleep(Duration::from_secs(5));
+            drain();
+        })
+        .unwrap();
     std::thread::Builder::new()
         .name("borrow".into())
         .spawn(move || {

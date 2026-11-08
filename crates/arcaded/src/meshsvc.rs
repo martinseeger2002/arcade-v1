@@ -23,7 +23,7 @@ fn now() -> u64 {
 }
 
 /// Most mesh links we dial out to (the existing arcade links "everyone" up to 48).
-pub const MAX_OUTBOUND: usize = 24;
+pub const MAX_OUTBOUND: usize = 48; // the original's EVERYONE_MAX
 
 /// Start a dialing thread for a mesh address unless one exists.
 pub fn dial(node: &Arc<Node>, addr: String) {

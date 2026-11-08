@@ -7,6 +7,7 @@
 
 mod accountsvc;
 mod addrsvc;
+mod announce;
 mod api;
 mod apikeys;
 mod borrow;
@@ -159,6 +160,10 @@ fn main() {
     {
         let n = node.clone();
         std::thread::Builder::new().name("peerbook".into()).spawn(move || peerbook::run(n)).unwrap();
+    }
+    if node.mesh_bootstrap {
+        let n = node.clone();
+        std::thread::Builder::new().name("announced".into()).spawn(move || announce::run(n)).unwrap();
     }
     {
         let n = node.clone();

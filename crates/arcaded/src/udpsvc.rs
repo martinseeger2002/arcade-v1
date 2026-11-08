@@ -1115,11 +1115,17 @@ fn intro_round(node: &Node) {
     let nat = nat_kind(); // before the lock: nat_kind takes it too
     let mut st = g().lock().unwrap();
     let mut picked = 0;
+    // An arcade forwards at most one "ui" per sender per second (introduce.py RATE_EVERY):
+    // each request of a round goes through a different relay, or the rest are dropped.
+    let mut vias: BTreeSet<String> = BTreeSet::new();
     for (origin, via) in crate::realtime::heard(INTRO_HEARD) {
         if picked == 2 {
             break;
         }
         if origin == my || ids.contains(&origin) || st.shares.contains_key(&origin) || st.pend.contains_key(&origin) || st.cooling.get(&origin).is_some_and(|(u, _)| *u > now) {
+            continue;
+        }
+        if !vias.insert(via.clone()) {
             continue;
         }
         let n = rand_hex(8);
