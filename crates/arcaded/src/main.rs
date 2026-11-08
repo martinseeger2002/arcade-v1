@@ -54,7 +54,22 @@ pub fn default_home() -> std::path::PathBuf {
     base.join("arcade")
 }
 
+/// Run the service at low CPU and disk priority (threads made later inherit it), so games
+/// and the desktop stay smooth while chains catch up. ARCADE_NICE=0 turns it off.
+fn be_polite() {
+    let nice: i32 = std::env::var("ARCADE_NICE").ok().and_then(|v| v.parse().ok()).unwrap_or(10).clamp(0, 19);
+    if nice == 0 {
+        return;
+    }
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, nice);
+        // ioprio_set(IOPRIO_WHO_PROCESS, this thread, best-effort class 2, level 7: the lowest).
+        let _ = libc::syscall(libc::SYS_ioprio_set, 1, 0, (2 << 13) | 7);
+    }
+}
+
 fn main() {
+    be_polite();
     let args: Vec<String> = std::env::args().collect();
     let home = args
         .iter()
