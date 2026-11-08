@@ -9,6 +9,7 @@ mod accountsvc;
 mod addrsvc;
 mod api;
 mod apikeys;
+mod borrow;
 mod appsvc;
 mod walletsvc;
 mod commands;
@@ -127,6 +128,7 @@ fn main() {
     let _ = node.me.set(Arc::downgrade(&node));
     chains::start_home(&node).expect("home indexes");
     chains::start_saved(&node);
+    borrow::start(node.clone());
     sizes::load(&node);
     if node.home_mode == "shared" {
         // Shared home chain (test setups): keep our share of its blocks right.

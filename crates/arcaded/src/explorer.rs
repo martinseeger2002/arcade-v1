@@ -72,6 +72,9 @@ fn ctx<'a>(node: &'a Node, req: &Value) -> Result<Ctx<'a>, String> {
     };
     let indexes = if p.chain_no == node.params.chain_no {
         crate::chains::home_indexes(node)
+    } else if !node.extra.lock().unwrap().contains_key(p.key) && crate::borrow::is_borrowed(p.key) {
+        // Borrowed: no indexes here; blocks and transactions come from lenders (crate::borrow).
+        vec![]
     } else {
         node.extra.lock().unwrap().get(p.key).map(|r| r.indexes.clone()).ok_or_else(|| format!("{} is not installed", p.name))?
     };
@@ -80,6 +83,11 @@ fn ctx<'a>(node: &'a Node, req: &Value) -> Result<Ctx<'a>, String> {
 
 pub fn handle(node: &Node, cmd: &str, req: &Value) -> R {
     let x = ctx(node, req)?;
+    if x.p.chain_no != node.params.chain_no && !node.extra.lock().unwrap().contains_key(x.p.key) {
+        if let Some(r) = crate::borrow::explorer(node, cmd, req, x.p) {
+            return r;
+        }
+    }
     let s = |k: &str| req[k].as_str().map(String::from);
     let n = |d: u64, max: u64| req["n"].as_u64().unwrap_or(d).clamp(1, max);
     match cmd {

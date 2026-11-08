@@ -56,15 +56,63 @@
       if (!c.home && pct < 100) { const b = el.querySelector(".bar"); b.hidden = false; b.querySelector("i").style.width = pct + "%"; }
       const b = document.createElement("button"); b.textContent = c.home ? "Manage indexes…" : "Manage…"; b.onclick = () => { manage(c.key); reveal(); }; el.append(b);
     } else {
-      st.textContent = "Not installed";
+      const nl = (c.lenders || []).length;
+      st.textContent = c.borrowed ? `Borrowed · from ${nl} arcade${nl === 1 ? "" : "s"} · tip ${(c.tip || 0).toLocaleString()}` : "Not installed";
+      if (c.borrowed) st.className = "state on";
       const b = document.createElement("button"); b.textContent = "Install…"; b.onclick = () => { choose(c); reveal(); }; el.append(b);
     }
     return el;
   }
 
+  // ---------- borrowed coins (borrow.* API) ----------
+  const coinAmt = (sat, key) => `${(Number(sat || 0) / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 })} ${TICKERS[key] || key}`;
+  function logoOf(key, name) {
+    const logo = document.createElement("div"); logo.className = "logo";
+    if (COIN_ICONS.includes(key)) { const img = document.createElement("img"); img.src = ICON_FILE(key); img.alt = ""; logo.append(img); logo.classList.add("img"); }
+    else { logo.style.background = COLORS[key] || "#777"; logo.textContent = (name || key)[0]; }
+    return logo;
+  }
+  function bmsg(text, bad) { const m = $("c-bmsg"); m.textContent = text; m.className = "msg " + (bad ? "bad" : "ok"); }
+  async function setBorrow(args, what) {
+    try { await api("borrow.set", args); bmsg(what); refresh(); } catch (e) { bmsg(e.message, true); }
+  }
+  function borrowRow(c, globalOn) {
+    const el = document.createElement("div");
+    el.className = "brow" + (c.on && globalOn ? "" : " off");
+    const info = document.createElement("div"); info.className = "bi";
+    const nm = document.createElement("div"); nm.className = "bn"; nm.textContent = c.name;
+    const d = document.createElement("div"); d.className = "bd";
+    const l = document.createElement("div"); l.className = "bl";
+    if (c.installed) d.textContent = "Installed: the installed copy is used, nothing is borrowed.";
+    else if (c.borrowed) {
+      d.textContent = `${c.state} · from block ${(c.floor ?? 0).toLocaleString()} · ${c.coins || 0} coin${c.coins === 1 ? "" : "s"}${c.scan ? " · " + c.scan : ""}`;
+      l.textContent = (c.lenders || []).length ? "Lenders: " + c.lenders.map((x) => `${x.addr} (tip ${(x.tip || 0).toLocaleString()}${x.fails ? `, ${x.fails} recent failure${x.fails === 1 ? "" : "s"}` : ""})`).join(" · ") : "No lender right now";
+    } else d.textContent = !c.on || !globalOn ? "Off" : c.lendable ? "Starting…" : "No arcade lends it right now";
+    info.append(nm, d, l);
+    if (c.mismatch) { const w = document.createElement("div"); w.className = "bw"; w.textContent = c.mismatch; info.append(w); }
+    const bal = document.createElement("div"); bal.className = "bb"; bal.textContent = c.borrowed ? coinAmt(c.balance, c.key) : "";
+    const sw = document.createElement("label"); sw.className = "sw";
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = !!c.on; cb.disabled = !globalOn || !!c.installed;
+    cb.onchange = () => setBorrow({ chain: c.key, on: cb.checked }, cb.checked ? `Borrowing ${c.name}.` : `Stopped borrowing ${c.name}; its borrowed data is removed.`);
+    sw.append(cb, document.createTextNode(" Borrow"));
+    el.append(logoOf(c.key, c.name), info, bal, sw);
+    return el;
+  }
+  async function refreshBorrow() {
+    let b;
+    try { b = await api("borrow.status"); } catch (e) { return; }
+    $("c-borrow-on").checked = !!b.on;
+    // Coins that are borrowed, lendable or switched off by hand; the rest stay out of the way.
+    const shown = b.chains.filter((c) => c.borrowed || c.lendable || !c.on);
+    $("c-borrow-list").replaceChildren(...(shown.length ? shown.map((c) => borrowRow(c, b.on))
+      : [Object.assign(document.createElement("p"), { className: "opt", textContent: "No arcade on the mesh lends a coin right now." })]));
+  }
+  $("c-borrow-on").onchange = () => setBorrow({ on: $("c-borrow-on").checked }, $("c-borrow-on").checked ? "Borrowing every coin other arcades lend." : "Borrowing is off; borrowed data is removed.");
+
   async function refresh() {
     try { chains = await api("chains.list"); } catch (e) { return; }
     $("c-list").replaceChildren(...chains.map(card));
+    refreshBorrow();
     if (watching) {
       try { showProgress(await api("chains.status", { key: watching })); } catch (e) { msg(e.message, true); }
     }

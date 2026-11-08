@@ -128,12 +128,16 @@ pub fn list(node: &Node) -> Value {
         .map(|mut e| {
             let bal = by_key(e["chain"].as_str().unwrap_or("")).and_then(|p| {
                 let installed = p.chain_no == node.params.chain_no || node.extra.lock().unwrap().contains_key(p.key);
-                if !installed || !node.chain.addresses_on(p.chain_no).unwrap_or(false) {
+                let borrowed = !installed && crate::borrow::is_borrowed(p.key);
+                if !borrowed && (!installed || !node.chain.addresses_on(p.chain_no).unwrap_or(false)) {
                     return None;
                 }
                 let (sk, ..) = key_for(node, &e)?;
                 let pk = PublicKey::from_secret_key(SECP256K1, &sk);
                 let sc = if e["compressed"] == false { p2pkh_script(&hash160(&pk.serialize_uncompressed())) } else { script_for(e["addr_kind"].as_str().unwrap_or("legacy"), &pk) };
+                if borrowed {
+                    return crate::borrow::balance(node, p, &sc);
+                }
                 node.chain.balance_for_script(p.chain_no, &sc).ok()
             });
             e["balance"] = json!(bal);
@@ -154,7 +158,6 @@ pub fn key_for(node: &Node, e: &Value) -> Option<(SecretKey, &'static ChainParam
 
 /// Every imported wallet on one chain (by key): (address, output script, key, addr_kind).
 /// For watchers (borrowed coins) and spending.
-#[allow(dead_code)]
 pub fn wallets_on(node: &Node, chain: &str) -> Vec<(String, Vec<u8>, SecretKey, String)> {
     list_raw(node)
         .into_iter()

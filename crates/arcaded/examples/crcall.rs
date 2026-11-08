@@ -8,6 +8,11 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mut seed = [0u8; 32];
     let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut seed));
+    // CRCALL_SEED=<64 hex>: the same borrower identity across calls (arcade_coinscan results
+    // are kept per borrower).
+    if let Some(s) = std::env::var("CRCALL_SEED").ok().and_then(|s| hex::decode(s).ok()).and_then(|b| <[u8; 32]>::try_from(b).ok()) {
+        seed = s;
+    }
     let id = ed25519_dalek::SigningKey::from_bytes(&seed);
     let mut link = Link::dial(&a[1], "arcade-main", &id, None).expect("link");
     link.set_read_timeout(Duration::from_secs(30)).unwrap();

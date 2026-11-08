@@ -82,7 +82,8 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             Ok(json!(keys.iter().map(|k| {
                 let script = arcade_wallet::keys::p2pkh_script_for(&arcade_wallet::secp256k1::PublicKey::from_slice(&hex::decode(&k.pubkey).unwrap()).unwrap());
                 json!({"index": k.index, "address": k.address, "tag": if cp.chain_no == p.chain_no { k.tag.clone() } else { None },
-                       "balance": if installed { node.chain.balance_for_script(cp.chain_no, &script).ok() } else { None }})
+                       "balance": if installed { node.chain.balance_for_script(cp.chain_no, &script).ok() } else { crate::borrow::balance(node, cp, &script) },
+                       "borrowed": !installed && crate::borrow::is_borrowed(cp.key)})
             }).collect::<Vec<_>>()))
         }
         "wallet.link" => crate::links::link(node, &s("chain").ok_or("chain required")?, &s("wif").ok_or("wif required")?, &s("tag").ok_or("tag required")?),
@@ -94,7 +95,19 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "wallet.import" => crate::importsvc::import(node, &s("chain").ok_or("chain required")?, &s("secret").ok_or("secret required (a WIF key or a wallet's words)")?, &s("addr_kind").unwrap_or_default(), &s("name").unwrap_or_default(), "manual"),
         "wallet.imports" => Ok(crate::importsvc::list(node)),
         "wallet.import_remove" => crate::importsvc::remove(node, &s("chain").ok_or("chain required")?, &s("address").ok_or("address required")?),
-        "wallet.links" => Ok(json!(crate::links::mine(node, &s("chain").ok_or("chain required")?)?)),
+        "wallet.links" => {
+            let chain = s("chain").ok_or("chain required")?;
+            let mut v = crate::links::mine(node, &chain)?;
+            // Borrowed chains: balances from the borrowed coins.
+            if let Some(cp) = arcade_chain::params::by_key(&chain).filter(|cp| crate::borrow::is_borrowed(cp.key)) {
+                for l in v.iter_mut().filter(|l| l["balance"].is_null()) {
+                    if let Some(sc) = l["address"].as_str().and_then(|a| arcade_ledger::address::decode_base58check(a)).and_then(|(_, h)| <[u8; 20]>::try_from(h).ok()).map(|h| arcade_ledger::address::p2pkh_script(&h)) {
+                        l["balance"] = json!(crate::borrow::balance(node, cp, &sc));
+                    }
+                }
+            }
+            Ok(json!(v))
+        }
         // Messaging (home chain): the Messages tab and anything else that wants it.
         "msg.me" => crate::msgsvc::me(node),
         "msg.stats" => Ok(arcade_ledger::messages::counts(&node.chain, node.params.chain_no)),
@@ -423,6 +436,17 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "chains.index_add" => crate::chains::add_index(&node.self_arc(), &s("key").ok_or("key required")?, &s("index").ok_or("index required")?),
         "chains.index_remove" => crate::chains::remove_index(&node.self_arc(), &s("key").ok_or("key required")?, &s("index").ok_or("index required")?),
         "chains.remove" => crate::chains::remove(&node.self_arc(), &s("key").ok_or("key required")?),
+        // Borrowed coins (crate::borrow)
+        "borrow.status" => Ok(crate::borrow::status_all(node)),
+        "borrow.set" => {
+            let on = req["on"].as_bool().ok_or("on required (true or false)")?;
+            crate::borrow::set(node, s("chain").as_deref(), on)
+        }
+        "borrow.coins" => crate::borrow::coins(node, &s("chain").ok_or("chain required")?),
+        "borrow.send" => {
+            let amount = req["amount"].as_u64().ok_or("amount required (satoshis)")?;
+            crate::borrow::send(node, &s("chain").ok_or("chain required")?, &s("to").ok_or("to required")?, amount, s("from").as_deref(), req["send"] == true)
+        }
         "events" => {
             let n = req["n"].as_u64().unwrap_or(30).min(2000) as usize;
             let kind = s("kind");

@@ -484,7 +484,8 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
     let home = c == node.params.chain_no;
     let run = node.extra.lock().unwrap().get(key).cloned();
     if !home && run.is_none() {
-        return Ok(json!({"key": key, "name": p.name, "installed": false}));
+        // Not installed, but maybe borrowed from arcades on the mesh (crate::borrow).
+        return Ok(crate::borrow::status(node, key).unwrap_or_else(|| json!({"key": key, "name": p.name, "installed": false})));
     }
     let tip = node.chain.tip(c).ok().flatten().map(|t| t.height as u64).unwrap_or(0);
     let best = node.chain.best_header(c).ok().flatten().and_then(|h| node.chain.header(c, &h).ok().flatten()).map(|r| r.height as u64).unwrap_or(0);
@@ -581,7 +582,8 @@ pub fn list(node: &Node) -> Value {
                    "indexes": st["indexes"], "overall": st["overall"], "state": st["state"],
                    "ord": ord_start(p).is_some(), "tokens": arcade_ledger::tokens::protocol(p).map(|x| x.0.to_uppercase()),
                    "dunes": p.key == "doge", "runes": p.key == "btc", "sizes": crate::sizes::for_chain(node, p.key),
-                   "offers": node.offers_for(p.key).len()})
+                   "offers": node.offers_for(p.key).len(),
+                   "borrowed": st["borrowed"] == true, "lenders": st["lenders"], "tip": st["tip"], "floor": st["floor"], "mismatch": st["mismatch"]})
         })
         .collect::<Vec<_>>())
 }
