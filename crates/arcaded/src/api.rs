@@ -61,6 +61,13 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
                 "wallet": node.app.has_wallet().unwrap_or(false),
             }))
         }
+        "mesh.udp" => Ok(crate::udpsvc::status(node)),
+        "mesh.udp_set" => {
+            if let Some(p) = req["drop"].as_str().filter(|p| !p.is_empty()) {
+                return Ok(json!({"dropped": crate::udpsvc::drop_path(p)}));
+            }
+            crate::udpsvc::set(node, req)
+        }
         "peers" => Ok(json!(node.links.lock().unwrap().values().map(|l| json!({"addr": l.addr, "node_id": l.node_id, "since": l.since})).collect::<Vec<_>>())),
         "wallet.create" => {
             let phrase = node.app.create_wallet(s("phrase").as_deref()).map_err(|e| e.to_string())?;

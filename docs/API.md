@@ -76,6 +76,13 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 | `tokens` | `/api/v1/tokens` | public | owner, chain? | Token balances of an address. |
 | `inscribe` | `/api/v1/inscribe` | wallet | data, encoding?, contenttype?, json? | Inscribe content as this wallet's (arcade INSC; data as text or base64 with encoding: base64). |
 
+### Mesh
+
+| method | route | needs | params | what |
+|---|---|---|---|---|
+| `mesh.udp` | `/api/v1/mesh/udp` | read | — | UDP hole punching: STUN server and proved addresses, NAT kind, which links run over UDP paths (RTT, packets), introductions. |
+| `mesh.udp_set` | `/api/v1/mesh/udp_set` | admin | on?, lan_dial?, stun_port?, drop? | Turn UDP paths and introductions on or off (ARCADE_MESH_UDP=0 overrides), offer LAN addresses to every peer, set the STUN port for the next start (0 = none); drop = a peer id prefix whose path to fail now (falls back to TCP). |
+
 ### Wallet
 
 | method | route | needs | params | what |

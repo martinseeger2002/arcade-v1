@@ -12,6 +12,7 @@ arcade-ledger = { version = "0.1.0", path = "../arcade-ledger" }
 crypto_box = "0.9"
 crypto_secretbox = { version = "0.1", features = ["salsa20"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 arcade-msg = { version = "0.1.0", path = "../arcade-msg" }
 arcade-mesh = { version = "0.1.0", path = "../arcade-mesh" }
 arcade-store = { version = "0.1.0", path = "../arcade-store" }
