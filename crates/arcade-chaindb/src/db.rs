@@ -567,6 +567,15 @@ impl ChainDb {
         })
     }
 
+    /// The height of stored block number `b`, when it is on the main chain.
+    pub fn block_height_of(&self, c: u16, b: u32) -> Result<Option<u32>> {
+        let Some(m) = self.store.read(|r| r.get(BLOCK_META, &k_block(c, b)))? else { return Ok(None) };
+        let h80: [u8; 80] = m.get(..80).and_then(|x| x.try_into().ok()).ok_or(StoreError::Corrupt { table: BLOCK_META, why: "short block meta" })?;
+        let hash = Header::parse(&h80).hash();
+        let Some(rec) = self.header(c, &hash)? else { return Ok(None) };
+        Ok((self.hash_at(c, rec.height)? == Some(hash)).then_some(rec.height))
+    }
+
     /// Where a transaction is (block number, position), even when its body is pruned.
     pub fn tx_location(&self, params: &ChainParams, txid: &Hash256) -> Result<Option<(u32, u32)>> {
         self.store.read(|r| locate(r, params, txid))

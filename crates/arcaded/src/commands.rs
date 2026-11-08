@@ -171,6 +171,12 @@ cmds! {
     "apps.review" Admin "chain, txid, verdict" "Clear or confirm an app flagged as a lookalike.";
     "apps.trust" Admin "address, on?" "Trust a publisher (never flagged as a lookalike).";
     "apps.storage" Local "page, op, key?, value?" "An app page's saves (load, set, remove, clear, history), as arcade.storage.";
+    "wallet.requests" Read "page?" "Requests from pages to send, waiting for your answer.";
+    "wallet.preview" Read "id" "A request's transaction as it would be built now: outputs and fee.";
+    "wallet.approve" Local "id" "Approve a request: sign and send it.";
+    "wallet.deny" Local "id" "Refuse a request.";
+    "apps.owner" Read "page" "arcade.owner.identity: whether this wallet created the page and still holds it.";
+    "apps.owner_send" Local "page, request" "arcade.owner.send: a page this wallet created and holds sends at once (testnet).";
     "apps.launch" Read "chain, txid" "What an app window opens: the sandboxed page URL and the card.";
     // API keys (managed from this computer only)
     "apikey.list" Local "" "API keys (not their secrets).";

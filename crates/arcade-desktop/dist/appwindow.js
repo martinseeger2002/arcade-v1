@@ -24,8 +24,85 @@
   let appState = { state: "open", timeout: null, closesAt: null, inShell: false };
 
   const perms = async () => (id ? await api("apps.perms", { id }) : {});
+  const appName = document.title;
+
+  // Cards drawn over the app, outside its sandbox: the app can't see, draw or press them.
+  let busy = false;
+  function card(title, lines, yes, no = "No") {
+    return new Promise((resolve) => {
+      const ov = document.createElement("div"); ov.className = "ov";
+      const box = document.createElement("div"); box.className = "box";
+      const h = document.createElement("h3"); h.textContent = title; box.append(h);
+      for (const l of lines) { const p = document.createElement("p"); if (typeof l === "string") p.textContent = l; else p.append(l); box.append(p); }
+      const row = document.createElement("div"); row.className = "btns";
+      const n = document.createElement("button"); n.textContent = no;
+      const y = document.createElement("button"); y.textContent = yes; y.className = "yes";
+      const done = (v) => { ov.remove(); resolve(v); };
+      n.onclick = () => done(false); y.onclick = () => done(true);
+      row.append(n, y); box.append(row); ov.append(box); document.body.append(ov);
+      y.focus();
+    });
+  }
+  async function oneCard(fn) {
+    if (busy) throw new Error("busy: this page already has a question open; ask again once it is answered");
+    busy = true;
+    try { return await fn(); } finally { busy = false; }
+  }
+  const pep = (sats) => (sats / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 }) + " PEPtest";
   let lastSend = 0;
   const doors = {
+    async access(m) {
+      const p = await perms();
+      if (m.op === "status") return { wallet: !!p.wallet, signedIn: true, node: new URL(frame).host, game: !!id, name: appName };
+      if (m.op === "wallet") {
+        if (p.wallet) return { wallet: true, status: "already" };
+        const yes = await oneCard(() => card(`Let ${appName} use your wallet?`, [
+          `${appName} asks for Wallet access: trades, shops, escrow, claims and inscribing in its name. Every payment is still shown to you on its own card first.`,
+          "Check this is the app you meant to open: copies of popular apps can look the same."], "Allow"));
+        if (!yes) return { wallet: false, status: "declined" };
+        await api("apps.perms", { id, set: { wallet: true } });
+        return { wallet: true, status: "allowed" };
+      }
+      if (m.op === "nodes") { const h = new URL(frame); return { nodes: [{ base: h.origin, host: h.host, ms: 0, here: true, arcade: true, affiliate: false, name: "this arcade", by: "" }] }; }
+      if (m.op === "move") { if (String(m.to || "") === new URL(frame).origin) return { status: "here" }; throw new Error("not an arcade this node knows: pick one from nodes()"); }
+      throw new Error("access ops are status, wallet, nodes and move");
+    },
+    async contacts(m) {
+      if (m.op === "list") {
+        const p = await perms();
+        if (!p.contacts) return { people: [], why: "off" };
+        return { people: (await api("contacts.list")).filter((c) => c.tag || c.address).map((c) => ({ address: c.address, tag: c.tag })) };
+      }
+      const a = String(m.address || "").trim();
+      if (!/^@?[A-Za-z0-9_]{1,24}$/.test(a) && !/^[A-Za-z0-9]{25,90}$/.test(a)) throw new Error("not an address: give an address or an @tag");
+      const name = typeof m.name === "string" ? m.name.trim().slice(0, 60) : "";
+      const list = await api("contacts.list");
+      const isTag = /^@?[A-Za-z0-9_]{1,24}$/.test(a) && !/^[A-Za-z0-9]{25,90}$/.test(a);
+      const tag = isTag ? a.replace(/^@/, "").toLowerCase() : null;
+      const found = list.find((c) => (tag && c.tag === tag) || c.address === a);
+      if (m.op === "add") {
+        if (found) return { status: "already" };
+        let w;
+        try { w = await api("msg.who", { name: isTag ? "@" + tag : a }); } catch (e) { throw new Error(e.message.includes("not claimed") ? `nobody holds @${tag} on this chain` : e.message); }
+        const ok = await oneCard(() => card(`${appName} would like to add a contact`, [`Add ${w.tag ? "@" + w.tag : ""} (${(w.address || "").slice(0, 10)}…) to your address book${name ? ` as “${name}”` : ""}?`], "Add"));
+        if (!ok) throw new Error("declined");
+        await api("contacts.save", { key: w.key, name: name || (w.tag ? "@" + w.tag : ""), address: w.address });
+        return { status: "added" };
+      }
+      if (m.op === "remove") {
+        if (!found) return { status: "absent" };
+        const ok = await oneCard(() => card(`${appName} would like to remove a contact`, [`Remove ${found.tag ? "@" + found.tag : found.address} from your address book?`], "Remove"));
+        if (!ok) throw new Error("declined");
+        await api("contacts.delete", { key: found.key });
+        return { status: "removed" };
+      }
+      throw new Error("contacts ops are list, add and remove");
+    },
+    async owner(m) {
+      if (m.op === "identity") return await api("apps.owner", { page: here });
+      if (m.op === "send") { const { arcade, seq, op, ...request } = m; return await api("apps.owner_send", { page: here, request }); }
+      throw new Error("owner ops are identity and send");
+    },
     async groups(m) {
       const p = await perms();
       if (!p.groups) throw new Error("off: turn on Group chats on this app's card");
@@ -94,6 +171,32 @@
   const tell = (state) => { appState = { ...appState, state }; el.contentWindow?.postMessage({ arcade: "app", event: true, ...appState }, "*"); };
   document.addEventListener("visibilitychange", () => tell(document.hidden ? "minimized" : "restored"));
   window.addEventListener("beforeunload", () => tell("closing"));
+
+  // Requests this page filed with POST /r/send: shown over it, one at a time, outside its reach.
+  let showing = null;
+  setInterval(async () => {
+    if (showing) return;
+    let list = [];
+    try { list = await api("wallet.requests", { page: here }); } catch (_) { return; }
+    const r = list[0];
+    if (!r) return;
+    showing = r.id;
+    try {
+      let pv;
+      try { pv = await api("wallet.preview", { id: r.id }); }
+      catch (e) { await card("This request can't be sent", [e.message], "Refuse", "Close"); await api("wallet.deny", { id: r.id }); return; }
+      const who = pv.page_card || {};
+      const from = `${who.app || appName}${who.creator_tag ? " by @" + who.creator_tag : ""}`;
+      const outs = document.createElement("ul"); outs.className = "outs";
+      for (const o of pv.outputs) { const li = document.createElement("li"); li.textContent = o.data ? "data (the arcade record)" : `${pep(o.value)} → ${o.address}${o.mine ? " (back to you)" : ""}`; outs.append(li); }
+      const lines = [`${from} asks to send ${pv.what} to ${pv.to_tag ? "@" + pv.to_tag + " " : ""}${pv.to}.`];
+      if (pv.note) lines.push(`“${pv.note}”`);
+      lines.push(outs, `Network fee: ${pep(pv.fee)}`);
+      const yes = await card("Approve this send?", lines, "Approve and send", "Refuse");
+      await api(yes ? "wallet.approve" : "wallet.deny", { id: r.id });
+    } catch (_) { /* answered elsewhere */ }
+    finally { showing = null; }
+  }, 1500);
 
   el.src = frame;
   window.arcadeApp = { id, frame, el };

@@ -355,53 +355,6 @@ pub fn launch(node: &Node, chain: &str, txid: &str) -> Result<Value, String> {
     }))
 }
 
-/// GET /r/inscriptions?creator=: the home chain's arcade inscriptions as pages see them
-/// (the original's contentlib.describe), newest first, as JSON text. Each row's "json" is the
-/// inscription's own JSON text, verbatim: apps read their registries in the order the publisher
-/// wrote them (ASHVALE loads its "netretry" module first because its registry lists it first),
-/// and a parsed-and-reserialised object would come out with its keys sorted.
-pub fn page_inscriptions_text(node: &Node, creator: Option<&str>, limit: u64) -> String {
-    let rows = page_inscriptions(node, creator, limit);
-    let mut out = String::from("[");
-    for (i, r) in rows.as_array().cloned().unwrap_or_default().into_iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        let raw = r["rawjson"].as_str().unwrap_or("").to_string();
-        let mut r = r;
-        r["json"] = json!("\u{1}JSON\u{1}");
-        let text = r.to_string();
-        let verbatim = if serde_json::from_str::<Value>(&raw).is_ok() { raw } else { "null".to_string() };
-        out.push_str(&text.replacen("\"\\u0001JSON\\u0001\"", &verbatim, 1));
-    }
-    out.push(']');
-    out
-}
-
-fn page_inscriptions(node: &Node, creator: Option<&str>, limit: u64) -> Value {
-    let c = node.params.chain_no;
-    let rows = node.chain.store.read(|r| r.scan_prefix(arcade_ledger::engine::INSCRIPTION, &KeyBuf::new().u16(c).done())).unwrap_or_default();
-    let mut out: Vec<Value> = rows
-        .into_iter()
-        .filter_map(|(_, v)| serde_json::from_slice::<Value>(&v).ok())
-        .filter(|v| creator.is_none_or(|cr| v["creator"] == cr))
-        .collect();
-    out.sort_by(|a, b| (b["block_height"].as_u64(), b["position"].as_u64()).cmp(&(a["block_height"].as_u64(), a["position"].as_u64())));
-    json!(out
-        .into_iter()
-        .take(limit.clamp(1, 1000) as usize)
-        .map(|v| {
-            let raw = v["json"].as_str().unwrap_or("").to_string();
-            let tag = |a: &Value| a.as_str().and_then(|a| arcade_ledger::index::tag_of(&node.chain, c, a).ok().flatten());
-            json!({"id": v["txid"], "number": v["number"], "creator": v["creator"], "owner": v["owner"],
-                   "creatortag": tag(&v["creator"]), "ownertag": tag(&v["owner"]), "block": v["block_height"],
-                   "contenttype": v["content_type"], "length": v["content_len"], "sha256": v["sha256"],
-                   "transactions": v["chunks"], "held": false,
-                   "json": serde_json::from_str::<Value>(&raw).ok(), "rawjson": raw, "collection": Value::Null, "edition": Value::Null})
-        })
-        .collect::<Vec<_>>())
-}
-
 // ---------------- arcade.storage: saves per app page (the original's pagestore limits) ----------------
 
 const MAX_KEY: usize = 256;

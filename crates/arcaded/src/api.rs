@@ -179,6 +179,12 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         }
         "apps.review" => crate::appsvc::review(node, &s("chain").ok_or("chain required")?, &s("txid").ok_or("txid required")?, &s("verdict").ok_or("verdict required (clear or confirm)")?),
         "apps.trust" => crate::appsvc::trust(node, &s("address").ok_or("address required")?, req["on"] != false),
+        "wallet.requests" => Ok(crate::walletsvc::requests(node, s("page").as_deref())),
+        "wallet.preview" => crate::walletsvc::preview(node, &s("id").ok_or("id required")?),
+        "wallet.approve" => crate::walletsvc::approve(node, &s("id").ok_or("id required")?),
+        "wallet.deny" => crate::walletsvc::deny(node, &s("id").ok_or("id required")?),
+        "apps.owner" => Ok(crate::walletsvc::owner_identity(node, &s("page").ok_or("page required")?)),
+        "apps.owner_send" => crate::walletsvc::owner_send(node, &s("page").ok_or("page required")?, &req["request"]),
         "apps.storage" => crate::appsvc::storage(node, &s("page").ok_or("page required")?, &s("op").ok_or("op required")?, req["key"].as_str(), req["value"].as_str()),
         "apps.launch" => crate::appsvc::launch(node, &s("chain").ok_or("chain required")?, &s("txid").ok_or("txid required")?),
         "rpc.help" => Ok(crate::commands::help()),

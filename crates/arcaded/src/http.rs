@@ -197,7 +197,7 @@ fn handle(node: &Node, mut s: TcpStream, site: Option<&PathBuf>) {
         }
         return web_api(node, &mut s, &r, rest);
     }
-    if r.method != "GET" && r.method != "HEAD" {
+    if r.method != "GET" && r.method != "HEAD" && !path.starts_with("/r/") {
         return respond(&mut s, "405 Method Not Allowed", "text/plain", &[], b"GET only\n");
     }
     let p = node.params;
@@ -232,6 +232,9 @@ fn handle(node: &Node, mut s: TcpStream, site: Option<&PathBuf>) {
             "app" => Some(include_str!("shims/app.js")),
             "realtime" => Some(include_str!("shims/realtime.js")),
             "groups" => Some(include_str!("shims/groups.js")),
+            "access" => Some(include_str!("shims/access.js")),
+            "contacts" => Some(include_str!("shims/contacts.js")),
+            "owner" => Some(include_str!("shims/owner.js")),
             _ => None,
         };
         return match body {
@@ -239,10 +242,24 @@ fn handle(node: &Node, mut s: TcpStream, site: Option<&PathBuf>) {
             None => respond(&mut s, "404 Not Found", "application/javascript", &[("Access-Control-Allow-Origin", "*".into())], b"/* not in this arcade yet */\n"),
         };
     }
-    if path == "/r/inscriptions" {
-        let q = query_fields(&r.query);
-        let v = crate::appsvc::page_inscriptions_text(node, q.get("creator").and_then(|v| v.as_str()), q.get("limit").and_then(|v| v.as_u64()).unwrap_or(100));
-        return respond(&mut s, "200 OK", "application/json", &[("Access-Control-Allow-Origin", "*".into()), ("Cache-Control", "no-store".into())], v.as_bytes());
+    // The page API (reads, and asking the wallet to send): pages run on this computer.
+    if path.starts_with("/r/") {
+        let cors = [("Access-Control-Allow-Origin", "*".to_string()), ("Cache-Control", "no-store".to_string())];
+        if !is_local {
+            return respond(&mut s, "403 Forbidden", "application/json", &cors, br#"{"error":"this arcade's page API answers only this computer"}"#);
+        }
+        if r.method == "POST" && path == "/r/send" {
+            // The page is the app frame that asked (its Referer: /app/<chain>/<txid>).
+            let page = r.headers.get("referer").and_then(|v| v.as_str()).and_then(|u| u.split('?').next()).and_then(|u| u.rsplit('/').next()).filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())).map(String::from);
+            let Some(page) = page else { return respond(&mut s, "400 Bad Request", "application/json", &cors, br#"{"error":"open this page in the arcade: the request has no page to come from"}"#) };
+            let body: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
+            let (code, v) = crate::walletsvc::file(node, &page, &body);
+            let st = match code { 200 => "200 OK", 202 => "202 Accepted", _ => "400 Bad Request" };
+            return respond(&mut s, st, "application/json", &cors, v.to_string().as_bytes());
+        }
+        let (code, body) = crate::walletsvc::route(node, &path, &query_fields(&r.query));
+        let st = match code { 200 => "200 OK", 403 => "403 Forbidden", 503 => "503 Service Unavailable", _ => "404 Not Found" };
+        return respond(&mut s, st, "application/json", &cors, body.as_bytes());
     }
     let seg: Vec<&str> = path.trim_start_matches('/').splitn(2, '/').collect();
     match seg.as_slice() {
