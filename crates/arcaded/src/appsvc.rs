@@ -356,8 +356,29 @@ pub fn launch(node: &Node, chain: &str, txid: &str) -> Result<Value, String> {
 }
 
 /// GET /r/inscriptions?creator=: the home chain's arcade inscriptions as pages see them
-/// (the original's contentlib.describe), newest first.
-pub fn page_inscriptions(node: &Node, creator: Option<&str>, limit: u64) -> Value {
+/// (the original's contentlib.describe), newest first, as JSON text. Each row's "json" is the
+/// inscription's own JSON text, verbatim: apps read their registries in the order the publisher
+/// wrote them (ASHVALE loads its "netretry" module first because its registry lists it first),
+/// and a parsed-and-reserialised object would come out with its keys sorted.
+pub fn page_inscriptions_text(node: &Node, creator: Option<&str>, limit: u64) -> String {
+    let rows = page_inscriptions(node, creator, limit);
+    let mut out = String::from("[");
+    for (i, r) in rows.as_array().cloned().unwrap_or_default().into_iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let raw = r["rawjson"].as_str().unwrap_or("").to_string();
+        let mut r = r;
+        r["json"] = json!("\u{1}JSON\u{1}");
+        let text = r.to_string();
+        let verbatim = if serde_json::from_str::<Value>(&raw).is_ok() { raw } else { "null".to_string() };
+        out.push_str(&text.replacen("\"\\u0001JSON\\u0001\"", &verbatim, 1));
+    }
+    out.push(']');
+    out
+}
+
+fn page_inscriptions(node: &Node, creator: Option<&str>, limit: u64) -> Value {
     let c = node.params.chain_no;
     let rows = node.chain.store.read(|r| r.scan_prefix(arcade_ledger::engine::INSCRIPTION, &KeyBuf::new().u16(c).done())).unwrap_or_default();
     let mut out: Vec<Value> = rows

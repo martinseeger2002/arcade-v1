@@ -241,8 +241,8 @@ fn handle(node: &Node, mut s: TcpStream, site: Option<&PathBuf>) {
     }
     if path == "/r/inscriptions" {
         let q = query_fields(&r.query);
-        let v = crate::appsvc::page_inscriptions(node, q.get("creator").and_then(|v| v.as_str()), q.get("limit").and_then(|v| v.as_u64()).unwrap_or(100));
-        return respond(&mut s, "200 OK", "application/json", &[("Access-Control-Allow-Origin", "*".into()), ("Cache-Control", "no-store".into())], v.to_string().as_bytes());
+        let v = crate::appsvc::page_inscriptions_text(node, q.get("creator").and_then(|v| v.as_str()), q.get("limit").and_then(|v| v.as_u64()).unwrap_or(100));
+        return respond(&mut s, "200 OK", "application/json", &[("Access-Control-Allow-Origin", "*".into()), ("Cache-Control", "no-store".into())], v.as_bytes());
     }
     let seg: Vec<&str> = path.trim_start_matches('/').splitn(2, '/').collect();
     match seg.as_slice() {
