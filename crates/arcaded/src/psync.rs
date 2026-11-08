@@ -442,6 +442,9 @@ pub fn run(node: &Node, p: &'static ChainParams, syncer: &Syncer, top: u32, on_p
         let mut last_note = Instant::now();
         let mut stalls = 0;
         let (mut waited, mut stored) = (Duration::ZERO, Duration::ZERO);
+        // Show the sources at once (the first round can take minutes on full blocks).
+        std::thread::sleep(Duration::from_secs(3));
+        on_progress(format!("block {} of {top} · {} · starting", node.chain.tip(c).ok().flatten().map(|t| t.height).unwrap_or(0), pool.summary()));
         let res: Result<(), String> = loop {
             if stop.load(Ordering::Relaxed) {
                 break Ok(());
@@ -455,7 +458,7 @@ pub fn run(node: &Node, p: &'static ChainParams, syncer: &Syncer, top: u32, on_p
                 break Err(e.to_string());
             }
             let t1 = Instant::now();
-            if let Err(e) = syncer.sync_blocks(&mut pre, 5000, 1000) {
+            if let Err(e) = syncer.sync_blocks(&mut pre, 1000, 1000) {
                 break Err(e.to_string());
             }
             waited += t1 - t0;
