@@ -156,6 +156,11 @@ cmds! {
     "chains.index_add" Admin "key, index" "Add an index to a chain.";
     "chains.index_remove" Admin "key, index" "Remove an index from a chain.";
     "chains.remove" Admin "key" "Remove a chain and its data.";
+    // Borrowed coins
+    "borrow.status" Read "" "Borrowed coins: the switches, and per chain its lenders, tip, floor, tip mismatch and your balance.";
+    "borrow.set" Admin "on, chain?" "Turn borrowing on or off: for every coin (no chain) or for one chain (off removes its borrowed data).";
+    "borrow.coins" Read "chain" "Your coins on a borrowed chain (from blocks read since the floor, and the lender's coin scan).";
+    "borrow.send" Local "chain, to, amount, from?, send?" "Pay amount (satoshis) on a borrowed chain, signed here; send: true broadcasts to every lender, otherwise only built and shown.";
     // Mining
     "mine.start" Admin "threads?" "Mine the home chain.";
     "mine.stop" Admin "" "Stop mining.";

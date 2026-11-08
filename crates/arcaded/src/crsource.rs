@@ -42,54 +42,7 @@ impl<'a> CoreShareSource<'a> {
     fn call(&mut self, calls: Value) -> Result<Vec<Value>, String> {
         let id = self.next_id;
         self.next_id += 1;
-        // Existing arcades take the batch as plain JSON (a zlib body is refused: "not a batch").
-        let body = calls.to_string().into_bytes();
-        let parts: Vec<&[u8]> = body.chunks(crate::coreshare::CHUNK).collect();
-        for (i, part) in parts.iter().enumerate() {
-            self.link
-                .send(&Frame { head: json!({"t": "cr", "op": "q", "id": id, "net": self.p.net, "seq": i, "end": i + 1 == parts.len(), "z": 0}), blob: part.to_vec() })
-                .map_err(|e| e.to_string())?;
-        }
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        let mut buf = Vec::new();
-        #[allow(unused_assignments)]
-        let mut z = true;
-        loop {
-            if std::time::Instant::now() > deadline {
-                return Err(format!("arcade {} did not answer in time", self.addr));
-            }
-            let f = self.link.recv().map_err(|e| e.to_string())?;
-            match f.kind() {
-                "ping" => {
-                    let n = f.head["n"].clone();
-                    self.link.send(&Frame::new(json!({"t": "pong", "n": n}))).map_err(|e| e.to_string())?;
-                }
-                "cr" if f.head["op"] == "a" && f.head["id"] == id => {
-                    if let Some(err) = f.head["err"].as_str() {
-                        return Err(format!("arcade {}: {err}", self.addr));
-                    }
-                    z = f.head["z"] == 1 || f.head["z"] == true;
-                    buf.extend_from_slice(&f.blob);
-                    if buf.len() > 256 << 20 {
-                        return Err("answer too large".into());
-                    }
-                    if f.head["end"] == true {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let body = if z {
-            let mut out = Vec::new();
-            match ZlibDecoder::new(&buf[..]).read_to_end(&mut out) {
-                Ok(_) => out,
-                Err(_) => buf, // answered without compression
-            }
-        } else {
-            buf
-        };
-        serde_json::from_slice(&body).map_err(|e| format!("bad answer: {e}"))
+        ask(&mut self.link, &self.addr, self.p.net, id, &calls, &mut |_| {})
     }
 
     fn r<'v>(v: &'v Value) -> Result<&'v Value, String> {
@@ -138,6 +91,62 @@ impl<'a> CoreShareSource<'a> {
         Ok(out)
     }
 
+}
+
+/// One coreshare batch on a link: send `calls` ([[method, params], ...]) for `net` as query
+/// `id`, answer pings, hand every other frame to `other` (offers, pushed mempool txs), and
+/// return the answers ([{"r": ..} | {"e": [code, msg]}, ...]).
+pub fn ask(link: &mut Link, addr: &str, net: &str, id: u64, calls: &Value, other: &mut dyn FnMut(&Frame)) -> Result<Vec<Value>, String> {
+    // Existing arcades take the batch as plain JSON (a zlib body is refused: "not a batch").
+    let body = calls.to_string().into_bytes();
+    if body.len() > crate::coreshare::MAX_ASKED {
+        return Err("request too large".into());
+    }
+    let parts: Vec<&[u8]> = body.chunks(crate::coreshare::CHUNK).collect();
+    for (i, part) in parts.iter().enumerate() {
+        link.send(&Frame { head: json!({"t": "cr", "op": "q", "id": id, "net": net, "seq": i, "end": i + 1 == parts.len(), "z": 0}), blob: part.to_vec() })
+            .map_err(|e| e.to_string())?;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut buf = Vec::new();
+    #[allow(unused_assignments)]
+    let mut z = true;
+    loop {
+        if std::time::Instant::now() > deadline {
+            return Err(format!("arcade {addr} did not answer in time"));
+        }
+        let f = link.recv().map_err(|e| e.to_string())?;
+        match f.kind() {
+            "ping" => {
+                let n = f.head["n"].clone();
+                link.send(&Frame::new(json!({"t": "pong", "n": n}))).map_err(|e| e.to_string())?;
+            }
+            "cr" if f.head["op"] == "a" && f.head["id"] == id => {
+                if let Some(err) = f.head["err"].as_str() {
+                    return Err(format!("arcade {addr}: {err}"));
+                }
+                z = f.head["z"] == 1 || f.head["z"] == true;
+                buf.extend_from_slice(&f.blob);
+                if buf.len() > 256 << 20 {
+                    return Err("answer too large".into());
+                }
+                if f.head["end"] == true {
+                    break;
+                }
+            }
+            _ => other(&f),
+        }
+    }
+    let body = if z {
+        let mut out = Vec::new();
+        match ZlibDecoder::new(&buf[..]).read_to_end(&mut out) {
+            Ok(_) => out,
+            Err(_) => buf, // answered without compression
+        }
+    } else {
+        buf
+    };
+    serde_json::from_slice(&body).map_err(|e| format!("bad answer: {e}"))
 }
 
 impl BlockSource for CoreShareSource<'_> {

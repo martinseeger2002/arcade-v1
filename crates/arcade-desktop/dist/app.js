@@ -44,9 +44,9 @@ async function refreshHome() {
     $("h-tip").textContent = s.tip ? `block ${s.tip.height.toLocaleString()} · ${short(s.tip.hash, 16)}` : "";
   } else {
     const st = await api("chains.status", { key: ch.key });
-    $("h-sync").textContent = st.installed ? st.state : "not installed";
+    $("h-sync").textContent = st.installed || st.borrowed ? st.state : "not installed";
     const src = (st.stages || []).find((x) => x.name === "Source");
-    $("h-tip").textContent = st.installed ? `block ${(st.tip || 0).toLocaleString()}${src ? " · " + src.detail : ""}` : "Install it in Chains & Coins";
+    $("h-tip").textContent = st.installed || st.borrowed ? `block ${(st.tip || 0).toLocaleString()}${src ? " · " + src.detail : ""}` : "Install it in Chains & Coins";
   }
   $("h-mesh").textContent = `${s.mesh.links} arcade${s.mesh.links === 1 ? "" : "s"} linked`;
   $("h-node").textContent = "node " + short(s.node_id, 16);
@@ -59,15 +59,15 @@ async function refreshHome() {
   } else {
     const st = await api("chains.status", { key: ch.key });
     $("h-tags-k").textContent = "Indexes";
-    $("h-tags").textContent = st.installed ? `${(st.indexes || []).length} on` : "—";
-    $("h-match").textContent = st.installed ? (st.indexes || []).join(", ") || "blocks and addresses only" : "";
+    $("h-tags").textContent = st.installed ? `${(st.indexes || []).length} on` : st.borrowed ? "none (borrowed)" : "—";
+    $("h-match").textContent = st.installed ? (st.indexes || []).join(", ") || "blocks and addresses only" : st.borrowed ? `your coins only, from ${(st.lenders || []).length} lending arcade${(st.lenders || []).length === 1 ? "" : "s"}` : "";
   }
   $("h-wallet").textContent = s.wallet ? "ready" : "not created";
   if (s.wallet) {
     state.keys = await api("wallet.keys", { chain: ch.key });
     const bal = state.keys.reduce((a, k) => a + (k.balance || 0), 0);
     const tag = state.keys.find((k) => k.tag)?.tag;
-    $("h-bal").textContent = (state.keys.some((k) => k.balance != null) ? coins(bal) : "chain not installed") + (tag ? ` · @${tag}` : "");
+    $("h-bal").textContent = (state.keys.some((k) => k.balance != null) ? coins(bal) + (state.keys.some((k) => k.borrowed) ? " (borrowed)" : "") : "chain not installed") + (tag ? ` · @${tag}` : "");
   } else { $("h-bal").textContent = ""; }
   state.claims = await api("tag.list");
 }

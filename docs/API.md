@@ -86,10 +86,22 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 | `wallet.link` | `/api/v1/wallet/link` | wallet | chain, wif, tag | Link another wallet to your @tag (signed by both keys). |
 | `wallet.unlink` | `/api/v1/wallet/unlink` | wallet | chain, address, tag | Remove a linked wallet. |
 | `wallet.links` | `/api/v1/wallet/links` | read | chain | Your linked wallets on a chain. |
+| `wallet.import` | `/api/v1/wallet/import` | local | chain, secret, addr_kind?, name? | Import a wallet: a WIF key, or another wallet's words (one address, index 0); addr_kind legacy (default), p2sh-p2wpkh or p2wpkh. Kept encrypted here; nothing is published. |
+| `wallet.imports` | `/api/v1/wallet/imports` | local | — | Imported wallets, with balances on chains this arcade keeps addresses for. |
+| `wallet.import_remove` | `/api/v1/wallet/import_remove` | local | chain, address | Forget an imported wallet and its key. |
 | `wallet.requests` | `/api/v1/wallet/requests` | read | page? | Requests from pages to send, waiting for your answer. |
 | `wallet.preview` | `/api/v1/wallet/preview` | read | id | A request's transaction as it would be built now: outputs and fee. |
 | `wallet.approve` | `/api/v1/wallet/approve` | local | id | Approve a request: sign and send it. |
 | `wallet.deny` | `/api/v1/wallet/deny` | local | id | Refuse a request. |
+
+### Account
+
+| method | route | needs | params | what |
+|---|---|---|---|---|
+| `account.signin` | `/api/v1/account/signin` | local | tag, password, from? | Sign in with an existing Dogecoin Arcade account (@tag + password): its words come from the arcade that holds it (from, or any we know), sealed under the password, then its imported wallets and mailbox. The account becomes the active one. |
+| `account.list` | `/api/v1/account/list` | read | — | Accounts on this arcade: its own wallet first, then signed-in accounts; which one is active. |
+| `account.switch` | `/api/v1/account/switch` | local | id | Use another account ("" = this arcade's own wallet): wallet, messages, groups and rooms follow it. |
+| `account.signout` | `/api/v1/account/signout` | local | id | Sign an account out of this arcade: its words, keys, messages and groups here are forgotten. |
 
 ### Tags
 
