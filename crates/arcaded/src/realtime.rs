@@ -114,6 +114,9 @@ struct St {
     last_sub: Option<Instant>,
     sub_rooms: Vec<String>,
     my_cert: Option<(String, Value)>,
+    /// origin -> (link its sub came in on, when): the way back to that arcade (node._via),
+    /// used to route introductions (crate::udpsvc).
+    heard: HashMap<String, (String, u64)>,
 }
 
 struct Rt {
@@ -390,6 +393,7 @@ fn on_sub(node: &Node, st: &mut St, from: &str, h: &Value) {
         return;
     }
     st.seen.insert(key, now_s());
+    st.heard.insert(origin.clone(), (from.to_string(), now_s()));
     let exp = now_s() + ROUTE_LIFE;
     let wanted: HashSet<String> = rooms.iter().filter_map(|r| r.as_str().map(String::from)).collect();
     for (rid, r) in st.routes.iter_mut() {
@@ -539,6 +543,19 @@ fn on_pub(node: &Node, st: &mut St, from: &str, h: &Value, blob: &[u8]) {
     }
 }
 
+/// Arcades whose sub we heard within `secs`, with the link it came in on.
+pub fn heard(secs: u64) -> Vec<(String, String)> {
+    let now = now_s();
+    let st = rt().st.lock().unwrap();
+    st.heard.iter().filter(|(_, (_, at))| now.saturating_sub(*at) < secs).map(|(o, (l, _))| (o.clone(), l.clone())).collect()
+}
+
+/// The link toward arcade `origin`: the one its sub came in on, if heard within `secs`.
+pub fn route_to(origin: &str, secs: u64) -> Option<String> {
+    let now = now_s();
+    rt().st.lock().unwrap().heard.get(origin).filter(|(_, at)| now.saturating_sub(*at) < secs).map(|(l, _)| l.clone())
+}
+
 /// Frames waiting for the link to arcade `peer`.
 pub fn take(peer: &str) -> Vec<Frame> {
     let mut st = rt().st.lock().unwrap();
@@ -626,6 +643,7 @@ pub fn run(node: Arc<Node>) {
         }
         // Housekeeping.
         st.seen.retain(|_, at| now.saturating_sub(*at) < 180);
+        st.heard.retain(|_, (_, at)| now.saturating_sub(*at) < 600);
         st.vetted.retain(|_, (_, until)| *until > now);
         st.buckets.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(60));
         for r in st.routes.values_mut() {

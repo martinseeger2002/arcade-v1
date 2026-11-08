@@ -226,7 +226,7 @@ fn our_tip(node: &Node) -> u64 {
     node.chain.tip(node.params.chain_no).ok().flatten().map(|t| t.height as u64).unwrap_or(0)
 }
 
-fn serve(node: &Node, link: &mut Link, addr: &str) -> Result<(), LinkError> {
+pub fn serve(node: &Node, link: &mut Link, addr: &str) -> Result<(), LinkError> {
     link.set_read_timeout(Duration::from_secs(5))?;
     // Tell V1.0 peers what we can serve (existing arcades ignore this kind).
     let mut nets = serde_json::Map::new();
@@ -259,7 +259,10 @@ fn serve(node: &Node, link: &mut Link, addr: &str) -> Result<(), LinkError> {
     let mut sent_outbox = 0usize;
     let peer = link.peer_id.clone();
     crate::realtime::link_up(node, &peer);
+    // UDP beside this link (docs/compat/UDP.md); nothing changes while it is off.
+    crate::udpsvc::link_up(node, link);
     let r = serve_loop(node, link, addr, &peer, &mut cr_reqs, &mut last_ping, &mut sent_outbox, &mut last_sz, &mut last_hold);
+    crate::udpsvc::link_down(&peer);
     crate::realtime::link_down(&peer);
     r
 }
@@ -292,6 +295,8 @@ fn serve_loop(
         for f in crate::realtime::take(peer) {
             link.send(&f)?;
         }
+        // UDP path: ask, switch over, fall back; proofs and introductions for this link.
+        crate::udpsvc::tick(node, link)?;
         if last_hold.elapsed() > Duration::from_secs(crate::shares::every().clamp(20, 120)) {
             link.send(&crate::shares::hold_frame(node))?;
             *last_hold = std::time::Instant::now();
@@ -304,6 +309,7 @@ fn serve_loop(
         }
         if last_ping.elapsed() > Duration::from_secs(15) {
             link.send(&Frame::new(json!({"t": "ping", "n": format!("{:08x}", now() as u32)})))?;
+            crate::udpsvc::keepalive(link)?;
             *last_ping = std::time::Instant::now();
         }
         // Wait briefly for a frame, so queued room frames go out within ~50 ms.
@@ -344,6 +350,8 @@ fn serve_loop(
             "sh" if f.head["op"] == "q" => crate::shares::answer(node, link, &f.head)?,
             "bk" => serve_bk(node, link, addr, &f.head)?,
             "pub" | "sub" => crate::realtime::on_frame(node, peer, &f),
+            "ud" | "st" | "ui" => crate::udpsvc::on_frame(node, link, &f)?,
+            "ka" => {} // TCP keepalive while frames go over UDP
             "cr" => {
                 if f.head["op"] == "offer" {
                     note_offer(node, &link.peer_id, addr, "cr", &f.head["nets"]);

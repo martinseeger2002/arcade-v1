@@ -61,6 +61,8 @@ macro_rules! cmds {
 cmds! {
     "status" Public "" "Home chain, sync state, tags, profiles, mesh links, node id.";
     "peers" Read "" "Arcades linked over the mesh right now.";
+    "mesh.udp" Read "" "UDP hole punching: STUN server and proved addresses, NAT kind, which links run over UDP paths (RTT, packets), introductions.";
+    "mesh.udp_set" Admin "on?, lan_dial?, stun_port?, drop?" "Turn UDP paths and introductions on or off (ARCADE_MESH_UDP=0 overrides), offer LAN addresses to every peer, set the STUN port for the next start (0 = none); drop = a peer id prefix whose path to fail now (falls back to TCP).";
     "events" Read "n?, kind?" "Recent activity (newest first), optionally of one kind.";
     "mempool" Public "" "Home chain transactions waiting for a block.";
     // Wallet

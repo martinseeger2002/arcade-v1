@@ -154,8 +154,24 @@ pub fn decode_plain(p: &[u8]) -> Result<Frame> {
 
 
 
+/// A second route for a link's frames beside its transport (a UDP path, docs/compat/UDP.md
+/// case i). The link stays the only reader and writer; the side decides per frame.
+pub trait Side: Send {
+    /// Plaintext frames (`encode_plain`) to write over the transport now, before anything
+    /// else ("go" when switching over, "late" chunks and "end" when falling back).
+    fn before(&mut self) -> Vec<Vec<u8>>;
+    /// Carry this plaintext frame on the side route; false = send it over the transport.
+    fn take(&mut self, plain: &[u8]) -> bool;
+    /// A plaintext frame that came over the side route and may be read now.
+    fn poll(&mut self) -> Option<Vec<u8>>;
+    /// Wait up to `d` for `poll` to have something (sleeps when the side has nothing open).
+    fn wait(&mut self, d: Duration) -> bool;
+}
+
 pub struct Link {
     t: Box<dyn crate::transport::Transport>,
+    side: Option<Box<dyn Side>>,
+    keys: ([u8; 32], [u8; 32]),
     send: XChaCha20Poly1305,
     recv: XChaCha20Poly1305,
     n_send: u64,
@@ -193,6 +209,8 @@ impl Link {
 
         let mut link = Link {
             t,
+            side: None,
+            keys: (keys.send, keys.recv),
             send: XChaCha20Poly1305::new_from_slice(&keys.send).unwrap(),
             recv: XChaCha20Poly1305::new_from_slice(&keys.recv).unwrap(),
             n_send: 0,
@@ -261,13 +279,66 @@ impl Link {
     }
 
     pub fn send(&mut self, f: &Frame) -> Result<()> {
-        let ct = self.send.encrypt(&nonce(self.n_send), encode_plain(f).as_slice()).map_err(|_| LinkError::Decrypt)?;
+        let p = encode_plain(f);
+        if let Some(mut side) = self.side.take() {
+            // A side that refuses the frame (its path just failed) has fallback frames to go
+            // first, so ask it again before the frame goes over the transport.
+            let r = self.side_first(&mut *side).map(|_| side.take(&p)).and_then(|t| if t { Ok(true) } else { self.side_first(&mut *side).map(|_| false) });
+            self.side = Some(side);
+            if r? {
+                return Ok(());
+            }
+        }
+        self.seal_send(&p)
+    }
+
+    /// Send over the transport even when a side route is attached (signaling, keepalives).
+    pub fn send_direct(&mut self, f: &Frame) -> Result<()> {
+        self.seal_send(&encode_plain(f))
+    }
+
+    fn seal_send(&mut self, p: &[u8]) -> Result<()> {
+        let ct = self.send.encrypt(&nonce(self.n_send), p).map_err(|_| LinkError::Decrypt)?;
         self.n_send += 1;
         self.t.send(&ct)?;
         Ok(())
     }
 
+    fn side_first(&mut self, side: &mut dyn Side) -> Result<()> {
+        for b in side.before() {
+            self.seal_send(&b)?;
+        }
+        Ok(())
+    }
+
+    /// Write whatever the side route wants sent over the transport now.
+    pub fn side_flush(&mut self) -> Result<()> {
+        if let Some(mut side) = self.side.take() {
+            let r = self.side_first(&mut *side);
+            self.side = Some(side);
+            r?;
+        }
+        Ok(())
+    }
+
+    /// Attach (or remove) a side route.
+    pub fn set_side(&mut self, side: Option<Box<dyn Side>>) {
+        self.side = side;
+    }
+
+    pub fn has_side(&self) -> bool {
+        self.side.is_some()
+    }
+
+    /// The session keys (send, receive), for deriving UDP path keys (udp.py: link._send_key).
+    pub fn session_keys(&self) -> ([u8; 32], [u8; 32]) {
+        self.keys
+    }
+
     pub fn recv(&mut self) -> Result<Frame> {
+        if let Some(p) = self.side.as_mut().and_then(|s| s.poll()) {
+            return decode_plain(&p);
+        }
         let ct = self.t.recv()?;
         let pt = self.recv.decrypt(&nonce(self.n_recv), ct.as_slice()).map_err(|_| LinkError::Decrypt)?;
         self.n_recv += 1;
@@ -283,6 +354,30 @@ impl Link {
     /// Wait up to `d` for a frame to start arriving (nothing is consumed), so the caller can
     /// send queued frames promptly between reads. The read timeout is set back afterwards.
     pub fn ready(&mut self, d: Duration) -> Result<bool> {
+        if let Some(side) = self.side.as_mut() {
+            // Frames may come either way: wake at once for the side, look at the transport
+            // every 20 ms.
+            let end = std::time::Instant::now() + d;
+            let r = loop {
+                if side.wait(Duration::ZERO) {
+                    break Ok(true);
+                }
+                match self.t.wait_readable(Duration::from_millis(1)) {
+                    Ok(true) => break Ok(true),
+                    Err(e) => break Err(e),
+                    Ok(false) => {}
+                }
+                let left = end.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    break Ok(false);
+                }
+                if side.wait(left.min(Duration::from_millis(20))) {
+                    break Ok(true);
+                }
+            };
+            self.t.set_read_timeout(self.read_timeout)?;
+            return Ok(r?);
+        }
         let r = self.t.wait_readable(d);
         self.t.set_read_timeout(self.read_timeout)?;
         Ok(r?)

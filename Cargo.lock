@@ -250,6 +250,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "ureq",
+ "x25519-dalek",
 ]
 
 [[package]]

@@ -3,7 +3,7 @@
 //! serves the local API for the `arcade` CLI and the desktop app.
 //!
 //!   arcaded [--home DIR] [--no-mesh] [--no-seeds] [--mesh-port N|0] [--mesh-peer HOST:PORT]... [--p2p-only]
-//!           [--http-port N|0] [--http-bind ADDR] [--site DIR]
+//!           [--http-port N|0] [--http-bind ADDR] [--site DIR] [--stun-port N|0]
 
 mod accountsvc;
 mod addrsvc;
@@ -36,6 +36,7 @@ mod psync;
 mod realtime;
 mod rpc;
 mod sizes;
+mod udpsvc;
 mod shares;
 
 use node::Node;
@@ -216,6 +217,9 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_secs(600));
             }).unwrap();
         }
+        // STUN server (--stun-port, default 3478, 0 = none) and UDP paths beside mesh links.
+        let stun_flag: Option<u16> = opt("--stun-port").map(|v| v.parse().expect("--stun-port N"));
+        udpsvc::start(node.clone(), stun_flag);
         if let Some(port) = mesh_port {
             let n = node.clone();
             std::thread::Builder::new().name("mesh listen".into()).spawn(move || meshsvc::listen(n, port)).unwrap();
