@@ -1,6 +1,6 @@
 /* Arcade V1.0: arcade.realtime for app pages (the original arcade's realtime.js API). Rooms travel the
-   arcade mesh; until this arcade carries them, join() answers a room that is offline (never a rejection),
-   so apps keep working alone. */
+   arcade mesh. join() never rejects: a room it can't join comes back offline, with why, so apps keep
+   working alone. */
 (function () {
   'use strict';
   window.arcade = window.arcade || {};

@@ -240,6 +240,16 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 | `apps.node` | `/api/v1/apps/node` | local | op, page, to?, body?, after?, limit? | arcade.node for a page: identity, send (sealed node-to-node), sent, replies. |
 | `apps.launch` | `/api/v1/apps/launch` | read | chain, txid | What an app window opens: the sandboxed page URL and the card. |
 
+### Realtime
+
+| method | route | needs | params | what |
+|---|---|---|---|---|
+| `realtime.join` | `/api/v1/realtime/join` | local | page, room, game? | Join a room over the mesh as this arcade's player (game defaults to the page): a token, me and the members. |
+| `realtime.send` | `/api/v1/realtime/send` | local | token, data?, b64? | Send to everyone in the room: text or base64 bytes, at most 512 bytes, about 5 a second. |
+| `realtime.leave` | `/api/v1/realtime/leave` | local | token | Leave the room. |
+| `realtime.poll` | `/api/v1/realtime/poll` | local | token, wait? | Room events for this seat (join, leave, message), waiting up to wait ms (15000 at most); a seat not polled for 30 s is let go. |
+| `realtime.status` | `/api/v1/realtime/status` | read | — | Rooms this arcade has players in, and the routes it knows to other arcades' rooms. |
+
 ### Inscribe
 
 | method | route | needs | params | what |

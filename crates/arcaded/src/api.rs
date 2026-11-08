@@ -197,6 +197,11 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "wallet.deny" => crate::walletsvc::deny(node, &s("id").ok_or("id required")?),
         "apps.owner" => Ok(crate::walletsvc::owner_identity(node, &s("page").ok_or("page required")?)),
         "apps.owner_send" => crate::walletsvc::owner_send(node, &s("page").ok_or("page required")?, &req["request"]),
+        "realtime.join" => crate::realtime::join(node, &s("page").ok_or("page required")?, &s("game").unwrap_or_default(), &s("room").ok_or("room required")?),
+        "realtime.send" => crate::realtime::send(node, &s("token").ok_or("token required")?, req["data"].as_str(), req["b64"].as_str()),
+        "realtime.leave" => crate::realtime::leave(node, &s("token").ok_or("token required")?),
+        "realtime.poll" => crate::realtime::poll(&s("token").ok_or("token required")?, req["wait"].as_u64().unwrap_or(0)),
+        "realtime.status" => Ok(crate::realtime::status(node)),
         "apps.node" => match s("op").as_deref().unwrap_or("") {
             "identity" => crate::msgsvc::node_identity(node),
             "send" => crate::msgsvc::node_send(node, &s("page").ok_or("page required")?, &s("to").unwrap_or_default(), &req["body"]),

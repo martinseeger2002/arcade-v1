@@ -14,6 +14,19 @@ pub trait Transport: Send {
     fn recv(&mut self) -> io::Result<Vec<u8>>;
     fn set_read_timeout(&mut self, d: Duration) -> io::Result<()>;
     fn describe(&self) -> String;
+    /// Wait up to `d` for something to read, without consuming it (so a later recv never
+    /// starts mid-frame). The read timeout is left at `d`; the caller sets it back.
+    fn wait_readable(&mut self, d: Duration) -> io::Result<bool>;
+}
+
+fn peek_tcp(s: &TcpStream, d: Duration) -> io::Result<bool> {
+    s.set_read_timeout(Some(d.max(Duration::from_millis(1))))?;
+    match s.peek(&mut [0u8; 1]) {
+        Ok(0) => Ok(true), // closed: let recv report it
+        Ok(_) => Ok(true),
+        Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 // ---------------- TCP ----------------
@@ -45,6 +58,9 @@ impl Transport for Tcp {
     }
     fn set_read_timeout(&mut self, d: Duration) -> io::Result<()> {
         self.stream.set_read_timeout(Some(d))
+    }
+    fn wait_readable(&mut self, d: Duration) -> io::Result<bool> {
+        peek_tcp(&self.stream, d)
     }
     fn describe(&self) -> String {
         self.stream.peer_addr().map(|a| a.to_string()).unwrap_or_default()
@@ -236,6 +252,17 @@ impl Transport for Wss {
 
     fn set_read_timeout(&mut self, d: Duration) -> io::Result<()> {
         self.s.sock.set_read_timeout(Some(d))
+    }
+    fn wait_readable(&mut self, d: Duration) -> io::Result<bool> {
+        if !self.inbox.is_empty() || !self.partial.is_empty() {
+            return Ok(true);
+        }
+        if let Ok(st) = self.s.conn.process_new_packets() {
+            if st.plaintext_bytes_to_read() > 0 {
+                return Ok(true);
+            }
+        }
+        peek_tcp(&self.s.sock, d)
     }
 
     fn describe(&self) -> String {

@@ -17,6 +17,7 @@ arcade-mesh = { version = "0.1.0", path = "../arcade-mesh" }
 arcade-store = { version = "0.1.0", path = "../arcade-store" }
 arcade-wallet = { version = "0.1.0", path = "../arcade-wallet" }
 base64 = "0.23.1"
+blake2 = "0.10"
 ed25519-dalek = "2"
 flate2 = "1.1.11"
 hex = "0.4.3"

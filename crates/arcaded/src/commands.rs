@@ -171,6 +171,11 @@ cmds! {
     "apps.review" Admin "chain, txid, verdict" "Clear or confirm an app flagged as a lookalike.";
     "apps.trust" Admin "address, on?" "Trust a publisher (never flagged as a lookalike).";
     "apps.storage" Local "page, op, key?, value?" "An app page's saves (load, set, remove, clear, history), as arcade.storage.";
+    "realtime.join" Local "page, room, game?" "Join a room over the mesh as this arcade's player (game defaults to the page): a token, me and the members.";
+    "realtime.send" Local "token, data?, b64?" "Send to everyone in the room: text or base64 bytes, at most 512 bytes, about 5 a second.";
+    "realtime.leave" Local "token" "Leave the room.";
+    "realtime.poll" Local "token, wait?" "Room events for this seat (join, leave, message), waiting up to wait ms (15000 at most); a seat not polled for 30 s is let go.";
+    "realtime.status" Read "" "Rooms this arcade has players in, and the routes it knows to other arcades' rooms.";
     "inscribe" Wallet "data, encoding?, contenttype?, json?" "Inscribe content as this wallet's (arcade INSC; data as text or base64 with encoding: base64).";
     "inscribe.estimate" Public "data, encoding?, contenttype?, json?" "What inscribing that would cost: transactions, fee, value kept in its data outputs.";
     "wallet.requests" Read "page?" "Requests from pages to send, waiting for your answer.";

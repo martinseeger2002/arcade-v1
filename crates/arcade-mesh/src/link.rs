@@ -125,6 +125,12 @@ fn nonce(n: u64) -> XNonce {
 }
 
 pub fn encode_plain(f: &Frame) -> Vec<u8> {
+    // The original always sends "pub" in its binary form when it can (link.py pack).
+    if f.head["t"] == "pub" {
+        if let Some(b) = pack_pub(f) {
+            return b;
+        }
+    }
     let head = compact(&f.head).into_bytes();
     let mut p = Vec::with_capacity(2 + head.len() + f.blob.len());
     p.extend_from_slice(&(head.len() as u16).to_be_bytes());
@@ -135,8 +141,7 @@ pub fn encode_plain(f: &Frame) -> Vec<u8> {
 
 pub fn decode_plain(p: &[u8]) -> Result<Frame> {
     if p.len() >= 3 && p[0] == 0xff && p[1] == 0xff && p[2] == 0x01 {
-        // Binary "pub" form (link.py:240-280). Surface it as kind "pub-bin" for now.
-        return Ok(Frame { head: json!({"t": "pub-bin"}), blob: p.to_vec() });
+        return unpack_pub(p).ok_or_else(|| LinkError::BadFrame("bad binary pub".into()));
     }
     if p.len() < 2 {
         return Err(LinkError::BadFrame("short plaintext".into()));
@@ -158,6 +163,7 @@ pub struct Link {
     /// The peer's node id (hex Ed25519 verify key), proved by its AUTH signature.
     pub peer_id: String,
     pub peer_listen: Option<u16>,
+    read_timeout: Duration,
 }
 
 impl Link {
@@ -193,6 +199,7 @@ impl Link {
             n_recv: 0,
             peer_id: String::new(),
             peer_listen: None,
+            read_timeout: Duration::from_secs(45),
         };
 
         let role = |d: bool| if d { b'D' } else { b'L' };
@@ -269,7 +276,16 @@ impl Link {
 
     /// How long `recv` waits before returning a timeout error (WouldBlock / TimedOut).
     pub fn set_read_timeout(&mut self, d: Duration) -> std::io::Result<()> {
+        self.read_timeout = d;
         self.t.set_read_timeout(d)
+    }
+
+    /// Wait up to `d` for a frame to start arriving (nothing is consumed), so the caller can
+    /// send queued frames promptly between reads. The read timeout is set back afterwards.
+    pub fn ready(&mut self, d: Duration) -> Result<bool> {
+        let r = self.t.wait_readable(d);
+        self.t.set_read_timeout(self.read_timeout)?;
+        Ok(r?)
     }
 
     /// Where this link goes (address or URL).
@@ -312,5 +328,193 @@ mod tests {
         let body = hello_body("arcade-main", &[0; 32]);
         assert!(parse_hello(&body, "arcade-test").is_err());
         assert_eq!(parse_hello(&body, "arcade-main").unwrap(), [0; 32]);
+    }
+}
+
+
+const PUB_KINDS: [&str; 4] = ["msg", "join", "leave", "here"];
+
+/// Binary pub (link.py:234-278): FF FF 01 | origin 32 | sig 64 | q u64 | hops u8 | kind u8 |
+/// room u8+bytes | member u8+bytes | cred u16+sorted compact JSON | d u16 count (FFFF none) +
+/// 4 bytes each | payload. None when the header doesn't fit (then it goes as JSON).
+fn pack_pub(f: &Frame) -> Option<Vec<u8>> {
+    let h = &f.head;
+    let o = hex::decode(h["o"].as_str()?).ok().filter(|v| v.len() == 32)?;
+    let sig = hex::decode(h["sig"].as_str()?).ok().filter(|v| v.len() == 64)?;
+    let q = h["q"].as_u64()?;
+    let hops = u8::try_from(h["hops"].as_u64()?).ok()?;
+    let kind = PUB_KINDS.iter().position(|k| h["k"] == *k)? as u8;
+    let room = h["r"].as_str()?.as_bytes();
+    let member = h["m"].as_str()?.as_bytes();
+    if room.len() > 255 || member.len() > 255 {
+        return None;
+    }
+    let mut b = vec![0xff, 0xff, 0x01];
+    b.extend_from_slice(&o);
+    b.extend_from_slice(&sig);
+    b.extend_from_slice(&q.to_be_bytes());
+    b.push(hops);
+    b.push(kind);
+    b.push(room.len() as u8);
+    b.extend_from_slice(room);
+    b.push(member.len() as u8);
+    b.extend_from_slice(member);
+    match h.get("c") {
+        Some(c) if !c.is_null() => {
+            let c = canonical(c);
+            if c.len() > 0xfffe {
+                return None;
+            }
+            b.extend_from_slice(&(c.len() as u16).to_be_bytes());
+            b.extend_from_slice(&c);
+        }
+        _ => b.extend_from_slice(&0u16.to_be_bytes()),
+    }
+    match h.get("d") {
+        Some(Value::Array(d)) => {
+            if d.len() >= 0xffff {
+                return None;
+            }
+            b.extend_from_slice(&(d.len() as u16).to_be_bytes());
+            for x in d {
+                let x = hex::decode(x.as_str()?).ok().filter(|v| v.len() == 4)?;
+                b.extend_from_slice(&x);
+            }
+        }
+        Some(_) => return None,
+        None => b.extend_from_slice(&0xffffu16.to_be_bytes()),
+    }
+    b.extend_from_slice(&f.blob);
+    Some(b)
+}
+
+fn unpack_pub(p: &[u8]) -> Option<Frame> {
+    let mut i = 3usize;
+    let mut take = |n: usize| -> Option<&[u8]> {
+        let s = p.get(i..i + n)?;
+        i += n;
+        Some(s)
+    };
+    let o = hex::encode(take(32)?);
+    let sig = hex::encode(take(64)?);
+    let q = u64::from_be_bytes(take(8)?.try_into().ok()?);
+    let hops = take(1)?[0];
+    let kind = *PUB_KINDS.get(take(1)?[0] as usize)?;
+    let n = take(1)?[0] as usize;
+    let room = std::str::from_utf8(take(n)?).ok()?.to_string();
+    let n = take(1)?[0] as usize;
+    let member = std::str::from_utf8(take(n)?).ok()?.to_string();
+    let n = u16::from_be_bytes(take(2)?.try_into().ok()?) as usize;
+    let cred: Option<Value> = if n == 0 { None } else { Some(serde_json::from_slice(take(n)?).ok()?) };
+    let n = u16::from_be_bytes(take(2)?.try_into().ok()?);
+    let d: Option<Vec<Value>> = if n == 0xffff {
+        None
+    } else {
+        let mut v = Vec::new();
+        for _ in 0..n {
+            v.push(Value::String(hex::encode(take(4)?)));
+        }
+        Some(v)
+    };
+    let mut head = json!({"t": "pub", "r": room, "o": o, "q": q, "m": member, "k": kind, "hops": hops, "sig": sig});
+    if let Some(c) = cred {
+        head["c"] = c;
+    }
+    if let Some(d) = d {
+        head["d"] = Value::Array(d);
+    }
+    Some(Frame { head, blob: p[i..].to_vec() })
+}
+
+/// Python's json.dumps(v, separators=(",", ":"), sort_keys=True): sorted keys, compact, and
+/// non-ASCII escaped as \uXXXX (ensure_ascii). What the original signs.
+pub fn canonical(v: &Value) -> Vec<u8> {
+    fn put(v: &Value, o: &mut String) {
+        match v {
+            Value::Object(m) => {
+                let mut ks: Vec<&String> = m.keys().collect();
+                ks.sort();
+                o.push('{');
+                for (n, k) in ks.iter().enumerate() {
+                    if n > 0 {
+                        o.push(',');
+                    }
+                    put_str(k, o);
+                    o.push(':');
+                    put(&m[*k], o);
+                }
+                o.push('}');
+            }
+            Value::Array(a) => {
+                o.push('[');
+                for (n, x) in a.iter().enumerate() {
+                    if n > 0 {
+                        o.push(',');
+                    }
+                    put(x, o);
+                }
+                o.push(']');
+            }
+            Value::String(s) => put_str(s, o),
+            other => o.push_str(&other.to_string()),
+        }
+    }
+    fn put_str(s: &str, o: &mut String) {
+        o.push('"');
+        for ch in s.chars() {
+            match ch {
+                '"' => o.push_str("\\\""),
+                '\\' => o.push_str("\\\\"),
+                '\n' => o.push_str("\\n"),
+                '\r' => o.push_str("\\r"),
+                '\t' => o.push_str("\\t"),
+                '\u{8}' => o.push_str("\\b"),
+                '\u{c}' => o.push_str("\\f"),
+                c if (c as u32) < 0x20 || (c as u32) > 0x7f => {
+                    let mut buf = [0u16; 2];
+                    for u in c.encode_utf16(&mut buf) {
+                        o.push_str(&format!("\\u{:04x}", u));
+                    }
+                }
+                c => o.push(c),
+            }
+        }
+        o.push('"');
+    }
+    let mut o = String::new();
+    put(v, &mut o);
+    o.into_bytes()
+}
+
+#[cfg(test)]
+mod pub_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_matches_python() {
+        let v = json!({"b": 1, "a": "h\u{e9}\n\"x\"", "c": [true, null, {"z": "\u{1F600}", "y": 2}]});
+        assert_eq!(
+            String::from_utf8(canonical(&v)).unwrap(),
+            r#"{"a":"h\u00e9\n\"x\"","b":1,"c":[true,null,{"y":2,"z":"\ud83d\ude00"}]}"#
+        );
+    }
+
+    #[test]
+    fn binary_pub_round_trip() {
+        let f = Frame {
+            head: json!({"t": "pub", "r": "g/r", "o": "11".repeat(32), "q": 1_700_000_000_000_000u64, "m": "guest-0123abcd",
+                "k": "join", "hops": 2, "sig": "22".repeat(64), "c": {"a": "x", "x": 5, "s": "y"}, "d": ["0a0b0c0d"]}),
+            blob: b"hi".to_vec(),
+        };
+        let b = encode_plain(&f);
+        assert_eq!(&b[..3], &[0xff, 0xff, 0x01]);
+        let g = decode_plain(&b).unwrap();
+        assert_eq!(g.head, f.head);
+        assert_eq!(g.blob, f.blob);
+        let mut h = f.clone();
+        h.head.as_object_mut().unwrap().remove("c");
+        h.head.as_object_mut().unwrap().remove("d");
+        let g = decode_plain(&encode_plain(&h)).unwrap();
+        assert_eq!(g.head, h.head);
     }
 }

@@ -240,26 +240,58 @@ fn serve(node: &Node, link: &mut Link, addr: &str) -> Result<(), LinkError> {
     let mut cr_reqs = crate::coreshare::Requests::default();
     let mut last_ping = std::time::Instant::now();
     let mut sent_outbox = 0usize;
+    let peer = link.peer_id.clone();
+    crate::realtime::link_up(node, &peer);
+    let r = serve_loop(node, link, addr, &peer, &mut cr_reqs, &mut last_ping, &mut sent_outbox, &mut last_sz, &mut last_hold);
+    crate::realtime::link_down(&peer);
+    r
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve_loop(
+    node: &Node,
+    link: &mut Link,
+    addr: &str,
+    peer: &str,
+    cr_reqs: &mut crate::coreshare::Requests,
+    last_ping: &mut std::time::Instant,
+    sent_outbox: &mut usize,
+    last_sz: &mut std::time::Instant,
+    last_hold: &mut std::time::Instant,
+) -> Result<(), LinkError> {
+    let cr_reqs = &mut *cr_reqs;
     loop {
         // Queued frames: every link sends every frame once.
-        let pending: Vec<Value> = node.mesh_outbox.lock().unwrap().clone();
-        for f in pending.iter().skip(sent_outbox) {
-            link.send(&Frame::new(f.clone()))?;
+        let pending: Vec<Value> = {
+            let ob = node.mesh_outbox.lock().unwrap();
+            let v = ob.iter().skip(*sent_outbox).cloned().collect();
+            *sent_outbox = ob.len();
+            v
+        };
+        for f in pending {
+            link.send(&Frame::new(f))?;
         }
-        sent_outbox = pending.len();
+        // Room traffic for this link (routed, not flooded).
+        for f in crate::realtime::take(peer) {
+            link.send(&f)?;
+        }
         if last_hold.elapsed() > Duration::from_secs(crate::shares::every().clamp(20, 120)) {
             link.send(&crate::shares::hold_frame(node))?;
-            last_hold = std::time::Instant::now();
+            *last_hold = std::time::Instant::now();
         }
         if last_sz.elapsed() > Duration::from_secs(3600) {
             if let Some(sz) = crate::sizes::frame(node) {
                 link.send(&Frame::new(sz))?;
             }
-            last_sz = std::time::Instant::now();
+            *last_sz = std::time::Instant::now();
         }
         if last_ping.elapsed() > Duration::from_secs(15) {
             link.send(&Frame::new(json!({"t": "ping", "n": format!("{:08x}", now() as u32)})))?;
-            last_ping = std::time::Instant::now();
+            *last_ping = std::time::Instant::now();
+        }
+        // Wait briefly for a frame, so queued room frames go out within ~50 ms.
+        if !link.ready(Duration::from_millis(50))? {
+            continue;
         }
         let f = match link.recv() {
             Ok(f) => f,
@@ -294,11 +326,12 @@ fn serve(node: &Node, link: &mut Link, addr: &str) -> Result<(), LinkError> {
             "sh" if f.head["op"] == "hold" => crate::shares::on_hold(node, &link.peer_id, &f.head),
             "sh" if f.head["op"] == "q" => crate::shares::answer(node, link, &f.head)?,
             "bk" => serve_bk(node, link, addr, &f.head)?,
+            "pub" | "sub" => crate::realtime::on_frame(node, peer, &f),
             "cr" => {
                 if f.head["op"] == "offer" {
                     note_offer(node, &link.peer_id, addr, "cr", &f.head["nets"]);
                 }
-                crate::coreshare::handle(node, link, &mut cr_reqs, &f)?
+                crate::coreshare::handle(node, link, cr_reqs, &f)?
             }
             _ => {} // unknown kinds are ignored, as the existing arcade does
         }

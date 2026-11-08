@@ -1,7 +1,7 @@
 // The app window: run one app sandboxed in a frame and answer what it asks (the original arcade's
-// viewer "doors"): storage through this arcade, its window state, rooms (offline until the mesh
-// carries them). Only messages from the app's own frame are answered; the page's identity is the
-// page this window opened, never what a message says.
+// viewer "doors"): storage through this arcade, its window state, rooms over the arcade mesh.
+// Only messages from the app's own frame are answered; the page's identity is the page this
+// window opened, never what a message says.
 (() => {
   const q = new URLSearchParams(location.search);
   const frame = q.get("frame") || "";
@@ -181,13 +181,66 @@
       return { ...appState };
     },
     async realtime(m) {
-      if (m.op === "join") return { online: false, why: "rooms are coming to Arcade V1.0: playing alone for now", me: null, members: [] };
-      if (m.op === "leave") return {};
+      const name = String(m.room == null ? "" : m.room);
+      if (m.op === "join") {
+        if (rooms[name]) { const old = rooms[name]; delete rooms[name]; api("realtime.leave", { token: old.token }).catch(() => {}); }
+        let r;
+        try { r = await api("realtime.join", { page: here, game: String(m.game || ""), room: name }); }
+        catch (err) { return { online: false, why: String(err && err.message || err), me: null, members: [] }; }
+        const seat = { token: r.token, game: String(m.game || "") };
+        rooms[name] = seat;
+        listen(name, seat);
+        return { online: true, me: r.me, members: r.members, fast: false, media: false, screen: false };
+      }
+      if (m.op === "send") {
+        const seat = rooms[name];
+        if (!seat) throw new Error("join the room first");
+        await api("realtime.send", { token: seat.token, data: typeof m.data === "string" ? m.data : JSON.stringify(m.data) });
+        return {};
+      }
+      if (m.op === "leave") {
+        const seat = rooms[name]; delete rooms[name];
+        if (seat) await api("realtime.leave", { token: seat.token }).catch(() => {});
+        return {};
+      }
       if (m.op === "ringed") return { ring: null };
       if (m.op === "ring") return { rung: false, why: "ringing is coming to Arcade V1.0" };
-      throw new Error("not in a room: rooms are coming to Arcade V1.0");
+      if (m.op === "media") throw new Error("media needs a room joined with {fast: true}");
+      throw new Error("realtime ops are join, send, media and leave");
     },
   };
+
+  // Rooms: one seat per room name; each listens for its events and hands them to the page.
+  const rooms = {};
+  const push = (event) => el.contentWindow?.postMessage({ arcade: "realtime", event }, "*");
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function listen(name, seat) {
+    let fails = 0;
+    while (rooms[name] === seat) {
+      let r;
+      try { r = await api("realtime.poll", { token: seat.token, wait: 10000 }); fails = 0; }
+      catch (err) {
+        // The arcade service is restarting: say so once, keep trying.
+        if (fails++ === 0) push({ type: "reconnecting", room: name });
+        await pause(Math.min(5000, 500 * fails));
+        if (fails > 1) r = { events: [], gone: true }; else continue;
+      }
+      if (rooms[name] !== seat) return;
+      for (const ev of r.events || []) if (ev.type !== "reconnecting") push(ev);
+      if (r.gone) {
+        // The seat was let go (the service restarted): take it again.
+        try {
+          const j = await api("realtime.join", { page: here, game: seat.game, room: name });
+          seat.token = j.token; fails = 0;
+          push({ type: "rejoined", room: name, member: j.me, media: null });
+          for (const p of j.members || []) if (!j.me || p.id !== j.me.id) push({ type: "join", room: name, member: p });
+        } catch (err) { await pause(2000); }
+      }
+    }
+  }
+  window.addEventListener("pagehide", () => {
+    for (const k of Object.keys(rooms)) { api("realtime.leave", { token: rooms[k].token }).catch(() => {}); delete rooms[k]; }
+  });
 
   window.addEventListener("message", async (e) => {
     if (e.source !== el.contentWindow) return;

@@ -29,6 +29,7 @@ mod grpsvc;
 mod feedsvc;
 mod node;
 mod psync;
+mod realtime;
 mod rpc;
 mod sizes;
 mod shares;
@@ -129,6 +130,10 @@ fn main() {
     {
         let n = node.clone();
         std::thread::Builder::new().name("messages".into()).spawn(move || msgsvc::run(n)).unwrap();
+    }
+    {
+        let n = node.clone();
+        std::thread::Builder::new().name("rooms".into()).spawn(move || realtime::run(n)).unwrap();
     }
     {
         let n = node.clone();

@@ -19,8 +19,9 @@ fn home() -> std::path::PathBuf {
     base.join("arcade")
 }
 
-/// Forward one request to arcaded and return its answer.
-#[tauri::command]
+/// Forward one request to arcaded and return its answer (off the UI thread: some wait, such as
+/// realtime.poll).
+#[tauri::command(async)]
 fn api(req: Value) -> Value {
     let sock = home().join("arcaded.sock");
     let mut s = match UnixStream::connect(&sock) {

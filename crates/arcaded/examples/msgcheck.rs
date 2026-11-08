@@ -16,12 +16,19 @@ fn main() {
         .expect("tx not found");
     let prev: Vec<arcade_ledger::extract::Prevout> = tx.inputs.iter().map(|i| {
         if let Ok(Some(c)) = chain.coin(p, &i.prevout) { return arcade_ledger::extract::Prevout { value: c.value, script: c.script }; }
-        let t = txs.iter().find(|t| t.txid == i.prevout.txid).expect("parent");
+        let t = txs.iter().find(|t| t.txid == i.prevout.txid).cloned()
+            .or_else(|| chain.tx_raw(p, &i.prevout.txid).ok().flatten().and_then(|(raw, _)| arcade_chain::Tx::parse_with(&raw, &p.format).ok()))
+            .expect("parent");
         let o = &t.outputs[i.prevout.vout as usize];
         arcade_ledger::extract::Prevout { value: o.value, script: o.script_pubkey.clone() }
     }).collect();
-    let atx = arcade_ledger::extract::extract(&tx, &prev, p).expect("arcade tx").expect("readable");
-    let arcm = arcade_ledger::messages::arcm_of(&atx.payload).expect("arcm");
+    let atx = match arcade_ledger::extract::extract(&tx, &prev, p) {
+        None => return println!("not an arcade tx"),
+        Some(Err(e)) => return println!("arcade tx, unreadable: {e:?}"),
+        Some(Ok(a)) => a,
+    };
+    println!("payload {} bytes, head {}", atx.payload.len(), hex::encode(&atx.payload[..atx.payload.len().min(24)]));
+    let Some(arcm) = arcade_ledger::messages::arcm_of(&atx.payload) else { return println!("not arcm") };
     println!("class {:?} sender {} payload {} bytes, type {}", atx.class, atx.sender, arcm.len(), arcm[5]);
     match arcade_msg::envelope::open_single(&k.secret, arcm) {
         Ok(o) => println!("opened: from {} (me: {}) text {:?}", hex::encode(o.sender), o.sender == k.public_bytes(), String::from_utf8_lossy(&o.message)),

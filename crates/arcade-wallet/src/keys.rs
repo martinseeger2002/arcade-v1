@@ -180,9 +180,72 @@ pub fn verify_message(pubkey_hex: &str, message: &[u8], sig_hex: &str) -> bool {
     secp256k1::SECP256K1.verify_ecdsa(&secp256k1::Message::from_digest(sha256d(message)), &sig, &pk).is_ok()
 }
 
+/// Pepecoin's message magic (the same on mainnet and testnet), as Core's signmessage uses.
+pub const PEPECOIN_MAGIC: &str = "Pepecoin Signed Message:\n";
+
+fn varstr(b: &[u8], out: &mut Vec<u8>) {
+    let n = b.len();
+    if n < 0xfd {
+        out.push(n as u8);
+    } else if n <= 0xffff {
+        out.push(0xfd);
+        out.extend_from_slice(&(n as u16).to_le_bytes());
+    } else {
+        out.push(0xfe);
+        out.extend_from_slice(&(n as u32).to_le_bytes());
+    }
+    out.extend_from_slice(b);
+}
+
+fn core_digest(magic: &str, message: &str) -> [u8; 32] {
+    let mut m = Vec::new();
+    varstr(magic.as_bytes(), &mut m);
+    varstr(message.as_bytes(), &mut m);
+    sha256d(&m)
+}
+
+/// Core's signmessage: a 65-byte compact recoverable signature (compressed key), base64.
+pub fn signmessage(key: &SecretKey, magic: &str, message: &str) -> String {
+    use base64::Engine as _;
+    let sig = SECP256K1.sign_ecdsa_recoverable(&secp256k1::Message::from_digest(core_digest(magic, message)), key);
+    let (rec, rs) = sig.serialize_compact();
+    let mut out = vec![27 + 4 + rec.to_i32() as u8];
+    out.extend_from_slice(&rs);
+    base64::engine::general_purpose::STANDARD.encode(out)
+}
+
+/// Core's verifymessage for a P2PKH address (any version byte).
+pub fn verifymessage(address: &str, sig_b64: &str, magic: &str, message: &str) -> bool {
+    use base64::Engine as _;
+    let Some((version, h)) = arcade_ledger::address::decode_base58check(address.trim()) else { return false };
+    if h.len() != 20 {
+        return false;
+    }
+    let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(sig_b64.trim()) else { return false };
+    if raw.len() != 65 || !(27..=34).contains(&raw[0]) {
+        return false;
+    }
+    let compressed = raw[0] >= 31;
+    let Ok(rec) = secp256k1::ecdsa::RecoveryId::from_i32(((raw[0] - 27) & 3) as i32) else { return false };
+    let Ok(sig) = secp256k1::ecdsa::RecoverableSignature::from_compact(&raw[1..], rec) else { return false };
+    let Ok(pk) = SECP256K1.recover_ecdsa(&secp256k1::Message::from_digest(core_digest(magic, message)), &sig) else { return false };
+    let ser = if compressed { pk.serialize().to_vec() } else { pk.serialize_uncompressed().to_vec() };
+    let _ = version;
+    arcade_ledger::address::hash160(&ser)[..] == h[..]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_signmessage_round_trip() {
+        let k = SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let a = p2pkh_address(&k.public_key(SECP256K1), 113);
+        let s = signmessage(&k, PEPECOIN_MAGIC, "arcade-realtime\nx");
+        assert!(verifymessage(&a, &s, PEPECOIN_MAGIC, "arcade-realtime\nx"));
+        assert!(!verifymessage(&a, &s, PEPECOIN_MAGIC, "arcade-realtime\ny"));
+    }
 
     #[test]
     fn wif_and_messages() {

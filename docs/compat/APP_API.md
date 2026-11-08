@@ -122,6 +122,12 @@ first arrival sets the route back; 4/s burst 10 per origin; routes expire after 
 Limits: payload 512 B, 5/s burst 10 per member, 256 members per room per node, 2048 rooms per node, 16 hops,
 credential ≤ 400 B.
 
+V1.0 status (crates/arcaded/src/realtime.rs): rooms over the mesh as above: pub (JSON and binary), sub routes,
+here beats, certs (Pepecoin signmessage over the cert words, "arcade-main"), guests, dedup, hops, rate limits.
+The app window's door joins, sends, leaves and long-polls realtime.poll for events. Checked: three local arcades
+see each other's joins, messages (~15 ms) and leaves; live sub frames from original arcades verify. Not yet: the
+fast lane (WebRTC), media, ring/ringed, area's moving cells, and /realtime/* for web visitors.
+
 ## A3. arcade.app (/r/app.js) and ringing
 - window.arcade.app = {on(fn), off(fn), state() → Promise}; state object {state: "open"|"minimized"|"restored"|
   "closing", timeout: seconds|null, closesAt: ms|null, inShell}; initial {state:'open', timeout:null,
