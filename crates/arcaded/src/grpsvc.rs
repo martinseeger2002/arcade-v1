@@ -20,6 +20,8 @@ use serde_json::{json, Value};
 pub const INVITE: &str = "\u{0}arcade-group/1\n";
 pub const LEFT: &str = "\u{0}arcade-group-left/1\n";
 pub const UPDATE: &str = "\u{0}arcade-group-v1/1\n";
+/// Body field naming the members a line adds (V1.0; the invite went to them alone).
+pub const ADDED_KEY: &str = "v1_added";
 
 fn gid(public: &[u8; 32]) -> String {
     use sha2::Digest;
@@ -85,9 +87,25 @@ pub fn on_invite(node: &Node, sender: &str, text: &str) -> Option<String> {
 }
 
 /// A line opened with a group's key: what kind of row it makes.
-pub fn line_kind(node: &Node, id: &str, from_address: &str, sender: &str, text: &str) -> &'static str {
+pub fn line_kind(node: &Node, id: &str, from_address: &str, sender: &str, text: &str, extra: &Value) -> &'static str {
     let Some(mut g) = get(node, id) else { return "group" };
     let member = g["members"].as_array().is_some_and(|m| m.iter().any(|x| x["address"] == from_address));
+    // A member added people: the line names them (the invite went to them alone).
+    if let Some(added) = extra.get(ADDED_KEY).and_then(|a| a.as_array()) {
+        if member {
+            let mut members = g["members"].as_array().cloned().unwrap_or_default();
+            for m in added.iter().take(50) {
+                let ok = m["key"].as_str().is_some_and(|k| k.len() == 64 && hex::decode(k).is_ok()) && m["address"].is_string();
+                if ok && !members.iter().any(|x| x["key"] == m["key"]) {
+                    members.push(json!({"tag": m["tag"], "key": m["key"], "address": m["address"]}));
+                }
+            }
+            g["members"] = json!(members);
+            let _ = put(node, &g);
+            return "group_added";
+        }
+        return "group_stranger";
+    }
     if text.starts_with(LEFT) {
         if member {
             let mut left = g["left"].as_array().cloned().unwrap_or_default();
@@ -129,7 +147,19 @@ fn send_invites(node: &Node, g: &Value) -> Result<(Vec<String>, u64), String> {
     send_invites_first(node, g, &[])
 }
 
-/// As send_invites, with these members' invites first (people just added).
+/// The invite to these members only (people just added).
+fn send_invites_to(node: &Node, g: &Value, keys: &[String]) -> Result<(Vec<String>, u64), String> {
+    let k = crate::msgsvc::keys(node)?;
+    let body = Body::text(&format!("{INVITE}{}", g)).encode();
+    let mut payloads = Vec::new();
+    for key in keys {
+        let pk: [u8; 32] = hex::decode(key).ok().and_then(|b| b.try_into().ok()).ok_or("bad member key")?;
+        payloads.extend(env::private(&k.secret, &crypto_box::PublicKey::from(pk), &body));
+    }
+    crate::msgsvc::send_payloads(node, &payloads)
+}
+
+/// As send_invites, with these members' invites first.
 fn send_invites_first(node: &Node, g: &Value, first: &[String]) -> Result<(Vec<String>, u64), String> {
     let k = crate::msgsvc::keys(node)?;
     let text = format!("{INVITE}{}", g);
@@ -180,19 +210,24 @@ pub fn create(node: &Node, name: &str, names: &[String], description: &str) -> R
 
 /// Write a line to a group (text and/or a file), sealed to the group's key.
 pub fn say(node: &Node, id: &str, text: &str, file: Option<arcade_msg::content::File>) -> Result<Value, String> {
+    say_with(node, id, text, file, serde_json::Map::new())
+}
+
+fn say_with(node: &Node, id: &str, text: &str, file: Option<arcade_msg::content::File>, extra: serde_json::Map<String, Value>) -> Result<Value, String> {
     let g = get(node, id).ok_or("no such group")?;
     let k = crate::msgsvc::keys(node)?;
     let pk: [u8; 32] = hex::decode(g["public"].as_str().unwrap_or("")).ok().and_then(|b| b.try_into().ok()).ok_or("bad group key")?;
     let mut body = Body::text(text);
     body.file = file;
+    body.extra = extra.clone();
     let (txids, fee) = crate::msgsvc::send_payloads(node, &env::private(&k.secret, &crypto_box::PublicKey::from(pk), &body.encode()))?;
     let (addr, _, _) = crate::msgsvc::sender_key(node)?;
     let row = json!({
         "id": txids[0], "txids": txids, "dir": "out", "peer": id, "group": id, "peer_address": addr, "from_address": addr,
         "sender": hex::encode(k.public_bytes()), "at": arcade_app::now(), "height": 0,
-        "kind": if text.starts_with(LEFT) { "group_left" } else if text.starts_with(UPDATE) { "group_update" } else { "group" },
+        "kind": if text.starts_with(LEFT) { "group_left" } else if text.starts_with(UPDATE) { "group_update" } else if extra.contains_key(ADDED_KEY) { "group_added" } else { "group" },
         "text": text, "file": body.file.as_ref().map(|f| json!({"name": f.name, "type": f.mime, "size": f.bytes.len()})),
-        "extra": {}, "unread": false, "fee": fee,
+        "extra": Value::Object(extra), "unread": false, "fee": fee,
     });
     crate::msgsvc::keep(node, &row, body.file.as_ref().map(|f| f.bytes.as_slice()))?;
     Ok(json!({"id": txids[0], "txids": txids, "fee": fee}))
@@ -272,7 +307,7 @@ pub fn list(node: &Node) -> Value {
         .filter(|g| g["current"] == true)
         .map(|g| {
             let lineage: Vec<String> = lineage(node, &g);
-            let lines: Vec<&Value> = rows.iter().filter(|m| m["kind"] == "group" && lineage.iter().any(|l| m["group"] == l.as_str())).collect();
+            let lines: Vec<&Value> = rows.iter().filter(|m| (m["kind"] == "group" || m["kind"] == "group_added") && lineage.iter().any(|l| m["group"] == l.as_str())).collect();
             let last = lines.iter().max_by_key(|m| m["at"].as_u64().unwrap_or(0));
             json!({"id": g["id"], "name": g["name"], "members": g["members"], "v1": g["v1"], "left": g["left"],
                    "last": last.map(|m| json!({"text": m["text"], "at": m["at"], "dir": m["dir"]})),
@@ -297,7 +332,7 @@ fn lineage(node: &Node, g: &Value) -> Vec<String> {
 pub fn thread(node: &Node, id: &str) -> Result<Value, String> {
     let g = get(node, id).ok_or("no such group")?;
     let ids = lineage(node, &g);
-    let mut lines: Vec<Value> = crate::msgsvc::all(node).into_iter().filter(|m| m["kind"] == "group" && ids.iter().any(|l| m["group"] == l.as_str())).collect();
+    let mut lines: Vec<Value> = crate::msgsvc::all(node).into_iter().filter(|m| (m["kind"] == "group" || m["kind"] == "group_added") && ids.iter().any(|l| m["group"] == l.as_str())).collect();
     lines.sort_by_key(|m| m["at"].as_u64().unwrap_or(0));
     let mut info = g.clone();
     if let Some(o) = info.as_object_mut() {
@@ -390,7 +425,8 @@ pub fn open_live(node: &Node, id: &str, sealed: &str) -> Result<Value, String> {
     Ok(json!({"text": text}))
 }
 
-/// Add members to a group (they get the group's key; everyone's member list is updated).
+/// Add members to a group: the invite (with the key) goes to them alone, and one line to the
+/// group names them so everyone's member list takes them in.
 pub fn add(node: &Node, id: &str, names: &[String]) -> Result<Value, String> {
     let mut g = get(node, id).ok_or("not a group of yours")?;
     if names.len() > 50 {
@@ -412,8 +448,26 @@ pub fn add(node: &Node, id: &str, names: &[String]) -> Result<Value, String> {
         o.remove("left");
         o.remove("mine_left");
     }
-    let (txids, fee) = send_invites_first(node, &sent, &added)?;
+    if added.is_empty() {
+        return Err("everybody named is already in this group".into());
+    }
+    // The key goes to the people added, and nobody else; one line sealed to the group tells
+    // everyone already in it who joined (original arcades show it as a chat line).
+    let (mut txids, mut fee) = send_invites_to(node, &sent, &added)?;
     put(node, &g)?;
+    let newcomers: Vec<Value> = members.iter().filter(|m| m["key"].as_str().is_some_and(|k| added.iter().any(|a| a == k))).cloned().collect();
+    let names: Vec<String> = newcomers.iter().map(|m| m["tag"].as_str().map(|t| format!("@{t}")).unwrap_or_else(|| m["address"].as_str().unwrap_or("").to_string())).collect();
+    let (_, my_tag, _) = crate::msgsvc::sender_key(node)?;
+    let who = my_tag.map(|t| format!("@{t}")).unwrap_or_else(|| "A member".into());
+    let mut extra = serde_json::Map::new();
+    extra.insert(ADDED_KEY.into(), json!(newcomers));
+    match say_with(node, id, &format!("{who} added {}", names.join(", ")), None, extra) {
+        Ok(r) => {
+            txids.extend(r["txids"].as_array().cloned().unwrap_or_default().into_iter().filter_map(|t| t.as_str().map(String::from)));
+            fee += r["fee"].as_u64().unwrap_or(0);
+        }
+        Err(e) => return Err(format!("{} invited, but the line telling the group failed: {e}", names.join(", "))),
+    }
     let mut info = g.clone();
     if let Some(o) = info.as_object_mut() {
         o.remove("secret");

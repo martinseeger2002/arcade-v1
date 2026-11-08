@@ -134,7 +134,7 @@ fn take(node: &Node, me: &[u8; 32], o: &env::Opened, group: Option<String>, cand
             let sender = hex::encode(o.sender);
             let mine_addr = sender_key(node).map(|(a, _, _)| a).unwrap_or_default();
             let text = row["text"].as_str().unwrap_or("").to_string();
-            row["kind"] = json!(crate::grpsvc::line_kind(node, &gid, from, &sender, &text));
+            row["kind"] = json!(crate::grpsvc::line_kind(node, &gid, from, &sender, &text, &row["extra"]));
             row["group"] = json!(gid);
             row["peer"] = json!(gid);
             row["sender"] = json!(sender);
