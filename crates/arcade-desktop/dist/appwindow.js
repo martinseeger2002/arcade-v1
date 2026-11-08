@@ -62,6 +62,16 @@
   }
 
   const doors = {
+    async node(m) {
+      if (m.op === "identity") return await api("apps.node", { op: "identity" });
+      if (m.op === "send") return await api("apps.node", { op: "send", page: here, to: String(m.to || ""), body: m.body });
+      if (m.op === "sent") return await api("apps.node", { op: "sent", page: here });
+      if (m.op === "replies") return await api("apps.node", { op: "replies", page: here, after: m.after || 0, limit: m.limit || 100 });
+      throw new Error("node ops are identity, send, sent and replies");
+    },
+    async state(m) {
+      throw new Error("this arcade has no referee for that game yet: its state can be read, not written, here");
+    },
     async inscribe(m) {
       if (!(await walletGate("inscribe something as yours"))) throw new Error("Cancelled.");
       const encoding = m.encoding === "base64" ? "base64" : "";

@@ -179,6 +179,7 @@ cmds! {
     "wallet.deny" Local "id" "Refuse a request.";
     "apps.owner" Read "page" "arcade.owner.identity: whether this wallet created the page and still holds it.";
     "apps.owner_send" Local "page, request" "arcade.owner.send: a page this wallet created and holds sends at once (testnet).";
+    "apps.node" Local "op, page, to?, body?, after?, limit?" "arcade.node for a page: identity, send (sealed node-to-node), sent, replies.";
     "apps.launch" Read "chain, txid" "What an app window opens: the sandboxed page URL and the card.";
     // API keys (managed from this computer only)
     "apikey.list" Local "" "API keys (not their secrets).";

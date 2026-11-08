@@ -197,6 +197,13 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "wallet.deny" => crate::walletsvc::deny(node, &s("id").ok_or("id required")?),
         "apps.owner" => Ok(crate::walletsvc::owner_identity(node, &s("page").ok_or("page required")?)),
         "apps.owner_send" => crate::walletsvc::owner_send(node, &s("page").ok_or("page required")?, &req["request"]),
+        "apps.node" => match s("op").as_deref().unwrap_or("") {
+            "identity" => crate::msgsvc::node_identity(node),
+            "send" => crate::msgsvc::node_send(node, &s("page").ok_or("page required")?, &s("to").unwrap_or_default(), &req["body"]),
+            "sent" => Ok(json!({"sent": crate::msgsvc::node_sent(node, &s("page").ok_or("page required")?)})),
+            "replies" => Ok(json!({"replies": crate::msgsvc::node_replies(node, &s("page").ok_or("page required")?, req["after"].as_u64().unwrap_or(0), req["limit"].as_u64().unwrap_or(100) as usize)})),
+            _ => Err("node ops are identity, send, sent and replies".into()),
+        },
         "apps.storage" => crate::appsvc::storage(node, &s("page").ok_or("page required")?, &s("op").ok_or("op required")?, req["key"].as_str(), req["value"].as_str()),
         "apps.launch" => crate::appsvc::launch(node, &s("chain").ok_or("chain required")?, &s("txid").ok_or("txid required")?),
         "rpc.help" => Ok(crate::commands::help()),

@@ -263,6 +263,8 @@ pub fn route(node: &Node, path: &str, q: &serde_json::Map<String, Value>) -> (u1
         },
         ["doginals", a] => (200, json!({"address": a, "unknown": 0, "items": []}).to_string()),
         ["collection-item", _, _] => missing("no collection this arcade knows names it"),
+        ["state", piece] => (200, state_of(node, piece, None).to_string()),
+        ["state", fam, piece] => (200, state_of(node, piece, Some(fam)).to_string()),
         ["pending", a] => (200, json!({"address": a, "incoming": [], "outgoing": []}).to_string()),
         _ => missing("not a route of this arcade's page API"),
     }
@@ -602,4 +604,74 @@ pub fn inscribe(node: &Node, content: &[u8], ctype: &str, json: Option<&str>) ->
     let (txids, fee) = crate::msgsvc::send_payloads(node, &chunks)?;
     let _ = node.app.event("wallet", &format!("inscribing {} bytes of {ctype} in {} transaction{} ({})", content.len(), txids.len(), if txids.len() == 1 { "" } else { "s" }, txids[0]));
     Ok(json!({"txid": txids[0], "txids": txids, "fee": fee}))
+}
+
+// ---------------- arcade.state: a game's own record on each piece ----------------
+
+/// Games that declare state ({"state": {publisher, judge, show}} beside their card, on an HTML
+/// inscription): family -> (owner = first declaring creator, newest declaration by that owner).
+fn state_games(node: &Node) -> std::collections::BTreeMap<String, (String, Value, String)> {
+    let mut rows = all_inscriptions(node);
+    rows.sort_by(|a, b| a["number"].as_u64().cmp(&b["number"].as_u64()));
+    let mut out: std::collections::BTreeMap<String, (String, Value, String)> = Default::default();
+    for v in rows {
+        if !v["content_type"].as_str().unwrap_or("").to_ascii_lowercase().starts_with("text/html") {
+            continue;
+        }
+        let raw = v["json"].as_str().unwrap_or("");
+        if !raw.contains("\"state\"") {
+            continue;
+        }
+        let Some(card) = arcade_ledger::cards::parse(raw) else { continue };
+        let Ok(j) = serde_json::from_str::<Value>(raw) else { continue };
+        if card.family.is_empty() || !j["state"].is_object() {
+            continue;
+        }
+        let creator = v["creator"].as_str().unwrap_or("").to_string();
+        match out.get(&card.family) {
+            Some((owner, _, _)) if *owner != creator => {} // the family belongs to who declared it first
+            _ => {
+                out.insert(card.family.clone(), (creator, j["state"].clone(), card.name.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Every game's state on one piece: [{family, game, name, state, seq, height, show}].
+pub fn state_of(node: &Node, piece: &str, family: Option<&str>) -> Value {
+    let games = state_games(node);
+    let recs = arcade_ledger::messages::rows(&node.chain, arcade_ledger::messages::MACHINE, c(node)).unwrap_or_default();
+    let mut best: std::collections::BTreeMap<String, (u64, Value, Value)> = Default::default();
+    for (h, r) in recs.iter().enumerate() {
+        let Some(gs) = r.get("gamestate") else { continue };
+        let fam = gs["f"].as_str().unwrap_or("");
+        if family.is_some_and(|f| f != fam) {
+            continue;
+        }
+        let Some((_, decl, _)) = games.get(fam) else { continue };
+        if r["from"] != decl["publisher"] {
+            continue; // only the publisher the game names writes its state
+        }
+        for u in gs["u"].as_array().cloned().unwrap_or_default() {
+            if u[0] != piece {
+                continue;
+            }
+            let seq = u[1].as_u64().unwrap_or(0);
+            if best.get(fam).is_none_or(|b| seq > b.0) {
+                best.insert(fam.to_string(), (seq, u[2].clone(), json!(h)));
+            }
+        }
+    }
+    let list: Vec<Value> = best
+        .into_iter()
+        .map(|(fam, (seq, st, _))| {
+            let (_, decl, name) = &games[&fam];
+            json!({"family": fam, "game": name, "name": name, "state": st, "seq": seq, "height": Value::Null, "show": decl["show"]})
+        })
+        .collect();
+    match family {
+        Some(_) => list.into_iter().next().unwrap_or(Value::Null),
+        None => json!(list),
+    }
 }

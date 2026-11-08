@@ -82,7 +82,9 @@ pub fn all(node: &Node) -> Vec<Value> {
 
 /// A message row from what was opened.
 fn row_of(me: &[u8; 32], opened: &env::Opened, cand: &Value, height: u32, at: u64) -> (Value, Option<Vec<u8>>) {
-    let body = Body::parse(&opened.message);
+    // Node-to-node (API) messages start with an 8-byte stamp ("DA", protocol, api fingerprint, 0).
+    let (stamp, plain) = if opened.kind == env::API && opened.message.len() >= 8 { (hex::encode(&opened.message[..8]), &opened.message[8..]) } else { (String::new(), &opened.message[..]) };
+    let body = Body::parse(plain);
     let file = body.file.as_ref().map(|f| f.bytes.clone());
     let mut extra = body.extra.clone();
     let mine = opened.sender == *me;
@@ -107,7 +109,7 @@ fn row_of(me: &[u8; 32], opened: &env::Opened, cand: &Value, height: u32, at: u6
         "id": cand["txid"], "txids": [cand["txid"]], "dir": dir, "peer": peer, "peer_address": peer_address,
         "from_address": cand["from"], "at": at, "height": height, "kind": kind,
         "text": body.text, "file": body.file.as_ref().map(|f| json!({"name": f.name, "type": f.mime, "size": f.bytes.len()})),
-        "extra": Value::Object(extra), "unread": dir == "in",
+        "extra": Value::Object(extra), "unread": dir == "in", "stamp": stamp,
     });
     (row, file)
 }
@@ -618,4 +620,74 @@ pub fn announce_if_needed(node: &Node) -> Result<Option<String>, String> {
     node.app.store.write(|w| w.put(arcade_app::META, flag.as_bytes(), &arcade_app::now().to_be_bytes())).map_err(|e| e.to_string())?;
     let _ = node.app.event("messages", &format!("published your messaging key for @{tag} (fee {fee})"));
     Ok(txids.into_iter().next())
+}
+
+// ---------------- arcade.node: node-to-node messages for app pages ----------------
+
+const NODE_PER_HOUR: usize = 30;
+
+fn talks(node: &Node, page: &str) -> Vec<Value> {
+    node.app.store.read(|r| r.get(arcade_app::META, format!("nodetalk:{page}").as_bytes())).ok().flatten()
+        .and_then(|v| serde_json::from_slice::<Vec<Value>>(&v).ok()).unwrap_or_default()
+}
+
+pub fn node_identity(node: &Node) -> Result<Value, String> {
+    let k = keys(node)?;
+    let pk = hex::encode(k.public_bytes());
+    Ok(json!({"pubkey": pk, "contactcode": pk, "network": node.params.net, "maxbytes": env::MAX_PAYLOAD - 134 - 8}))
+}
+
+/// Seal and send an API message (type 6: stamp + JSON) from this wallet's messaging key.
+pub fn node_send(node: &Node, page: &str, to: &str, body: &Value) -> Result<Value, String> {
+    let rk: [u8; 32] = hex::decode(to.trim()).ok().and_then(|b| b.try_into().ok()).ok_or("to is another node's public key (64 hex)")?;
+    let mut sent = talks(node, page);
+    let hour_ago = arcade_app::now().saturating_sub(3600);
+    if sent.iter().filter(|s| s["created"].as_u64().unwrap_or(0) > hour_ago).count() >= NODE_PER_HOUR {
+        return Err("thirty messages an hour per page: wait until the hour turns".into());
+    }
+    let text = match body { Value::String(s) => s.clone(), other => other.to_string() };
+    let mut plain = vec![b'D', b'A', 1, 0, 0, 0, 0, 0];
+    plain.extend_from_slice(text.as_bytes());
+    if plain.len() + 134 > env::MAX_PAYLOAD {
+        return Err("too long for one message".into());
+    }
+    let k = keys(node)?;
+    let payload = env::single(env::API, &k.secret, &crypto_box_public(&rk), &plain);
+    let (txids, fee) = send_payloads(node, &[payload])?;
+    let (from, _, _) = sender_key(node)?;
+    sent.insert(0, json!({"to": hex::encode(rk), "txid": txids[0], "created": arcade_app::now()}));
+    sent.truncate(500);
+    node.app.store.write(|w| w.put(arcade_app::META, format!("nodetalk:{page}").as_bytes(), json!(sent).to_string().as_bytes())).map_err(|e| e.to_string())?;
+    Ok(json!({"txid": txids[0], "to": hex::encode(rk), "fromaddress": from, "size": plain.len(), "fee": format!("{:.8}", fee as f64 / 1e8), "total": format!("{:.8}", fee as f64 / 1e8)}))
+}
+
+pub fn node_sent(node: &Node, page: &str) -> Value {
+    json!(talks(node, page).into_iter().take(50).collect::<Vec<_>>())
+}
+
+/// Replies from the nodes this page wrote to, newer than its first message to each, oldest first.
+pub fn node_replies(node: &Node, page: &str, after: u64, limit: usize) -> Value {
+    let mut first: std::collections::BTreeMap<String, u64> = Default::default();
+    for s in talks(node, page) {
+        let to = s["to"].as_str().unwrap_or("").to_string();
+        let at = s["created"].as_u64().unwrap_or(0);
+        let e = first.entry(to).or_insert(at);
+        *e = (*e).min(at);
+    }
+    let mut out: Vec<Value> = all(node)
+        .into_iter()
+        .filter(|m| m["kind"] == "api" && m["dir"] == "in")
+        .filter(|m| first.get(m["peer"].as_str().unwrap_or("")).is_some_and(|t| m["at"].as_u64().unwrap_or(0) >= *t))
+        .map(|m| {
+            let body = m["text"].as_str().unwrap_or("").to_string();
+            let id = m["at"].as_u64().unwrap_or(0) * 1000 + (u64::from_str_radix(&m["id"].as_str().unwrap_or("000")[..3], 16).unwrap_or(0));
+            json!({"id": id, "txid": m["id"], "block": m["height"], "blocktime": m["at"], "frompubkey": m["peer"], "fromaddress": m["from_address"],
+                   "body": body, "json": serde_json::from_str::<Value>(&body).ok(), "read": m["unread"] != true, "protocol": 1,
+                   "apihash": m["stamp"].as_str().map(|s| s.get(6..14).unwrap_or("").to_string()), "compatible": true})
+        })
+        .filter(|r| r["id"].as_u64().unwrap_or(0) > after)
+        .collect();
+    out.sort_by_key(|r| r["id"].as_u64());
+    out.truncate(limit.clamp(1, 100));
+    json!(out)
 }

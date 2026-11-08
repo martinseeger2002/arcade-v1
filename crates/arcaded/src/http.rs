@@ -235,6 +235,11 @@ fn handle(node: &Node, mut s: TcpStream, site: Option<&PathBuf>) {
             "access" => Some(include_str!("shims/access.js")),
             "contacts" => Some(include_str!("shims/contacts.js")),
             "owner" => Some(include_str!("shims/owner.js")),
+            "node" => Some(include_str!("shims/node.js")),
+            "state" => Some(include_str!("shims/state.js")),
+            "llm" => Some(include_str!("shims/llm.js")),
+            "escrow" => Some(include_str!("shims/escrow.js")),
+            "swap" => Some(include_str!("shims/swap.js")),
             _ => None,
         };
         return match body {
