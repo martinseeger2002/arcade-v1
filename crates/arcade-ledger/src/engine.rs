@@ -1180,15 +1180,15 @@ fn sort_by_price(rows: &mut [Value]) {
     });
 }
 
-struct Manifest {
-    total: u32,
-    digest: [u8; 32],
-    ctype: String,
-    json: String,
-    content: Vec<u8>,
+pub struct Manifest {
+    pub total: u32,
+    pub digest: [u8; 32],
+    pub ctype: String,
+    pub json: String,
+    pub content: Vec<u8>,
 }
 
-fn manifest(raw: &[u8]) -> std::result::Result<Manifest, &'static str> {
+pub fn manifest(raw: &[u8]) -> std::result::Result<Manifest, &'static str> {
     if raw.len() < 39 {
         return Err("truncated manifest");
     }

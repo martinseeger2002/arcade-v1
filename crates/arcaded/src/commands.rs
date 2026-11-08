@@ -171,6 +171,8 @@ cmds! {
     "apps.review" Admin "chain, txid, verdict" "Clear or confirm an app flagged as a lookalike.";
     "apps.trust" Admin "address, on?" "Trust a publisher (never flagged as a lookalike).";
     "apps.storage" Local "page, op, key?, value?" "An app page's saves (load, set, remove, clear, history), as arcade.storage.";
+    "inscribe" Wallet "data, encoding?, contenttype?, json?" "Inscribe content as this wallet's (arcade INSC; data as text or base64 with encoding: base64).";
+    "inscribe.estimate" Public "data, encoding?, contenttype?, json?" "What inscribing that would cost: transactions, fee, value kept in its data outputs.";
     "wallet.requests" Read "page?" "Requests from pages to send, waiting for your answer.";
     "wallet.preview" Read "id" "A request's transaction as it would be built now: outputs and fee.";
     "wallet.approve" Local "id" "Approve a request: sign and send it.";

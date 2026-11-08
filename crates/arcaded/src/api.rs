@@ -179,6 +179,18 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         }
         "apps.review" => crate::appsvc::review(node, &s("chain").ok_or("chain required")?, &s("txid").ok_or("txid required")?, &s("verdict").ok_or("verdict required (clear or confirm)")?),
         "apps.trust" => crate::appsvc::trust(node, &s("address").ok_or("address required")?, req["on"] != false),
+        "inscribe" | "inscribe.estimate" => {
+            use base64::Engine;
+            let data = req["data"].as_str().unwrap_or("");
+            let bytes = if req["encoding"] == "base64" { base64::engine::general_purpose::STANDARD.decode(data.trim()).map_err(|e| format!("data: {e}"))? } else { data.as_bytes().to_vec() };
+            let ctype = s("contenttype").unwrap_or_else(|| "text/plain".into());
+            let json = match &req["json"] { Value::Null => None, Value::String(j) => Some(j.clone()), other => Some(other.to_string()) };
+            if req["cmd"] == "inscribe.estimate" {
+                Ok(crate::walletsvc::inscribe_estimate(bytes.len(), &ctype, json.as_ref().map(|j| j.len()).unwrap_or(0)))
+            } else {
+                crate::walletsvc::inscribe(node, &bytes, &ctype, json.as_deref())
+            }
+        }
         "wallet.requests" => Ok(crate::walletsvc::requests(node, s("page").as_deref())),
         "wallet.preview" => crate::walletsvc::preview(node, &s("id").ok_or("id required")?),
         "wallet.approve" => crate::walletsvc::approve(node, &s("id").ok_or("id required")?),

@@ -120,7 +120,12 @@
       h("div", { class: "s" }, `Card ${a.txid} · page ${a.opens} on ${a.chain_name} · by ${a.creator}`)));
   }
 
+  let drawSeq = 0;
   async function draw() {
+    const mySeq = ++drawSeq;
+    const body = $("ap2-body");
+    // A slower, older draw must not replace a newer one.
+    const put = (...kids) => { if (mySeq === drawSeq) body.replaceChildren(...kids); };
     document.querySelectorAll("#ap2-views button").forEach((b) => b.classList.toggle("on", b.dataset.v === view));
     $("ap2-storebar").hidden = view !== "store";
     try {
@@ -128,13 +133,15 @@
       if (detail) return drawDetail();
       if (view === "mine") {
         const list = await api("apps.installed");
-        $("ap2-body").replaceChildren(list.length ? h("div", { class: "ap-grid" }, ...list.map(mineCard)) : h("div", { class: "mx-empty" }, "No apps installed yet. Find some in the App Store."));
+        put(list.length ? h("div", { class: "ap-grid" }, ...list.map(mineCard)) : h("div", { class: "mx-empty" }, "No apps installed yet. Find some in the App Store."));
       } else if (view === "store") {
         const r = await api("apps.store", { sort, q: query });
-        $("ap2-body").replaceChildren(r.apps.length ? h("div", { class: "ap-store" }, ...r.apps.map(storeCard)) : h("div", { class: "mx-empty" }, "No apps found."));
+        put(r.apps.length ? h("div", { class: "ap-store" }, ...r.apps.map(storeCard)) : h("div", { class: "mx-empty" }, "No apps found."));
+      } else if (view === "publish") {
+        drawPublish(put);
       } else {
         const r = await api("apps.store", { flagged: true });
-        $("ap2-body").replaceChildren(h("p", { class: "note" }, "These cards look like an earlier app by someone else, so the App Store hides them until you decide. Trusted publishers are never held back."),
+        put(h("p", { class: "note" }, "These cards look like an earlier app by someone else, so the App Store hides them until you decide. Trusted publishers are never held back."),
           ...(r.apps.length ? r.apps.map((a) => {
             const ok = h("button", { class: "small primary" }, "Show it"); ok.onclick = async () => { await api("apps.review", { chain: a.chain, txid: a.txid, verdict: "clear" }); draw(); };
             const no = h("button", { class: "small" }, "Keep hidden"); no.onclick = async () => { await api("apps.review", { chain: a.chain, txid: a.txid, verdict: "confirm" }); draw(); };
@@ -143,6 +150,53 @@
           }) : [h("div", { class: "mx-empty" }, "Nothing to review.")]));
       }
     } catch (e) { note(e.message, true); }
+  }
+
+  function drawPublish(put) {
+    const f = (ph, attrs = {}) => h("input", { placeholder: ph, ...attrs });
+    const name = f("Name (required, up to 60)"), version = f("Version, e.g. 1.0"), players = f("Players, e.g. 1-4"), genre = f("Genre, e.g. Puzzle"), family = f("Family (rooms shared across versions; letters, digits . _ : -)");
+    const desc = h("textarea", { rows: 3, placeholder: "Description (up to 280)" });
+    const FLAGS = [["multiplayer", "Multiplayer"], ["wallet", "Uses the wallet"], ["contacts", "Reads contacts"], ["groups", "Group chats"], ["media", "Camera & microphone"], ["pictures", "Draws pictures"], ["notify", "Rings while closed"]];
+    const boxes = FLAGS.map(([k, l]) => h("label", { class: "ap-perm" }, h("input", { type: "checkbox", value: k }), " ", l));
+    const page = h("input", { type: "file", accept: ".html,.htm,text/html" }), cov = h("input", { type: "file", accept: "image/*" });
+    const est = h("div", { class: "s" });
+    const read = (input) => new Promise((ok) => { const file = input.files[0]; if (!file) return ok(null); const r = new FileReader(); r.onload = () => ok({ name: file.name, type: file.type, data: String(r.result).split(",")[1], size: file.size }); r.readAsDataURL(file); });
+    const cardOf = () => {
+      const c = { name: name.value.trim() };
+      for (const [k, el] of [["version", version], ["players", players], ["genre", genre], ["family", family], ["description", desc]]) if (el.value.trim()) c[k] = el.value.trim();
+      for (const b of boxes) { const i = b.querySelector("input"); if (i.checked) c[i.value] = true; }
+      return c;
+    };
+    const estimate = async () => {
+      const pg = await read(page), cv = await read(cov);
+      if (!pg) { est.textContent = ""; return; }
+      const a = await api("inscribe.estimate", { data: pg.data, encoding: "base64", contenttype: "text/html", json: JSON.stringify({ app: cardOf() }) });
+      const b = cv ? await api("inscribe.estimate", { data: cv.data, encoding: "base64", contenttype: cv.type || "image/png" }) : { fee: 0, locked: 0, transactions: 0 };
+      est.textContent = `${a.transactions + b.transactions} transaction${a.transactions + b.transactions === 1 ? "" : "s"} · network fee about ${PEP(a.fee + b.fee)} · ${PEP(a.locked + b.locked)} kept in data outputs (yours, spendable later)`;
+    };
+    page.onchange = estimate; cov.onchange = estimate;
+    const go = h("button", { class: "primary" }, "Publish");
+    go.onclick = async () => {
+      const c = cardOf();
+      if (!c.name) return note("Give the app a name.", true);
+      const pg = await read(page);
+      if (!pg) return note("Pick the app's HTML file.", true);
+      go.disabled = true;
+      try {
+        const cv = await read(cov);
+        if (cv) {
+          const r = await api("inscribe", { data: cv.data, encoding: "base64", contenttype: cv.type || "image/png" });
+          c.cover = r.txid;
+        }
+        const r = await api("inscribe", { data: pg.data, encoding: "base64", contenttype: "text/html", json: JSON.stringify({ app: c }) });
+        note(`Published ${c.name}: card ${r.txid.slice(0, 12)}… It shows in the App Store once its transactions are in blocks.`);
+      } catch (e) { note(e.message, true); }
+      go.disabled = false;
+    };
+    put(h("div", { class: "card ap-pub" },
+      h("p", { class: "s" }, "An app is an HTML page inscribed with its card. Publishing again under the same name replaces your earlier version; the old one still plays at its own link."),
+      name, h("div", { class: "row" }, version, players, genre), family, desc, h("div", { class: "ap-flags" }, ...boxes),
+      h("label", {}, "App page (HTML) ", page), h("label", {}, "Cover image ", cov), est, h("div", { class: "row" }, go)));
   }
 
   document.querySelectorAll("#ap2-views button").forEach((b) => b.onclick = () => { view = b.dataset.v; detail = null; draw(); });

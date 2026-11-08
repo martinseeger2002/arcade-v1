@@ -276,6 +276,46 @@ pub fn build_arcade(
     Ok(sign_p2pkh(p, &chosen, &outs, key, time))
 }
 
+/// The arcade's own inscription (INSC, docs/compat/INSC.md) as chunk payloads, in sending order:
+/// the manifest stream (total u32 | sha256 | ctype_len u8 | ctype | json_len u16 | json | content)
+/// cut into pieces of at most 7,628 bytes, each "INSC" 01 01 | id8 | countdown u16 | clen u16 | body.
+/// The first piece has the highest countdown; its transaction's txid names the inscription.
+pub fn insc_chunks(content: &[u8], ctype: &str, json: Option<&str>, id: [u8; 8]) -> Result<Vec<Vec<u8>>, String> {
+    use sha2::{Digest, Sha256};
+    if ctype.len() > 255 {
+        return Err("the content type is at most 255 bytes".into());
+    }
+    let j = json.unwrap_or("");
+    if j.len() > 65_535 {
+        return Err("the JSON is at most 65,535 bytes".into());
+    }
+    let mut stream = (content.len() as u32).to_be_bytes().to_vec();
+    stream.extend_from_slice(&Sha256::digest(content));
+    stream.push(ctype.len() as u8);
+    stream.extend_from_slice(ctype.as_bytes());
+    stream.extend_from_slice(&(j.len() as u16).to_be_bytes());
+    stream.extend_from_slice(j.as_bytes());
+    stream.extend_from_slice(content);
+    let room = CLASS_B_MAX - 4 - 18;
+    let count = stream.len().div_ceil(room).max(1);
+    if count > 65_536 {
+        return Err("too large to inscribe".into());
+    }
+    Ok(stream
+        .chunks(room)
+        .enumerate()
+        .map(|(i, body)| {
+            let mut d = b"INSC".to_vec();
+            d.extend_from_slice(&[1, 1]);
+            d.extend_from_slice(&id);
+            d.extend_from_slice(&((count - 1 - i) as u16).to_be_bytes());
+            d.extend_from_slice(&(body.len() as u16).to_be_bytes());
+            d.extend_from_slice(body);
+            d
+        })
+        .collect())
+}
+
 /// Pay `amount` to `to_script` from coins of `key`'s P2PKH address, change back to it.
 pub fn build_send(
     p: &ChainParams,
@@ -349,6 +389,35 @@ mod tests {
             assert!(atx.payload[len..].iter().all(|b| *b == 0));
             assert!(verify_p2pkh_input(p, &tx, &[coin.clone()], 0));
         }
+    }
+
+    #[test]
+    fn inscription_chunks_assemble_and_travel() {
+        let p = &PEPECOIN_TEST;
+        let k = key();
+        let pk = PublicKey::from_secret_key(SECP256K1, &k);
+        let script = arcade_ledger::address::p2pkh_script(&arcade_ledger::address::hash160(&pk.serialize()));
+        let content: Vec<u8> = (0..20_000u32).map(|i| (i * 31 % 251) as u8).collect();
+        let json = r#"{"app":{"name":"Test","version":"1"}}"#;
+        let chunks = insc_chunks(&content, "text/html", Some(json), [9; 8]).unwrap();
+        assert_eq!(chunks.len(), 3);
+        // Countdown from the highest (the manifest piece) to 0.
+        let cds: Vec<u16> = chunks.iter().map(|c| u16::from_be_bytes([c[14], c[15]])).collect();
+        assert_eq!(cds, vec![2, 1, 0]);
+        // Each travels in a Class B transaction and is read back with the ledger's extractor.
+        let coin = Utxo { outpoint: OutPoint { txid: Hash256([7; 32]), vout: 0 }, value: 500_000_000_000, script: script.clone() };
+        let mut stream = Vec::new();
+        for ch in &chunks {
+            let tx = build_arcade(p, &any_data(ch), vec![], &k, &[coin.clone()], 1_000_000, 1_000_000, 0).unwrap();
+            let atx = extract(&tx, &[Prevout { value: coin.value, script: script.clone() }], p).unwrap().unwrap();
+            let d = &atx.payload[4..];
+            assert_eq!(&d[..6], b"INSC\x01\x01");
+            let clen = u16::from_be_bytes([d[16], d[17]]) as usize;
+            stream.extend_from_slice(&d[18..18 + clen]);
+        }
+        let m = arcade_ledger::engine::manifest(&stream).unwrap();
+        assert_eq!((m.total as usize, m.ctype.as_str(), m.json.as_str()), (content.len(), "text/html", json));
+        assert_eq!(&m.content[..m.total as usize], &content[..]);
     }
 
     #[test]

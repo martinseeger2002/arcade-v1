@@ -572,3 +572,34 @@ pub fn owner_send(node: &Node, page: &str, body: &Value) -> Result<Value, String
     }
     Ok(json!({"txid": done["txid"], "request": id, "what": done["what"], "fee": done["fee"]}))
 }
+
+// ---------------- inscribing (arcade INSC) ----------------
+
+/// What inscribing `len` bytes costs, about: transactions, data outputs and fee.
+pub fn inscribe_estimate(len: usize, ctype: &str, json_len: usize) -> Value {
+    let stream = 4 + 32 + 1 + ctype.len() + 2 + json_len + len;
+    let room = arcade_wallet::tx::CLASS_B_MAX - 4 - 18;
+    let txs = stream.div_ceil(room).max(1);
+    let packets = stream.div_ceil(30) + txs;
+    let outs = packets.div_ceil(2) + txs; // multisig outputs plus the marker in each
+    let bytes = txs * (10 + 148 + 34) + packets.div_ceil(2) * 114 + txs * 34;
+    let fee = (bytes as u64 * crate::claims::FEE_PER_KB).div_ceil(1000);
+    json!({"bytes": len, "transactions": txs, "fee": fee, "locked": outs as u64 * arcade_wallet::tx::CLASS_B_OUTPUT})
+}
+
+/// Inscribe content as this wallet's (from the @tag's address). The inscription is named by the
+/// first chunk's transaction.
+pub fn inscribe(node: &Node, content: &[u8], ctype: &str, json: Option<&str>) -> Result<Value, String> {
+    if content.is_empty() {
+        return Err("nothing to inscribe".into());
+    }
+    if let Some(j) = json.filter(|j| !j.is_empty()) {
+        serde_json::from_str::<Value>(j).map_err(|e| format!("the JSON does not parse: {e}"))?;
+    }
+    let mut id = [0u8; 8];
+    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut id);
+    let chunks = arcade_wallet::tx::insc_chunks(content, if ctype.is_empty() { "text/plain" } else { ctype }, json.filter(|j| !j.is_empty()), id)?;
+    let (txids, fee) = crate::msgsvc::send_payloads(node, &chunks)?;
+    let _ = node.app.event("wallet", &format!("inscribing {} bytes of {ctype} in {} transaction{} ({})", content.len(), txids.len(), if txids.len() == 1 { "" } else { "s" }, txids[0]));
+    Ok(json!({"txid": txids[0], "txids": txids, "fee": fee}))
+}

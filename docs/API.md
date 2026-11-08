@@ -74,6 +74,7 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 | `map` | `/api/v1/map` | public | map?, chain? | A map claim, or counts. |
 | `token` | `/api/v1/token` | public | tick?, chain? | A token, or how many there are. |
 | `tokens` | `/api/v1/tokens` | public | owner, chain? | Token balances of an address. |
+| `inscribe` | `/api/v1/inscribe` | wallet | data, encoding?, contenttype?, json? | Inscribe content as this wallet's (arcade INSC; data as text or base64 with encoding: base64). |
 
 ### Wallet
 
@@ -237,6 +238,12 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 | `apps.owner` | `/api/v1/apps/owner` | read | page | arcade.owner.identity: whether this wallet created the page and still holds it. |
 | `apps.owner_send` | `/api/v1/apps/owner_send` | local | page, request | arcade.owner.send: a page this wallet created and holds sends at once (testnet). |
 | `apps.launch` | `/api/v1/apps/launch` | read | chain, txid | What an app window opens: the sandboxed page URL and the card. |
+
+### Inscribe
+
+| method | route | needs | params | what |
+|---|---|---|---|---|
+| `inscribe.estimate` | `/api/v1/inscribe/estimate` | public | data, encoding?, contenttype?, json? | What inscribing that would cost: transactions, fee, value kept in its data outputs. |
 
 ### API keys
 

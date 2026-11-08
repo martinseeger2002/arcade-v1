@@ -50,7 +50,35 @@
   }
   const pep = (sats) => (sats / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 }) + " PEPtest";
   let lastSend = 0;
+  // Wallet access: what uses the player's key asks first while the switch is off (Yes turns it on).
+  async function walletGate(what) {
+    const p = await perms();
+    if (p.wallet) return true;
+    const yes = await oneCard(() => card(`Let ${appName} use your wallet?`, [
+      `${appName} wants to ${what}. That needs Wallet access; yes turns it on for this app (you can turn it off on its card).`,
+      "Check this is the app you meant to open: copies of popular apps can look the same."], "Allow"));
+    if (yes) await api("apps.perms", { id, set: { wallet: true } });
+    return yes;
+  }
+
   const doors = {
+    async inscribe(m) {
+      if (!(await walletGate("inscribe something as yours"))) throw new Error("Cancelled.");
+      const encoding = m.encoding === "base64" ? "base64" : "";
+      const data = typeof m.data === "string" ? m.data : JSON.stringify(m.data);
+      const ctype = String(m.contenttype || "text/plain").slice(0, 255);
+      const json = m.json && typeof m.json === "object" ? JSON.stringify(m.json) : (typeof m.json === "string" ? m.json : undefined);
+      const size = encoding ? Math.floor(data.length * 3 / 4) : new TextEncoder().encode(data).length;
+      if (size > 7000) throw new Error("too large: a page may inscribe up to 7,000 bytes (one transaction)");
+      const est = await api("inscribe.estimate", { data, encoding, contenttype: ctype, json });
+      const lines = [`${appName} asks to inscribe ${size.toLocaleString()} bytes of ${ctype} as yours, on the chain for good.`];
+      if (m.note) lines.push(`“${String(m.note).slice(0, 200)}”`);
+      lines.push(`Network fee about ${pep(est.fee)}, and ${pep(est.locked)} kept in its data outputs (yours, spendable later).`);
+      const yes = await oneCard(() => card("Inscribe this?", lines, "Inscribe"));
+      if (!yes) throw new Error("Cancelled.");
+      const r = await api("inscribe", { data, encoding, contenttype: ctype, json });
+      return { txid: r.txid };
+    },
     async access(m) {
       const p = await perms();
       if (m.op === "status") return { wallet: !!p.wallet, signedIn: true, node: new URL(frame).host, game: !!id, name: appName };
@@ -156,6 +184,7 @@
     const m = e.data;
     if (!m || typeof m !== "object" || typeof m.seq !== "number" || !m.arcade) return;
     if (m.arcade === "realtime" && m.op === "fast") return; // never answered
+    if (m.arcade === "inscribe") el.contentWindow.postMessage({ arcade: "inscribe", seq: m.seq, heard: true }, "*");
     const door = doors[m.arcade];
     let body;
     if (!door) body = { ok: false, error: `${m.arcade} is coming to Arcade V1.0` };
