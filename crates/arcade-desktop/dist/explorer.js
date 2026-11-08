@@ -73,25 +73,16 @@
     paintSelector();
     if (first) announce();
   }
-  function sub(c) {
-    if (c.home) return "home";
-    if (c.mode === "chain") return "blockchain only";
-    if (c.borrowed) return "borrowed";
-    return `${c.state || ""}${c.indexes?.length ? " · " + c.indexes.join(", ") : ""}`;
-  }
   function paintSelector() {
     if (!chain) return;
     $("cs-coin").replaceWith(Object.assign(coinEl(chain), { id: "cs-coin" }));
-    $("cs-name").textContent = chain.name; $("cs-sub").textContent = "· " + sub(chain);
+    $("cs-name").textContent = chain.name; $("cs-sub").textContent = "";
   }
   function menu() {
     const m = $("cs-menu");
-    const row = (c, on) => h("button", { class: c.key === chain?.key ? "on" : "", disabled: !on, onclick: on ? () => pick(c) : null },
-      coinEl(c), h("span", {}, c.name), h("span", { class: "meta" }, on ? sub(c) : "—"));
-    const inst = chains.filter((c) => c.installed || c.borrowed), rest = chains.filter((c) => !c.installed && !c.borrowed);
-    m.replaceChildren(h("div", { class: "hd" }, "Installed or borrowed"), ...inst.map((c) => row(c, true)),
-      rest.length ? h("div", { class: "hd" }, "Not installed") : "", ...rest.map((c) => row(c, false)),
-      h("div", { class: "foot" }, h("span", { class: "link", onclick: () => { close(); document.querySelector('nav button[data-tab="chains"]').click(); } }, "Install a chain in Chains & Coins →")));
+    // Just the coins you can open (installed or borrowed): icon and name.
+    const row = (c) => h("button", { class: c.key === chain?.key ? "on" : "", onclick: () => pick(c) }, coinEl(c), h("span", {}, c.name));
+    m.replaceChildren(...chains.filter((c) => c.installed || c.borrowed).map(row));
   }
   function pick(c) { chain = c; close(); paintSelector(); sum = null; go("home"); announce(); }
   // Every tab follows the picked chain.

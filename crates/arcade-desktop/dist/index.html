@@ -224,16 +224,13 @@
   <!-- Chains & Coins (MOCKUP: simulated data and progress) -->
   <section id="chains" class="tab">
     <h1>Chains &amp; Coins</h1>
-    <p>Install another blockchain on this arcade. Nothing is added unless you install it here.</p>
-    <div class="chains" id="c-list"></div>
-
     <div class="borrow" id="c-borrow">
       <div class="borrow-head">
-        <h2>Borrowed coins</h2>
+        <h2>Coins</h2>
         <label class="sw"><input type="checkbox" id="c-borrow-on"> Borrow every coin other arcades lend</label>
       </div>
-      <p class="opt">Coins you haven't installed are used through other arcades' Core nodes: this arcade keeps only their block headers and your own coins, and checks every block it reads. Installing a chain replaces its borrowed copy.</p>
-      <div class="blist" id="c-borrow-list"></div>
+      <p class="opt">Install a chain to keep it on this arcade; nothing is installed unless you do it here. Coins you haven't installed can be borrowed through other arcades' Core nodes: this arcade keeps only their block headers and your own coins, and checks every block it reads. Installing a chain replaces its borrowed copy.</p>
+      <div class="blist" id="c-list"></div>
       <p class="msg" id="c-bmsg"></p>
     </div>
 
