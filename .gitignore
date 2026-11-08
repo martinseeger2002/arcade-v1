@@ -2,3 +2,4 @@ target/
 *.mdbx
 *.mdbx-lck
 var/
+.claude/worktrees/
