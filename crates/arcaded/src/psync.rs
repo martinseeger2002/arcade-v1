@@ -57,6 +57,20 @@ struct State {
     p2p: usize,
     /// Jobs being fetched: start -> (hashes, since, already doubled).
     inflight: BTreeMap<u32, (Vec<Hash256>, Instant, bool)>,
+    /// Recent average block size (bytes; 0 = not known yet), to size jobs by bytes.
+    avg_block: usize,
+}
+
+/// Bytes one job should carry: one source must finish it well within the connector's wait,
+/// whether blocks are 300 bytes or 1 MB (250 small blocks, or ~30 full Doginals-era ones).
+const JOB_BYTES: usize = 24 << 20;
+
+/// Blocks per job for the recent block size (a small first job measures it).
+fn job_len(avg_block: usize) -> u32 {
+    if avg_block == 0 {
+        return 20;
+    }
+    ((JOB_BYTES / avg_block.max(1)) as u32).clamp(10, JOB)
 }
 
 pub struct Pool {
@@ -142,7 +156,7 @@ impl Prefetched<'_> {
 impl BlockSource for Prefetched<'_> {
     fn get_headers(&mut self, _locator: &[Hash256]) -> Result<Vec<HeaderEntry>, String> {
         if self.heads.is_empty() {
-            self.pull(Duration::from_secs(180))?;
+            self.pull(Duration::from_secs(420))?;
         }
         // Everything pulled so far, in order (the syncer takes up to 2,000 per round).
         let n = self.heads.len().min(2000);
@@ -152,7 +166,7 @@ impl BlockSource for Prefetched<'_> {
     fn get_blocks(&mut self, hashes: &[Hash256]) -> Result<Vec<Vec<u8>>, String> {
         let mut guard = 0;
         while hashes.iter().any(|h| !self.cache.contains_key(h)) {
-            self.pull(Duration::from_secs(180))?;
+            self.pull(Duration::from_secs(420))?;
             guard += 1;
             if guard > 200 {
                 return Err("blocks asked for are not coming from any source".into());
@@ -213,6 +227,8 @@ fn worker(pool: &Pool, name: String, mut src: Box<dyn BlockSource + Send + '_>) 
                 fails = 0;
                 let mut st = pool.s.lock().unwrap();
                 st.inflight.remove(&job.start);
+                let per = raws.iter().map(|r| r.len()).sum::<usize>() / raws.len().max(1);
+                st.avg_block = if st.avg_block == 0 { per } else { (st.avg_block * 4 + per) / 5 };
                 // First copy wins; a late duplicate is dropped.
                 if job.start >= st.want && !st.ready.contains_key(&job.start) {
                     *st.stats.entry(name.clone()).or_insert(0) += raws.len() as u64;
@@ -281,8 +297,9 @@ fn feeder(node: &Node, pool: &Pool, mut hs: HashSource, mut last: Hash256) {
                 bad = 0;
                 let hashes: Vec<Hash256> = hashes.into_iter().take((pool.top - next + 1) as usize).collect();
                 let mut st = pool.s.lock().unwrap();
-                for (i, chunk) in hashes.chunks(JOB as usize).enumerate() {
-                    st.queue.push_back(Job { start: next + i as u32 * JOB, hashes: chunk.to_vec(), tries: 0 });
+                let len = job_len(st.avg_block) as usize;
+                for (i, chunk) in hashes.chunks(len).enumerate() {
+                    st.queue.push_back(Job { start: next + (i * len) as u32, hashes: chunk.to_vec(), tries: 0 });
                 }
                 st.next = next + hashes.len() as u32;
                 last = *hashes.last().unwrap();
