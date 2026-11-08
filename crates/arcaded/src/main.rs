@@ -58,9 +58,9 @@ pub fn default_home() -> std::path::PathBuf {
 }
 
 /// Run the service at low CPU and disk priority (threads made later inherit it), so games
-/// and the desktop stay smooth while chains catch up. ARCADE_NICE=0 turns it off.
+/// and the desktop stay smooth while chains catch up. Off unless ARCADE_NICE is set (e.g. 10).
 fn be_polite() {
-    let nice: i32 = std::env::var("ARCADE_NICE").ok().and_then(|v| v.parse().ok()).unwrap_or(10).clamp(0, 19);
+    let nice: i32 = std::env::var("ARCADE_NICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0).clamp(0, 19);
     if nice == 0 {
         return;
     }

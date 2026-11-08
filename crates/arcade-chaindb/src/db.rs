@@ -348,10 +348,10 @@ impl CoinCache {
     }
 }
 
-/// Memory for the coin cache before a flush (ARCADE_COIN_CACHE_MB, default 1024).
+/// Memory for the coin cache before a flush (ARCADE_COIN_CACHE_MB; 0, the default, = no cache).
 fn cache_budget() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *N.get_or_init(|| std::env::var("ARCADE_COIN_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1024) << 20)
+    *N.get_or_init(|| std::env::var("ARCADE_COIN_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0) << 20)
 }
 
 /// Where a tx is, the cache's pending rows first.
@@ -464,6 +464,8 @@ pub struct ChainDb {
     indexers: std::sync::RwLock<Vec<(u16, Arc<dyn Indexer>)>>,
     /// Coin caches of chains catching up (see CoinCache).
     caches: std::sync::Mutex<std::collections::HashMap<u16, CoinCache>>,
+    /// Coin cache budget in bytes (0 = no cache): ARCADE_COIN_CACHE_MB, or set_coin_cache_mb.
+    cache_bytes: std::sync::atomic::AtomicUsize,
 }
 
 fn ix_key(c: u16, name: &str) -> Vec<u8> {
@@ -474,11 +476,21 @@ impl ChainDb {
     pub fn open(path: impl AsRef<Path>) -> Result<ChainDb> {
         // chain.mdbx can always be rebuilt from the chain: skip the per-commit flush (a power
         // cut can lose the last few blocks, which the next sync fetches again).
-        let db = ChainDb { store: Store::open_sync(path, &CHAIN_SCHEMA, false)?, indexers: Default::default(), caches: Default::default() };
+        let db = ChainDb {
+            store: Store::open_sync(path, &CHAIN_SCHEMA, false)?,
+            indexers: Default::default(),
+            caches: Default::default(),
+            cache_bytes: std::sync::atomic::AtomicUsize::new(cache_budget()),
+        };
         for c in 0..=255u16 {
             db.recover_coins(c)?;
         }
         Ok(db)
+    }
+
+    /// Use a coin cache of `mb` MB while catching up (0 = none).
+    pub fn set_coin_cache_mb(&self, mb: usize) {
+        self.cache_bytes.store(mb << 20, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Whether a chain's coin cache is empty (everything is in the database).
@@ -1254,12 +1266,13 @@ impl ChainDb {
                 }
             }
             for b in blocks {
-                tip = Some(connect_one(w, params, b, tip, &ixs, check, addr, !defer, if defer { Some(&mut *cc) } else { None }, log_from)?);
+                let use_cache = defer && self.cache_bytes.load(std::sync::atomic::Ordering::Relaxed) > 0;
+                tip = Some(connect_one(w, params, b, tip, &ixs, check, addr, !defer, if use_cache { Some(&mut *cc) } else { None }, log_from)?);
             }
             let t = tip.ok_or_else(|| other("nothing connected"))?;
             if !defer {
                 w.put(STATE, &k_state(c, "coins_at"), &encode_tip(&t))?;
-            } else if cc.bytes >= cache_budget() || cc.since.is_some_and(|s| s.elapsed() > std::time::Duration::from_secs(600)) {
+            } else if cc.bytes >= self.cache_bytes.load(std::sync::atomic::Ordering::Relaxed) || cc.since.is_some_and(|s| s.elapsed() > std::time::Duration::from_secs(600)) {
                 let tf = std::time::Instant::now();
                 flush_cache(w, c, cc, &t)?;
                 if std::env::var_os("ARCADE_SYNC_TIMES").is_some() {

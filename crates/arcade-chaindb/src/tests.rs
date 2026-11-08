@@ -464,6 +464,7 @@ fn coin_cache_matches_direct_and_survives_a_crash() {
 
     // Deferred (cached), in several commits, then flushed: the same coins and tx index.
     let f = fixture();
+    f.db.set_coin_cache_mb(1024);
     for part in blocks.chunks(7) {
         f.db.connect_blocks_with(f.p, part, true, true).unwrap();
     }
@@ -482,6 +483,7 @@ fn coin_cache_matches_direct_and_survives_a_crash() {
 
     // Cached, then up near the tip again (not deferring): the first live commit flushes.
     let f = fixture();
+    f.db.set_coin_cache_mb(1024);
     f.db.connect_blocks_with(f.p, &blocks[..25], true, true).unwrap();
     f.db.connect_blocks(f.p, &blocks[25..]).unwrap();
     assert!(f.db.coins_settled(c));
@@ -494,6 +496,7 @@ fn coin_cache_matches_direct_and_survives_a_crash() {
     let path = dir.path().join("chain.mdbx");
     {
         let db = ChainDb::open(&path).unwrap();
+        db.set_coin_cache_mb(1024);
         db.connect_blocks(direct.p, &[direct.g.clone()]).unwrap();
         db.connect_blocks(direct.p, &blocks[..10]).unwrap();
         db.connect_blocks_with(direct.p, &blocks[10..30], true, true).unwrap();
