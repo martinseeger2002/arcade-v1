@@ -241,7 +241,12 @@ impl Peer {
 
     /// Wait for a message with this command, skipping others (inv, addr, ...).
     pub fn recv_cmd(&mut self, command: &str) -> Result<Message> {
+        // Bounded as a whole (other messages keep arriving, so the read timeout alone isn't).
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
         loop {
+            if std::time::Instant::now() > deadline {
+                return Err(P2pError::Protocol(format!("no {command} from the peer in time")));
+            }
             let m = self.recv()?;
             if m.command == command {
                 return Ok(m);
@@ -259,7 +264,13 @@ impl Peer {
     pub fn get_blocks(&mut self, hashes: &[Hash256]) -> Result<Vec<Vec<u8>>> {
         self.send("getdata", &getdata_payload(self.format.block_inv(), hashes))?;
         let mut out = Vec::with_capacity(hashes.len());
+        // A whole-request limit: a peer that keeps talking (pings, inv, addr) but never sends
+        // the blocks would otherwise keep this waiting forever (the read timeout never fires).
+        let deadline = std::time::Instant::now() + Duration::from_secs(60 + 2 * hashes.len() as u64);
         while out.len() < hashes.len() {
+            if std::time::Instant::now() > deadline {
+                return Err(P2pError::Protocol(format!("peer sent {} of {} blocks in time", out.len(), hashes.len())));
+            }
             let m = self.recv()?;
             match m.command.as_str() {
                 "block" => out.push(m.payload),
