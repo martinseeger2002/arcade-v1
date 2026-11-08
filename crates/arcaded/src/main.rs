@@ -19,6 +19,7 @@ mod crsource;
 mod explorer;
 mod faucet;
 mod http;
+mod importsvc;
 mod ledger;
 mod links;
 mod meshsource;

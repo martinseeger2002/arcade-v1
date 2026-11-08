@@ -87,6 +87,9 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         }
         "wallet.link" => crate::links::link(node, &s("chain").ok_or("chain required")?, &s("wif").ok_or("wif required")?, &s("tag").ok_or("tag required")?),
         "wallet.unlink" => crate::links::unlink(node, &s("chain").ok_or("chain required")?, &s("address").ok_or("address required")?, &s("tag").ok_or("tag required")?),
+        "wallet.import" => crate::importsvc::import(node, &s("chain").ok_or("chain required")?, &s("secret").ok_or("secret required (a WIF key or a wallet's words)")?, &s("addr_kind").unwrap_or_default(), &s("name").unwrap_or_default(), "manual"),
+        "wallet.imports" => Ok(crate::importsvc::list(node)),
+        "wallet.import_remove" => crate::importsvc::remove(node, &s("chain").ok_or("chain required")?, &s("address").ok_or("address required")?),
         "wallet.links" => Ok(json!(crate::links::mine(node, &s("chain").ok_or("chain required")?)?)),
         // Messaging (home chain): the Messages tab and anything else that wants it.
         "msg.me" => crate::msgsvc::me(node),

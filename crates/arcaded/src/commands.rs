@@ -70,6 +70,9 @@ cmds! {
     "wallet.link" Wallet "chain, wif, tag" "Link another wallet to your @tag (signed by both keys).";
     "wallet.unlink" Wallet "chain, address, tag" "Remove a linked wallet.";
     "wallet.links" Read "chain" "Your linked wallets on a chain.";
+    "wallet.import" Local "chain, secret, addr_kind?, name?" "Import a wallet: a WIF key, or another wallet's words (one address, index 0); addr_kind legacy (default), p2sh-p2wpkh or p2wpkh. Kept encrypted here; nothing is published.";
+    "wallet.imports" Local "" "Imported wallets, with balances on chains this arcade keeps addresses for.";
+    "wallet.import_remove" Local "chain, address" "Forget an imported wallet and its key.";
     "tag.check" Public "tag" "Whether a @tag is free and valid.";
     "tag.claim" Wallet "tag" "Claim a @tag on the home chain.";
     "tag.list" Read "" "Your tag claims and their progress.";
