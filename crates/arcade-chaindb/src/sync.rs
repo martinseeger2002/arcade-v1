@@ -323,13 +323,27 @@ impl<'a> Syncer<'a> {
                 }
                 let before = ChainDb::connect_times();
                 let t_w = std::time::Instant::now();
-                self.db.connect_blocks_checked(self.params, &blocks, defer)?;
+                // One commit per run of blocks up to COMMIT_TXS transactions: a commit that
+                // changes more pages than the database keeps in memory spills them to disk
+                // midway, and full blocks (the Doginals stretch) made 250-block commits slow.
+                let ntx: usize = blocks.iter().map(|b| b.txs.len()).sum();
+                let mut from = 0;
+                while from < blocks.len() {
+                    let mut to = from;
+                    let mut n = 0;
+                    while to < blocks.len() && (to == from || n + blocks[to].txs.len() <= commit_txs()) {
+                        n += blocks[to].txs.len();
+                        to += 1;
+                    }
+                    self.db.connect_blocks_checked(self.params, &blocks[from..to], defer)?;
+                    from = to;
+                }
                 let wrote = t_w.elapsed();
                 let after = ChainDb::connect_times();
                 if std::env::var_os("ARCADE_SYNC_TIMES").is_some() {
                     eprintln!(
-                        "sync {} at {}: {} blocks · waiting for them {:.2}s · checks {:.2}s · write {:.2}s (indexes {:.2}s){}",
-                        self.params.key, height, blocks.len(), got.as_secs_f64(), checked.as_secs_f64(), wrote.as_secs_f64(),
+                        "sync {} at {}: {} blocks, {} txs · waiting for them {:.2}s · checks {:.2}s · write {:.2}s (indexes {:.2}s){}",
+                        self.params.key, height, blocks.len(), ntx, got.as_secs_f64(), checked.as_secs_f64(), wrote.as_secs_f64(),
                         (after[1] - before[1]) as f64 / 1e9, if defer { " · addresses and indexes put off" } else { "" }
                     );
                 }
@@ -343,4 +357,10 @@ impl<'a> Syncer<'a> {
         })?;
         Ok(prog)
     }
+}
+
+/// Transactions per commit while syncing (ARCADE_COMMIT_TXS overrides).
+fn commit_txs() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var("ARCADE_COMMIT_TXS").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(20_000))
 }
