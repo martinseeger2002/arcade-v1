@@ -273,6 +273,11 @@ pub(crate) fn locate<R: Rd>(r: &R, params: &ChainParams, txid: &Hash256) -> Resu
 pub(crate) fn coin_at<R: Rd>(r: &R, params: &ChainParams, b: u32, p: u32, vout: u32) -> Result<Option<Coin>> {
     let c = params.chain_no;
     let Some(v) = r.get(OUTPUTS, &k_pos(c, b, p, vout))? else { return Ok(None) };
+    decode_coin(r, params, b, p, vout, &v).map(Some)
+}
+
+fn decode_coin<R: Rd>(r: &R, params: &ChainParams, b: u32, p: u32, vout: u32, v: &[u8]) -> Result<Coin> {
+    let c = params.chain_no;
     let script = expand_script(&v[13..], || {
         let raw = r.get(BLOCK_TX, &k_block_tx(c, b, p))?.ok_or(StoreError::Corrupt { table: BLOCK_TX, why: "coin's tx missing" })?;
         if is_pruned(&raw) {
@@ -281,12 +286,134 @@ pub(crate) fn coin_at<R: Rd>(r: &R, params: &ChainParams, b: u32, p: u32, vout: 
         let tx = Tx::parse_with(&raw, &params.format).map_err(other)?;
         Ok(tx.outputs.get(vout as usize).ok_or(StoreError::Corrupt { table: OUTPUTS, why: "bad vout" })?.script_pubkey.clone())
     })?;
-    Ok(Some(Coin {
+    Ok(Coin {
         value: u64::from_le_bytes(v[0..8].try_into().unwrap()),
         height: u32::from_le_bytes(v[8..12].try_into().unwrap()),
         coinbase: v[12] != 0,
         script,
-    }))
+    })
+}
+
+// ---------------- the coin cache (catching up) ----------------
+
+/// Far behind the tip, coins live in memory between flushes (as Core's dbcache): a coin made
+/// and spent before the next flush never touches the database, a spent cached coin is a map
+/// lookup, and what survives is written in one sorted batch. The database's coins are complete
+/// up to STATE "coins_at"; a crash before a flush winds the tip back to it at the next open
+/// and the stretch is connected again from the stored blocks.
+#[derive(Default)]
+pub(crate) struct CoinCache {
+    /// New coins: OUTPUTS key -> encoded coin.
+    coins: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+    /// Pending TXS rows: t12 -> (b, p) values.
+    txs: std::collections::HashMap<[u8; 12], Vec<[u8; 8]>>,
+    /// Coins from the database spent since the last flush (deleted at the flush).
+    spent: std::collections::HashSet<Vec<u8>>,
+    /// Address rows of spent pre-log coins to delete at the flush (BY_SCRIPT keys).
+    by_script_del: Vec<Vec<u8>>,
+    bytes: usize,
+    since: Option<std::time::Instant>,
+}
+
+impl CoinCache {
+    fn touch(&mut self) {
+        if self.since.is_none() {
+            self.since = Some(std::time::Instant::now());
+        }
+    }
+    fn put_coin(&mut self, k: Vec<u8>, v: Vec<u8>) {
+        self.touch();
+        self.bytes += k.len() + v.len() + 64;
+        self.coins.insert(k, v);
+    }
+    fn add_tx(&mut self, t12: [u8; 12], bp: [u8; 8]) {
+        self.touch();
+        self.bytes += 12 + 8 + 48;
+        self.txs.entry(t12).or_default().push(bp);
+    }
+    fn spend(&mut self, k: Vec<u8>) {
+        self.touch();
+        match self.coins.remove(&k) {
+            Some(v) => self.bytes = self.bytes.saturating_sub(k.len() + v.len() + 64),
+            None => {
+                self.bytes += k.len() + 48;
+                self.spent.insert(k);
+            }
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.coins.is_empty() && self.txs.is_empty() && self.spent.is_empty() && self.by_script_del.is_empty()
+    }
+}
+
+/// Memory for the coin cache before a flush (ARCADE_COIN_CACHE_MB, default 1024).
+fn cache_budget() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var("ARCADE_COIN_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1024) << 20)
+}
+
+/// Where a tx is, the cache's pending rows first.
+fn locate_c<R: Rd>(r: &R, params: &ChainParams, cc: &CoinCache, txid: &Hash256) -> Result<Option<(u32, u32)>> {
+    let c = params.chain_no;
+    let t12 = txid.t12();
+    let mut cands: Vec<(u32, u32)> = cc.txs.get(&t12).map(|v| v.iter().map(|bp| (be_u32(bp, 0), be_u32(bp, 4))).collect()).unwrap_or_default();
+    for (_, bp) in r.scan(TXS, &k_txs(c, &t12))? {
+        cands.push((be_u32(&bp, 0), be_u32(&bp, 4)));
+    }
+    if cands.len() <= 1 {
+        return Ok(cands.pop());
+    }
+    let mut found = None;
+    for (b, p) in cands {
+        if let Some(raw) = r.get(BLOCK_TX, &k_block_tx(c, b, p))? {
+            if row_txid(&raw, params)? == *txid && found.is_none_or(|(fb, _)| b >= fb) {
+                found = Some((b, p)); // the latest stored copy wins (BIP30-style duplicates)
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// A coin, from the cache, else the database unless spent since the last flush.
+fn coin_c<R: Rd>(r: &R, params: &ChainParams, cc: &CoinCache, b: u32, p: u32, vout: u32, key: &[u8]) -> Result<Option<Coin>> {
+    if let Some(v) = cc.coins.get(key) {
+        return decode_coin(r, params, b, p, vout, v).map(Some);
+    }
+    if cc.spent.contains(key) {
+        return Ok(None);
+    }
+    coin_at(r, params, b, p, vout)
+}
+
+/// Write the cache to the database in sorted order, and mark the coins complete up to `tip`.
+fn flush_cache(w: &WriteTxn, c: u16, cc: &mut CoinCache, tip: &Tip) -> Result<()> {
+    let mut coins: Vec<(Vec<u8>, Vec<u8>)> = std::mem::take(&mut cc.coins).into_iter().collect();
+    coins.sort_unstable();
+    for (k, v) in &coins {
+        w.put(OUTPUTS, k, v)?;
+    }
+    let mut txs: Vec<([u8; 12], Vec<[u8; 8]>)> = std::mem::take(&mut cc.txs).into_iter().collect();
+    txs.sort_unstable();
+    for (t12, bps) in &txs {
+        let k = k_txs(c, t12);
+        for bp in bps {
+            w.put(TXS, &k, bp)?;
+        }
+    }
+    let mut spent: Vec<Vec<u8>> = std::mem::take(&mut cc.spent).into_iter().collect();
+    spent.sort_unstable();
+    for k in &spent {
+        w.del(OUTPUTS, k)?;
+    }
+    let mut bs = std::mem::take(&mut cc.by_script_del);
+    bs.sort_unstable();
+    for k in &bs {
+        w.del(BY_SCRIPT, k)?;
+    }
+    w.put(STATE, &k_state(c, "coins_at"), &encode_tip(tip))?;
+    cc.bytes = 0;
+    cc.since = None;
+    Ok(())
 }
 
 /// Nanoseconds: [core writes, protocol indexes, whole write incl. commit, block bytes stored,
@@ -300,6 +427,8 @@ pub struct ChainDb {
     pub store: Store,
     /// Indexers and the chains they run on.
     indexers: std::sync::RwLock<Vec<(u16, Arc<dyn Indexer>)>>,
+    /// Coin caches of chains catching up (see CoinCache).
+    caches: std::sync::Mutex<std::collections::HashMap<u16, CoinCache>>,
 }
 
 fn ix_key(c: u16, name: &str) -> Vec<u8> {
@@ -310,7 +439,58 @@ impl ChainDb {
     pub fn open(path: impl AsRef<Path>) -> Result<ChainDb> {
         // chain.mdbx can always be rebuilt from the chain: skip the per-commit flush (a power
         // cut can lose the last few blocks, which the next sync fetches again).
-        Ok(ChainDb { store: Store::open_sync(path, &CHAIN_SCHEMA, false)?, indexers: Default::default() })
+        let db = ChainDb { store: Store::open_sync(path, &CHAIN_SCHEMA, false)?, indexers: Default::default(), caches: Default::default() };
+        for c in 0..=255u16 {
+            db.recover_coins(c)?;
+        }
+        Ok(db)
+    }
+
+    /// Whether a chain's coin cache is empty (everything is in the database).
+    pub fn coins_settled(&self, c: u16) -> bool {
+        self.caches.lock().unwrap().get(&c).is_none_or(|cc| cc.is_empty())
+    }
+
+    /// Write a chain's coin cache to the database now (it matches the current tip).
+    pub fn flush_coins(&self, c: u16) -> Result<()> {
+        self.store.write(|w| {
+            let mut caches = self.caches.lock().unwrap();
+            if let Some(cc) = caches.get_mut(&c).filter(|cc| !cc.is_empty()) {
+                if let Some(tip) = w.get(STATE, &k_state(c, "tip"))?.map(|v| decode_tip(&v)) {
+                    flush_cache(w, c, cc, &tip)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// The coins are complete up to STATE "coins_at". A tip past it (the arcade stopped before
+    /// the coin cache was flushed) is wound back to it: the blocks stay stored, and their stretch
+    /// is connected again.
+    fn recover_coins(&self, c: u16) -> Result<()> {
+        self.store.write(|w| {
+            let Some(tip) = w.get(STATE, &k_state(c, "tip"))?.map(|v| decode_tip(&v)) else { return Ok(()) };
+            let Some(at) = w.get(STATE, &k_state(c, "coins_at"))?.map(|v| decode_tip(&v)) else {
+                w.put(STATE, &k_state(c, "coins_at"), &encode_tip(&tip))?;
+                return Ok(());
+            };
+            if at.hash == tip.hash || at.height >= tip.height {
+                return Ok(());
+            }
+            for h in (at.height + 1)..=tip.height {
+                if let Some(v) = w.get(HEIGHT, &k_height(c, h))? {
+                    let hash = Hash256(v[..32].try_into().unwrap());
+                    if let Some(mut rec) = header_rec(w, c, &hash)? {
+                        rec.status = STATUS_HEADER;
+                        w.put(HEADERS, &k_header(c, &hash.0), &rec.index_value())?;
+                    }
+                    w.del(HEIGHT, &k_height(c, h))?;
+                }
+            }
+            w.put(STATE, &k_state(c, "tip"), &encode_tip(&at))?;
+            eprintln!("chain {c}: the coins were complete at {}; tip wound back from {} to connect that stretch again", at.height, tip.height);
+            Ok(())
+        })
     }
 
     /// Run an indexer on one chain: creates its tables. If the chain is already past the
@@ -1014,10 +1194,28 @@ impl ChainDb {
             if addr == Addr::Log && !blocks.is_empty() {
                 w.put(STATE, &k_state(c, crate::addrbuild::PENDING), b"1")?;
             }
-            for b in blocks {
-                tip = Some(connect_one(w, params, b, tip, &ixs, check, addr, !defer)?);
+            let mut caches = self.caches.lock().unwrap();
+            let cc = caches.entry(c).or_default();
+            // Up near the tip again: the cache goes to the database first.
+            if !defer && !cc.is_empty() {
+                if let Some(t) = tip {
+                    flush_cache(w, c, cc, &t)?;
+                }
             }
-            tip.ok_or_else(|| other("nothing connected"))
+            for b in blocks {
+                tip = Some(connect_one(w, params, b, tip, &ixs, check, addr, !defer, if defer { Some(&mut *cc) } else { None })?);
+            }
+            let t = tip.ok_or_else(|| other("nothing connected"))?;
+            if !defer {
+                w.put(STATE, &k_state(c, "coins_at"), &encode_tip(&t))?;
+            } else if cc.bytes >= cache_budget() || cc.since.is_some_and(|s| s.elapsed() > std::time::Duration::from_secs(600)) {
+                let tf = std::time::Instant::now();
+                flush_cache(w, c, cc, &t)?;
+                if std::env::var_os("ARCADE_SYNC_TIMES").is_some() {
+                    eprintln!("  coin cache flushed at {} in {:.1}s", t.height, tf.elapsed().as_secs_f64());
+                }
+            }
+            Ok(t)
         });
         TIMES[2].fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         r
@@ -1036,6 +1234,8 @@ impl ChainDb {
             undo::apply_undo(w, &undo::decode(&rec)?)?;
             w.del(UNDO, &k_block(c, tip.b))?;
             let new = w.get(STATE, &k_state(c, "tip"))?.map(|v| decode_tip(&v)).ok_or_else(|| other("undo left no tip"))?;
+            // Rolled back blocks always had their coins written (undo exists only near the tip).
+            w.put(STATE, &k_state(c, "coins_at"), &encode_tip(&new))?;
             Ok(new)
         })
     }
@@ -1091,7 +1291,17 @@ enum Addr {
 /// are more than DEFER_BEHIND (20,000) deep, far past the UNDO_DEPTH (1,000) a reorg may undo,
 /// and their records would only be deleted again later.
 #[allow(clippy::too_many_arguments)]
-fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>, ixs: &[Arc<dyn Indexer>], check: bool, addr: Addr, undo: bool) -> Result<Tip> {
+fn connect_one(
+    w: &WriteTxn,
+    params: &ChainParams,
+    blk: &Block,
+    tip: Option<Tip>,
+    ixs: &[Arc<dyn Indexer>],
+    check: bool,
+    addr: Addr,
+    undo: bool,
+    mut cache: Option<&mut CoinCache>,
+) -> Result<Tip> {
     let c = params.chain_no;
     let hash = blk.hash();
     let height = match tip {
@@ -1163,7 +1373,10 @@ fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>
         let mut bp = b.to_be_bytes().to_vec();
         bp.extend_from_slice(&p.to_be_bytes());
         let t_ix = std::time::Instant::now();
-        l.dup_add(TXS, &k_txs(c, &t12), &bp)?;
+        match cache.as_deref_mut() {
+            Some(cc) => cc.add_tx(t12, bp[..8].try_into().unwrap()),
+            None => l.dup_add(TXS, &k_txs(c, &t12), &bp)?,
+        }
         tadd(5, t_ix);
 
         let t_sp = std::time::Instant::now();
@@ -1175,12 +1388,25 @@ fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>
                         tx.txid, inp.prevout.txid, inp.prevout.vout
                     ))
                 };
-                let (pb, pp) = locate(w, params, &inp.prevout.txid)?.ok_or_else(missing)?;
-                let coin = coin_at(w, params, pb, pp, inp.prevout.vout)?.ok_or_else(missing)?;
+                let ((pb, pp), ok, coin) = match cache.as_deref() {
+                    Some(cc) => {
+                        let (pb, pp) = locate_c(w, params, cc, &inp.prevout.txid)?.ok_or_else(missing)?;
+                        let ok = k_pos(c, pb, pp, inp.prevout.vout);
+                        let coin = coin_c(w, params, cc, pb, pp, inp.prevout.vout, &ok)?.ok_or_else(missing)?;
+                        ((pb, pp), ok, coin)
+                    }
+                    None => {
+                        let (pb, pp) = locate(w, params, &inp.prevout.txid)?.ok_or_else(missing)?;
+                        let coin = coin_at(w, params, pb, pp, inp.prevout.vout)?.ok_or_else(missing)?;
+                        ((pb, pp), k_pos(c, pb, pp, inp.prevout.vout), coin)
+                    }
+                };
                 let sid = script_id(&coin.script);
                 pv.push(Prevout { value: coin.value, script: coin.script.clone() });
-                let ok = k_pos(c, pb, pp, inp.prevout.vout);
-                l.del(OUTPUTS, &ok)?;
+                match cache.as_deref_mut() {
+                    Some(cc) => cc.spend(ok.clone()),
+                    None => l.del(OUTPUTS, &ok)?,
+                }
                 let mut sp = bp.clone();
                 sp.extend_from_slice(&(vin as u32).to_be_bytes());
                 match addr {
@@ -1188,7 +1414,10 @@ fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>
                     Addr::Log => {
                         // A coin from before the log began has its address row in place
                         // already (a missing row costs a read, no write).
-                        l.del(BY_SCRIPT, &k_by_script(c, &sid, pb, pp, inp.prevout.vout))?;
+                        match cache.as_deref_mut() {
+                            Some(cc) => cc.by_script_del.push(k_by_script(c, &sid, pb, pp, inp.prevout.vout)),
+                            None => l.del(BY_SCRIPT, &k_by_script(c, &sid, pb, pp, inp.prevout.vout))?,
+                        }
                         log(crate::addrbuild::SPEND, &ok, &sp)?;
                         log(crate::addrbuild::HIST, &k_hist(c, &sid, height, &t12), &crate::addrbuild::hist_val(0, coin.value))?;
                     }
@@ -1214,7 +1443,10 @@ fn connect_one(w: &WriteTxn, params: &ChainParams, blk: &Block, tip: Option<Tip>
             }
             let vout = vout as u32;
             let sid = script_id(&out.script_pubkey);
-            l.put(OUTPUTS, &k_pos(c, b, p, vout), &encode_coin(out.value, height, coinbase, &out.script_pubkey))?;
+            match cache.as_deref_mut() {
+                Some(cc) => cc.put_coin(k_pos(c, b, p, vout), encode_coin(out.value, height, coinbase, &out.script_pubkey)),
+                None => l.put(OUTPUTS, &k_pos(c, b, p, vout), &encode_coin(out.value, height, coinbase, &out.script_pubkey))?,
+            }
             let mut v = out.value.to_le_bytes().to_vec();
             v.extend_from_slice(&height.to_le_bytes());
             match addr {

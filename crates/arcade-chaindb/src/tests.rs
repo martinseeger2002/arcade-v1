@@ -439,3 +439,64 @@ fn addresses_built_later_match_live() {
     assert!(t[0].is_empty() && t[1].is_empty() && t[2].is_empty() && t[4].is_empty());
     assert_eq!(t[3], want[3], "coins stay");
 }
+
+/// Every coin-related table.
+fn coin_tables(db: &ChainDb) -> Vec<Vec<(Vec<u8>, Vec<u8>)>> {
+    [OUTPUTS, TXS, BY_SCRIPT, HEIGHT, STATE]
+        .iter()
+        .map(|t| {
+            let mut v = db.store.read(|r| r.scan_prefix(t, b"")).unwrap();
+            if *t == STATE {
+                // Undo-related and cache bookkeeping rows differ by design; compare the tip only.
+                v.retain(|(k, _)| k.ends_with(b"tip"));
+            }
+            v
+        })
+        .collect()
+}
+
+#[test]
+fn coin_cache_matches_direct_and_survives_a_crash() {
+    let direct = fixture();
+    let blocks = busy_chain(&direct.g, 40);
+    direct.db.connect_blocks(direct.p, &blocks).unwrap();
+    let c = direct.p.chain_no;
+
+    // Deferred (cached), in several commits, then flushed: the same coins and tx index.
+    let f = fixture();
+    for part in blocks.chunks(7) {
+        f.db.connect_blocks_with(f.p, part, true, true).unwrap();
+    }
+    assert!(!f.db.coins_settled(c), "the cache holds the stretch");
+    assert!(f.db.store.read(|r| r.scan_prefix(OUTPUTS, b"")).unwrap().len() < 3, "nothing but genesis's coin written yet");
+    f.db.flush_coins(c).unwrap();
+    let mut want = coin_tables(&direct.db);
+    let got = coin_tables(&f.db);
+    // BY_SCRIPT: the direct run writes address rows live; the deferred one only deletes old ones.
+    want[2] = got[2].clone();
+    assert_eq!(got, want, "cached then flushed = direct");
+
+    // Cached, then up near the tip again (not deferring): the first live commit flushes.
+    let f = fixture();
+    f.db.connect_blocks_with(f.p, &blocks[..25], true, true).unwrap();
+    f.db.connect_blocks(f.p, &blocks[25..]).unwrap();
+    assert!(f.db.coins_settled(c));
+    assert_eq!(coin_tables(&f.db)[..2], coin_tables(&direct.db)[..2], "cached then live = direct");
+
+    // A crash before a flush: reopened, the tip is wound back to the last flush, and the
+    // stretch connects again to the same coins.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chain.mdbx");
+    {
+        let db = ChainDb::open(&path).unwrap();
+        db.connect_blocks(direct.p, &[direct.g.clone()]).unwrap();
+        db.connect_blocks(direct.p, &blocks[..10]).unwrap();
+        db.connect_blocks_with(direct.p, &blocks[10..30], true, true).unwrap();
+        assert_eq!(db.tip(c).unwrap().unwrap().height, 30);
+        // dropped without a flush
+    }
+    let db = ChainDb::open(&path).unwrap();
+    assert_eq!(db.tip(c).unwrap().unwrap().height, 10, "wound back to the coins' last good point");
+    db.connect_blocks(direct.p, &blocks[10..]).unwrap();
+    assert_eq!(coin_tables(&db)[..2], coin_tables(&direct.db)[..2], "crash, recovery, reconnect = direct");
+}

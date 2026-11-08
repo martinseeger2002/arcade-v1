@@ -133,6 +133,8 @@ impl ChainDb {
         if !self.addresses_pending(c)? || !self.addresses_on(c)? {
             return Ok(false);
         }
+        // Coins and deletions still in the coin cache must reach the database first.
+        self.flush_coins(c)?;
         let upto = self.tip(c)?.map(|t| t.height).unwrap_or(0);
         let backfill = self.store.read(|r| r.get(STATE, &k_state(c, BACKFILL)))?.map(|v| be_u32(&v, 0));
         std::fs::create_dir_all(tmp).map_err(io)?;
