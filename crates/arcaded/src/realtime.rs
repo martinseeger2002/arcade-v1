@@ -633,12 +633,13 @@ pub fn run(node: Arc<Node>) {
                 tell(&mut st, &room, None, json!({"type": "leave", "room": short_room(&room), "member": p}));
             }
         }
-        // Subscriptions: on change and every 30 s (an empty list once, after the last room).
+        // Subscriptions: on change and every 30 s, even with no rooms: other arcades route
+        // introductions (udpsvc "ui" yes) back along the way our sub came.
         let mut want: Vec<String> = st.locals.keys().map(|r| room_id(r)).collect();
         want.sort();
         want.dedup();
         let stale = st.last_sub.is_none_or(|t| t.elapsed() >= SUB_EVERY);
-        if want != st.sub_rooms || (stale && !want.is_empty()) {
+        if want != st.sub_rooms || stale {
             send_sub(&node, &mut st);
         }
         // Housekeeping.
