@@ -70,6 +70,10 @@ cmds! {
     "wallet.link" Wallet "chain, wif, tag" "Link another wallet to your @tag (signed by both keys).";
     "wallet.unlink" Wallet "chain, address, tag" "Remove a linked wallet.";
     "wallet.links" Read "chain" "Your linked wallets on a chain.";
+    "account.signin" Local "tag, password, from?" "Sign in with an existing Dogecoin Arcade account (@tag + password): its words come from the arcade that holds it (from, or any we know), sealed under the password, then its imported wallets and mailbox. The account becomes the active one.";
+    "account.list" Read "" "Accounts on this arcade: its own wallet first, then signed-in accounts; which one is active.";
+    "account.switch" Local "id" "Use another account (\"\" = this arcade's own wallet): wallet, messages, groups and rooms follow it.";
+    "account.signout" Local "id" "Sign an account out of this arcade: its words, keys, messages and groups here are forgotten.";
     "wallet.import" Local "chain, secret, addr_kind?, name?" "Import a wallet: a WIF key, or another wallet's words (one address, index 0); addr_kind legacy (default), p2sh-p2wpkh or p2wpkh. Kept encrypted here; nothing is published.";
     "wallet.imports" Local "" "Imported wallets, with balances on chains this arcade keeps addresses for.";
     "wallet.import_remove" Local "chain, address" "Forget an imported wallet and its key.";

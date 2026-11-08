@@ -49,6 +49,18 @@
   <!-- Wallet -->
   <section id="wallet" class="tab">
     <h1 id="w-title">Wallet</h1>
+    <h2>Accounts</h2>
+    <table><thead><tr><th>Account</th><th>Address</th><th>From</th><th></th></tr></thead><tbody id="w-accs"></tbody></table>
+    <details id="w-signin-box">
+      <summary>Sign in with a Dogecoin Arcade account</summary>
+      <p class="note">Your account's words are kept on the arcade that holds your account, sealed under your password; any arcade hands out the sealed copy and only your password opens it, here on this PC. Your imported wallets, groups, address book and blocked list come with it. The password is not stored.</p>
+      <div class="row">
+        <span class="at">@</span><input id="w-stag" placeholder="yourtag" maxlength="24" autocomplete="off" style="max-width:10em">
+        <input id="w-spw" type="password" placeholder="password" autocomplete="off" style="max-width:14em">
+        <input id="w-sfrom" placeholder="arcade (optional, e.g. dogecoinarcade.com)" autocomplete="off">
+        <button class="primary" id="w-signin">Sign in</button>
+      </div>
+    </details>
     <div id="w-none" hidden>
       <p>Your wallet is a 12-word recovery phrase. It lives on this PC with no password; the phrase is the only backup.</p>
       <div class="row">
@@ -74,6 +86,15 @@
         <span class="at">@</span><input id="w-ltag" placeholder="yourtag" maxlength="24" autocomplete="off" style="max-width:10em">
         <input id="w-wif" type="password" placeholder="private key (WIF)" autocomplete="off">
         <button id="w-link">Link wallet</button>
+      </div>
+      <h2>Imported wallets</h2>
+      <p class="note">Wallets from elsewhere this account holds: a private key (WIF) or another wallet's words (its first address). Kept here, encrypted; nothing is published. Sending from SegWit kinds isn't supported yet.</p>
+      <table><thead><tr><th>Name</th><th>Address</th><th>Kind</th><th class="num">Balance</th><th></th></tr></thead><tbody id="w-imps"></tbody></table>
+      <div class="row">
+        <input id="w-isecret" type="password" placeholder="private key (WIF) or 12 words" autocomplete="off">
+        <select id="w-ikind"><option value="legacy">legacy</option><option value="p2sh-p2wpkh">p2sh-p2wpkh</option><option value="p2wpkh">p2wpkh</option></select>
+        <input id="w-iname" placeholder="name (optional)" maxlength="60" autocomplete="off" style="max-width:10em">
+        <button id="w-import">Import</button>
       </div>
     </div>
     <p class="msg" id="w-msg"></p>

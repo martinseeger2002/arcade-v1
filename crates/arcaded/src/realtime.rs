@@ -204,13 +204,14 @@ fn who(node: &Node, origin: &str, member: &str, cred: Option<&Value>) -> Value {
 fn my_player(node: &Node, st: &mut St) -> (String, Option<Value>) {
     let me = hex::encode(node.identity.verifying_key().to_bytes());
     let x = cert_expiry();
-    if let Some((m, c)) = &st.my_cert {
-        if c["x"].as_u64() == Some(x) {
-            return (m.clone(), Some(c.clone()));
-        }
-    }
     match crate::msgsvc::sender_key(node) {
         Ok((address, _, sk)) => {
+            // The cert is cached per account (the active account can change).
+            if let Some((m, c)) = &st.my_cert {
+                if c["x"].as_u64() == Some(x) && *m == address {
+                    return (m.clone(), Some(c.clone()));
+                }
+            }
             let s = arcade_wallet::keys::signmessage(&sk, arcade_wallet::keys::PEPECOIN_MAGIC, &cert_words(&me, &address, x));
             let c = json!({"a": address, "x": x, "s": s});
             st.my_cert = Some((address.clone(), c.clone()));

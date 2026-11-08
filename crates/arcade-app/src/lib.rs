@@ -158,7 +158,13 @@ pub struct AppDb {
     pub store: Store,
     cipher: XChaCha20Poly1305,
     pub dir: PathBuf,
+    /// The account in use ("" = this arcade's own wallet, the first account). Other accounts'
+    /// rows in account tables are kept under "@<id>/" keys, their secrets under "acct/<id>/".
+    active: std::sync::RwLock<String>,
 }
+
+/// Tables whose rows belong to one account (switching accounts switches what they show).
+pub const ACCOUNT_TABLES: &[&str] = &[TAG_KEYS, MAIL, CONTACTS, MUTES, GROUPS];
 
 impl AppDb {
     /// Open `<dir>/arcade.mdbx`, creating it and `<dir>/secret.key` on first use.
@@ -175,7 +181,7 @@ impl AppDb {
             k
         };
         let store = Store::open(dir.join("arcade.mdbx"), &APP_SCHEMA)?;
-        let db = AppDb { store, cipher: XChaCha20Poly1305::new_from_slice(&key).unwrap(), dir };
+        let db = AppDb { store, cipher: XChaCha20Poly1305::new_from_slice(&key).unwrap(), dir, active: std::sync::RwLock::new(String::new()) };
         // Prove the key matches this database (a check value written on first open).
         match db.store.read(|r| r.get(SECRETS, b"check"))? {
             Some(_) => {
@@ -185,7 +191,79 @@ impl AppDb {
             }
             None => db.put_secret("check", b"arcade")?,
         }
+        let active = db.store.read(|r| r.get(META, b"active_account"))?.map(|v| String::from_utf8_lossy(&v).into_owned()).unwrap_or_default();
+        *db.active.write().unwrap() = active;
         Ok(db)
+    }
+
+    // ---------------- accounts ----------------
+
+    /// The account in use: "" for this arcade's own wallet.
+    pub fn active_account(&self) -> String {
+        self.active.read().unwrap().clone()
+    }
+
+    /// Make `id` the account in use ("" = this arcade's own wallet).
+    pub fn set_active_account(&self, id: &str) -> Result<()> {
+        self.store.write(|w| w.put(META, b"active_account", id.as_bytes()))?;
+        *self.active.write().unwrap() = id.to_string();
+        Ok(())
+    }
+
+    /// A row key in an account table, for the account in use.
+    pub fn akey(&self, table: &str, key: &[u8]) -> Vec<u8> {
+        let a = self.active.read().unwrap();
+        if a.is_empty() || !ACCOUNT_TABLES.contains(&table) {
+            return key.to_vec();
+        }
+        let mut k = format!("@{a}/").into_bytes();
+        k.extend_from_slice(key);
+        k
+    }
+
+    /// Rows of an account table under `prefix`, for the account in use (keys without the
+    /// account part).
+    pub fn ascan(&self, table: &str, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let full = self.akey(table, prefix);
+        let strip = full.len() - prefix.len();
+        let own = self.active.read().unwrap().is_empty();
+        Ok(self
+            .store
+            .read(|r| r.scan_prefix(table, &full))?
+            .into_iter()
+            .filter(|(k, _)| !(own && ACCOUNT_TABLES.contains(&table) && k.first() == Some(&b'@')))
+            .map(|(k, v)| (k[strip..].to_vec(), v))
+            .collect())
+    }
+
+    /// Drop every row and secret of account `id` (never the arcade's own wallet).
+    pub fn drop_account(&self, id: &str) -> Result<()> {
+        if id.is_empty() {
+            return Err(AppError::Other("this arcade's own wallet can't be removed this way".into()));
+        }
+        let pre = format!("@{id}/").into_bytes();
+        let spre = format!("acct/{id}/").into_bytes();
+        self.store.write(|w| {
+            for t in ACCOUNT_TABLES {
+                for (k, _) in w.scan_prefix(t, &pre)? {
+                    w.del(t, &k)?;
+                }
+            }
+            for (k, _) in w.scan_prefix(SECRETS, &spre)? {
+                w.del(SECRETS, &k)?;
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    fn sname(&self, name: &str) -> String {
+        let a = self.active.read().unwrap();
+        if a.is_empty() || !(name == "phrase" || name.starts_with("import/")) {
+            name.to_string()
+        } else {
+            format!("acct/{a}/{name}")
+        }
     }
 
     fn put_secret(&self, name: &str, plain: &[u8]) -> Result<()> {
@@ -193,11 +271,13 @@ impl AppDb {
         let ct = self.cipher.encrypt(&XNonce::from(nonce), plain).map_err(|_| AppError::BadSecret)?;
         let mut v = nonce.to_vec();
         v.extend_from_slice(&ct);
+        let name = self.sname(name);
         self.store.write(|w| w.put(SECRETS, name.as_bytes(), &v))?;
         Ok(())
     }
 
     fn secret(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        let name = self.sname(name);
         let Some(v) = self.store.read(|r| r.get(SECRETS, name.as_bytes()))? else { return Ok(None) };
         if v.len() < 24 {
             return Err(AppError::BadSecret);
@@ -212,7 +292,8 @@ impl AppDb {
         let ct = self.cipher.encrypt(&XNonce::from(nonce), plain).map_err(|_| AppError::BadSecret)?;
         let mut v = nonce.to_vec();
         v.extend_from_slice(&ct);
-        self.store.write(|w| w.put(table, key, &v))?;
+        let key = self.akey(table, key);
+        self.store.write(|w| w.put(table, &key, &v))?;
         Ok(())
     }
 
@@ -225,7 +306,8 @@ impl AppDb {
     }
 
     pub fn get_sealed(&self, table: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        match self.store.read(|r| r.get(table, key))? {
+        let key = self.akey(table, key);
+        match self.store.read(|r| r.get(table, &key))? {
             Some(v) => Ok(Some(self.unseal_row(&v)?)),
             None => Ok(None),
         }
@@ -233,7 +315,7 @@ impl AppDb {
 
     /// Every (key, opened value) under a prefix of a sealed table.
     pub fn scan_sealed(&self, table: &str, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.store.read(|r| r.scan_prefix(table, prefix))?.into_iter().map(|(k, v)| Ok((k, self.unseal_row(&v)?))).collect()
+        self.ascan(table, prefix)?.into_iter().map(|(k, v)| Ok((k, self.unseal_row(&v)?))).collect()
     }
 
     /// An imported wallet's key, kept encrypted like the phrase.
@@ -246,7 +328,7 @@ impl AppDb {
     }
 
     pub fn drop_imported_key(&self, name: &str) -> Result<()> {
-        let k = format!("import/{name}");
+        let k = self.sname(&format!("import/{name}"));
         self.store.write(|w| w.del(SECRETS, k.as_bytes()).map(|_| ()))?;
         Ok(())
     }
@@ -263,7 +345,8 @@ impl AppDb {
     }
 
     pub fn has_wallet(&self) -> Result<bool> {
-        Ok(self.store.read(|r| r.get(SECRETS, b"phrase"))?.is_some())
+        let k = self.sname("phrase");
+        Ok(self.store.read(|r| r.get(SECRETS, k.as_bytes()))?.is_some())
     }
 
     /// Create the wallet from a new or restored phrase. Returns the normalised phrase.
@@ -291,7 +374,7 @@ impl AppDb {
         let x = arcade_wallet::keys::tag_key(&seed[..], p.bip44_coin_type, index)
             .map_err(|e| AppError::Other(e.to_string()))?;
         let pk = x.public();
-        let k = KeyBuf::new().u16(p.chain_no).u32(index).done();
+        let k = self.akey(TAG_KEYS, &KeyBuf::new().u16(p.chain_no).u32(index).done());
         let existing: Option<TagKey> =
             self.store.read(|r| Ok(r.get(TAG_KEYS, &k)?))?.map(|v| dec(TAG_KEYS, &v)).transpose()?;
         let rec = existing.unwrap_or(TagKey {
@@ -306,11 +389,14 @@ impl AppDb {
     }
 
     pub fn tag_keys(&self, chain: u16) -> Result<Vec<TagKey>> {
-        self.store
-            .read(|r| r.scan_prefix(TAG_KEYS, &KeyBuf::new().u16(chain).done()))?
-            .into_iter()
-            .map(|(_, v)| dec(TAG_KEYS, &v))
-            .collect()
+        self.ascan(TAG_KEYS, &KeyBuf::new().u16(chain).done())?.into_iter().map(|(_, v)| dec(TAG_KEYS, &v)).collect()
+    }
+
+    /// Record a tag key (e.g. its @tag confirmed), for the account in use.
+    pub fn put_tag_key(&self, k: &TagKey) -> Result<()> {
+        let key = self.akey(TAG_KEYS, &KeyBuf::new().u16(k.chain).u32(k.index).done());
+        self.store.write(|w| w.put(TAG_KEYS, &key, &enc(k)))?;
+        Ok(())
     }
 
     /// The first tag slot on this chain that holds no tag and has no claim in flight.
@@ -381,6 +467,36 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn accounts_keep_apart() {
+        let d = tempfile::tempdir().unwrap();
+        let db = AppDb::open(d.path()).unwrap();
+        let p = &arcade_wallet::PEPECOIN_TEST;
+        db.create_wallet(None).unwrap();
+        let own = db.tag_key(p, 0).unwrap().0.address;
+        db.put_sealed(CONTACTS, b"k1", b"mine").unwrap();
+        db.set_active_account("acc1").unwrap();
+        assert!(!db.has_wallet().unwrap());
+        db.create_wallet(Some("legal winner thank year wave sausage worth useful legal winner thank yellow")).unwrap();
+        let other = db.tag_key(p, 0).unwrap().0.address;
+        assert_ne!(own, other);
+        assert_eq!(db.tag_keys(p.chain_no).unwrap().len(), 1);
+        assert!(db.scan_sealed(CONTACTS, b"").unwrap().is_empty());
+        db.put_sealed(CONTACTS, b"k2", b"theirs").unwrap();
+        db.set_active_account("").unwrap();
+        let mine: Vec<_> = db.scan_sealed(CONTACTS, b"").unwrap();
+        assert_eq!(mine, vec![(b"k1".to_vec(), b"mine".to_vec())]);
+        assert_eq!(db.tag_keys(p.chain_no).unwrap()[0].address, own);
+        db.drop_account("acc1").unwrap();
+        db.set_active_account("acc1").unwrap();
+        assert!(!db.has_wallet().unwrap());
+        assert!(db.scan_sealed(CONTACTS, b"").unwrap().is_empty());
+        // Reopened, the active account is remembered.
+        drop(db);
+        let db = AppDb::open(d.path()).unwrap();
+        assert_eq!(db.active_account(), "acc1");
+    }
+
     use super::*;
     use arcade_wallet::PEPECOIN_TEST;
 

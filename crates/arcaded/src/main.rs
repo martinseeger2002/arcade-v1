@@ -5,6 +5,7 @@
 //!   arcaded [--home DIR] [--no-mesh] [--no-seeds] [--mesh-port N|0] [--mesh-peer HOST:PORT]... [--p2p-only]
 //!           [--http-port N|0] [--http-bind ADDR] [--site DIR]
 
+mod accountsvc;
 mod addrsvc;
 mod api;
 mod apikeys;

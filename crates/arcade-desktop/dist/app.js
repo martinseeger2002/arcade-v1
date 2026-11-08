@@ -72,11 +72,63 @@ async function refreshHome() {
   state.claims = await api("tag.list");
 }
 
+async function drawAccounts() {
+  const accs = await api("account.list").catch(() => []);
+  $("w-accs").replaceChildren(...accs.map((a) => {
+    const tr = document.createElement("tr");
+    const name = (a.tag ? "@" + a.tag : (a.own ? "This arcade's wallet" : a.id)) + (a.active ? " (in use)" : "");
+    for (const t of [name, a.address || (a.own ? "this PC" : ""), a.own ? "" : (a.from || "")]) {
+      const td = document.createElement("td"); td.textContent = t; tr.append(td);
+    }
+    const td = document.createElement("td");
+    if (!a.active) {
+      const u = document.createElement("button"); u.textContent = "Use";
+      u.addEventListener("click", async () => {
+        try { await api("account.switch", { id: a.id }); msg($("w-msg"), `Now using ${name.replace(" (in use)", "")}.`, "ok"); refresh(); }
+        catch (e) { msg($("w-msg"), e.message, "bad"); }
+      });
+      td.append(u);
+    }
+    if (!a.own) {
+      const b = document.createElement("button"); b.textContent = "Sign out";
+      b.addEventListener("click", async () => {
+        if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Sign out: sure?"; return; }
+        try { await api("account.signout", { id: a.id }); msg($("w-msg"), `Signed out; its words, keys and messages are gone from this arcade.`, "ok"); refresh(); }
+        catch (e) { msg($("w-msg"), e.message, "bad"); }
+      });
+      td.append(b);
+    }
+    tr.append(td); return tr;
+  }));
+}
+
+async function drawImports() {
+  const ch = picked();
+  const all = await api("wallet.imports").catch(() => []);
+  const list = all.filter((w) => w.chain === ch.key);
+  $("w-imps").replaceChildren(...(list.length ? list : [null]).map((w) => {
+    const tr = document.createElement("tr");
+    if (!w) { const td = document.createElement("td"); td.colSpan = 5; td.className = "note"; td.textContent = `None on this chain${all.length ? ` (${all.length} on other chains)` : ""}.`; tr.append(td); return tr; }
+    for (const [text, cls] of [[w.name || "—"], [w.address], [`${w.kind === "phrase" ? "words" : "key"} · ${w.addr_kind}`], [w.balance == null ? "not installed" : coins(w.balance), "num"]]) {
+      const td = document.createElement("td"); td.textContent = text; if (cls) td.className = cls; tr.append(td);
+    }
+    const td = document.createElement("td"); const b = document.createElement("button"); b.textContent = "Remove";
+    b.addEventListener("click", async () => {
+      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Remove: sure?"; return; }
+      try { await api("wallet.import_remove", { chain: ch.key, address: w.address }); msg($("w-msg"), `Forgot ${w.address} and its key.`, "ok"); refreshWallet(); }
+      catch (e) { msg($("w-msg"), e.message, "bad"); }
+    });
+    td.append(b); tr.append(td); return tr;
+  }));
+}
+
 async function refreshWallet() {
   const ch = picked();
   $("w-title").textContent = `Wallet · ${ch.name}`;
+  await drawAccounts();
   $("w-none").hidden = state.wallet; $("w-keys").hidden = !state.wallet;
   if (!state.wallet) return;
+  drawImports();
   state.keys = await api("wallet.keys", { chain: ch.key });
   rows($("w-rows"), state.keys, (k) => [[String(k.index)], [k.address], [k.tag ? "@" + k.tag : "—"], [k.balance == null ? "not installed" : coins(k.balance), "num"]]);
   // Test coins from the mesh are Pepecoin testnet coins.
@@ -175,6 +227,30 @@ $("w-link").addEventListener("click", async () => {
     const r = await api("wallet.link", { chain: picked().key, wif: $("w-wif").value, tag: $("w-ltag").value });
     $("w-wif").value = "";
     msg($("w-msg"), `Linked ${r.a} to @${r.tag}, signed by both keys and sent to the mesh.`, "ok");
+    refreshWallet();
+  } catch (e) { msg($("w-msg"), e.message, "bad"); }
+});
+$("w-signin").addEventListener("click", async () => {
+  const b = $("w-signin");
+  b.disabled = true; msg($("w-msg"), "Finding the arcade that holds your account and opening it (this takes a few seconds)…");
+  try {
+    const r = await api("account.signin", { tag: $("w-stag").value, password: $("w-spw").value, from: $("w-sfrom").value });
+    $("w-spw").value = "";
+    const im = r.imports || {}, mb = r.mailbox || {};
+    const bits = [`signed in as @${r.account.tag} from ${r.account.from}`];
+    bits.push(im.error ? `imported wallets: ${im.error}` : `${im.brought || 0} imported wallet${im.brought === 1 ? "" : "s"}${(im.failed || []).length ? `, ${im.failed.length} not brought` : ""}`);
+    bits.push(mb.error ? `mailbox: ${mb.error}` : `${mb.groups || 0} groups, ${mb.book || 0} contacts, ${mb.blocked || 0} blocked`);
+    msg($("w-msg"), bits.join(" · "), im.error || mb.error ? "" : "ok");
+    $("w-signin-box").open = false;
+    refresh();
+  } catch (e) { msg($("w-msg"), e.message, "bad"); }
+  finally { b.disabled = false; }
+});
+$("w-import").addEventListener("click", async () => {
+  try {
+    const r = await api("wallet.import", { chain: picked().key, secret: $("w-isecret").value, addr_kind: $("w-ikind").value, name: $("w-iname").value });
+    $("w-isecret").value = ""; $("w-iname").value = "";
+    msg($("w-msg"), r.imported ? `Imported ${r.wallet.address}.` : `${r.wallet.address} was already here.`, "ok");
     refreshWallet();
   } catch (e) { msg($("w-msg"), e.message, "bad"); }
 });

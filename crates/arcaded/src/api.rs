@@ -87,6 +87,10 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         }
         "wallet.link" => crate::links::link(node, &s("chain").ok_or("chain required")?, &s("wif").ok_or("wif required")?, &s("tag").ok_or("tag required")?),
         "wallet.unlink" => crate::links::unlink(node, &s("chain").ok_or("chain required")?, &s("address").ok_or("address required")?, &s("tag").ok_or("tag required")?),
+        "account.signin" => crate::accountsvc::sign_in(node, &s("tag").ok_or("tag required")?, &s("password").ok_or("password required")?, s("from").as_deref().filter(|f| !f.is_empty())),
+        "account.list" => Ok(crate::accountsvc::list(node)),
+        "account.switch" => crate::accountsvc::switch(node, &s("id").unwrap_or_default()),
+        "account.signout" => crate::accountsvc::sign_out(node, &s("id").ok_or("id required")?),
         "wallet.import" => crate::importsvc::import(node, &s("chain").ok_or("chain required")?, &s("secret").ok_or("secret required (a WIF key or a wallet's words)")?, &s("addr_kind").unwrap_or_default(), &s("name").unwrap_or_default(), "manual"),
         "wallet.imports" => Ok(crate::importsvc::list(node)),
         "wallet.import_remove" => crate::importsvc::remove(node, &s("chain").ok_or("chain required")?, &s("address").ok_or("address required")?),

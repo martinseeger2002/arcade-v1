@@ -178,16 +178,7 @@ fn advance_one(node: &Node, mut c: Claim) -> Result<Claim, String> {
                     set(&mut c, ClaimStatus::Confirmed, "confirmed on chain");
                     let mut k = key.clone();
                     k.tag = Some(c.tag.clone());
-                    node.app
-                        .store
-                        .write(|w| {
-                            w.put(
-                                arcade_app::TAG_KEYS,
-                                &arcade_store::KeyBuf::new().u16(k.chain).u32(k.index).done(),
-                                &serde_json::to_vec(&k).unwrap(),
-                            )
-                        })
-                        .ok();
+                    node.app.put_tag_key(&k).ok();
                     node.app.event("tag", &format!("@{} is yours", c.tag)).ok();
                 }
                 Some(false) => set(&mut c, ClaimStatus::Failed, "someone else's claim confirmed first"),

@@ -18,6 +18,9 @@ arcade-store = { version = "0.1.0", path = "../arcade-store" }
 arcade-wallet = { version = "0.1.0", path = "../arcade-wallet" }
 base64 = "0.23.1"
 blake2 = "0.10"
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
+aes-gcm = "0.10"
+ureq = { version = "2.12", default-features = false, features = ["tls", "json", "cookies"] }
 ed25519-dalek = "2"
 flate2 = "1.1.11"
 hex = "0.4.3"

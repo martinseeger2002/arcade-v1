@@ -317,8 +317,7 @@ fn profiles_by_key(node: &Node) -> BTreeMap<String, Value> {
 
 fn contacts(node: &Node) -> BTreeMap<String, Value> {
     node.app
-        .store
-        .read(|r| r.scan_prefix(arcade_app::CONTACTS, b""))
+        .ascan(arcade_app::CONTACTS, b"")
         .unwrap_or_default()
         .into_iter()
         .filter_map(|(k, v)| Some((String::from_utf8(k).ok()?, serde_json::from_slice(&v).ok()?)))
@@ -327,8 +326,7 @@ fn contacts(node: &Node) -> BTreeMap<String, Value> {
 
 pub fn mutes(node: &Node) -> BTreeMap<String, u64> {
     node.app
-        .store
-        .read(|r| r.scan_prefix(arcade_app::MUTES, b""))
+        .ascan(arcade_app::MUTES, b"")
         .unwrap_or_default()
         .into_iter()
         .filter_map(|(k, v)| Some((String::from_utf8(k).ok()?, u64::from_be_bytes(v.get(..8)?.try_into().ok()?))))
@@ -483,19 +481,24 @@ pub fn contact_save(node: &Node, key: &str, name: &str, address: &str, notes: &s
     m.insert("address".into(), json!(address.trim()));
     m.insert("notes".into(), json!(notes));
     m.insert("added".into(), json!(arcade_app::now()));
-    node.app.store.write(|w| w.put(arcade_app::CONTACTS, key.as_bytes(), Value::Object(m).to_string().as_bytes())).map_err(|e| e.to_string())?;
+    let k = node.app.akey(arcade_app::CONTACTS, key.as_bytes());
+    node.app.store.write(|w| w.put(arcade_app::CONTACTS, &k, Value::Object(m).to_string().as_bytes())).map_err(|e| e.to_string())?;
     Ok(json!({"saved": key}))
 }
 
 pub fn contact_delete(node: &Node, key: &str) -> Result<Value, String> {
-    node.app.store.write(|w| w.del(arcade_app::CONTACTS, key.as_bytes())).map_err(|e| e.to_string())?;
+    let k = node.app.akey(arcade_app::CONTACTS, key.as_bytes());
+    node.app.store.write(|w| w.del(arcade_app::CONTACTS, &k)).map_err(|e| e.to_string())?;
     Ok(json!({"deleted": key}))
 }
 
 pub fn mute(node: &Node, address: &str, on: bool) -> Result<Value, String> {
     node.app
         .store
-        .write(|w| if on { w.put(arcade_app::MUTES, address.as_bytes(), &arcade_app::now().to_be_bytes()) } else { w.del(arcade_app::MUTES, address.as_bytes()).map(|_| ()) })
+        .write(|w| {
+            let k = node.app.akey(arcade_app::MUTES, address.as_bytes());
+            if on { w.put(arcade_app::MUTES, &k, &arcade_app::now().to_be_bytes()) } else { w.del(arcade_app::MUTES, &k).map(|_| ()) }
+        })
         .map_err(|e| e.to_string())?;
     Ok(json!({"address": address, "muted": on}))
 }
