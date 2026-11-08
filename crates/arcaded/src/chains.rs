@@ -553,6 +553,18 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
         }
         stages.push(json!({"name": "Your share", "detail": d, "pct": 100.0, "at": 0, "of": 0, "info": true}));
     }
+    // Blocks per second for each stage that moves through heights.
+    for st in stages.iter_mut() {
+        if st["info"] == true || st["at"].is_null() {
+            continue;
+        }
+        let name = st["name"].as_str().unwrap_or("").to_string();
+        // A deferred address build isn't moving yet (its "at" mirrors the blocks).
+        let at = if st["name"] == "Addresses" && st["pct"].as_f64() == Some(0.0) { 0 } else { st["at"].as_u64().unwrap_or(0) };
+        if let Some(r) = stage_rate(key, &name, at) {
+            st["rate"] = json!((r * 10.0).round() / 10.0);
+        }
+    }
     // The step being worked on: the first one not done.
     if let Some(cur) = stages.iter_mut().find(|s| s["pct"].as_f64().unwrap_or(0.0) < 100.0) {
         cur["current"] = json!(true);
@@ -817,4 +829,28 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
         }
     }
     set("stopped".into());
+}
+
+/// Blocks per second for one stage of one chain, over about the last two minutes of samples
+/// (taken whenever the status is read). None until there are 5 s of samples.
+fn stage_rate(chain: &str, stage: &str, at: u64) -> Option<f64> {
+    use std::collections::{HashMap, VecDeque};
+    use std::time::{Duration, Instant};
+    static SAMPLES: std::sync::OnceLock<Mutex<HashMap<String, VecDeque<(Instant, u64)>>>> = std::sync::OnceLock::new();
+    let mut all = SAMPLES.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let q = all.entry(format!("{chain}/{stage}")).or_default();
+    let now = Instant::now();
+    // A height going back (a rebuild, a reorg) starts over.
+    if q.back().is_some_and(|b| at < b.1) {
+        q.clear();
+    }
+    if q.back().is_none_or(|b| now.duration_since(b.0) >= Duration::from_secs(1)) {
+        q.push_back((now, at));
+    }
+    while q.len() > 2 && q.front().is_some_and(|f| now.duration_since(f.0) > Duration::from_secs(120)) {
+        q.pop_front();
+    }
+    let (t0, h0) = *q.front()?;
+    let secs = now.duration_since(t0).as_secs_f64();
+    (secs >= 5.0).then(|| at.saturating_sub(h0) as f64 / secs)
 }
