@@ -80,7 +80,34 @@ fn be_polite() {
     }
 }
 
+/// glibc gives each thread that allocates under contention its own 64 MB arena, and memory
+/// freed in one is rarely given back. With ~90 threads (block download workers, mesh, sync)
+/// the arcade grew past 6.5 GB while catching up Dogecoin, coin cache or not. Cap the arenas
+/// (ARCADE_MALLOC_ARENAS, default 4; MALLOC_ARENA_MAX set by hand wins) and hand freed memory
+/// back once a minute.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn tame_malloc() {
+    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+        let n = std::env::var("ARCADE_MALLOC_ARENAS").ok().and_then(|v| v.parse::<i32>().ok()).filter(|n| *n > 0).unwrap_or(4);
+        unsafe {
+            libc::mallopt(libc::M_ARENA_MAX, n);
+        }
+    }
+    std::thread::Builder::new()
+        .name("malloc trim".into())
+        .spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            unsafe {
+                libc::malloc_trim(0);
+            }
+        })
+        .ok();
+}
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn tame_malloc() {}
+
 fn main() {
+    tame_malloc();
     be_polite();
     let args: Vec<String> = std::env::args().collect();
     let home = args
