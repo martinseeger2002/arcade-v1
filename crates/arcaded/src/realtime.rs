@@ -12,7 +12,6 @@
 
 use crate::node::Node;
 use arcade_mesh::link::{canonical, Frame};
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -131,27 +130,35 @@ fn rt() -> &'static Rt {
 
 // ---------------- signing ----------------
 
-fn signed_part(h: &Value) -> Value {
-    let mut m = h.as_object().cloned().unwrap_or_default();
-    for k in ["sig", "hops", "d"] {
-        m.remove(k);
-    }
-    Value::Object(m)
-}
+/// Signed by the origin ("o"): the header without sig, hops and d, then the payload.
+const STRIP: &[&str] = &["sig", "hops", "d"];
 
 fn sign(node: &Node, h: &mut Value, blob: &[u8]) {
-    let mut msg = canonical(&signed_part(h));
-    msg.extend_from_slice(blob);
-    h["sig"] = json!(hex::encode(node.identity.sign(&msg).to_bytes()));
+    arcade_mesh::canon::sign_json(&node.identity, h, STRIP, blob);
 }
 
 fn verify(h: &Value, blob: &[u8]) -> bool {
-    let Some(o) = h["o"].as_str().and_then(|o| hex::decode(o).ok()).and_then(|b| <[u8; 32]>::try_from(b).ok()) else { return false };
-    let Some(sig) = h["sig"].as_str().and_then(|s| hex::decode(s).ok()).and_then(|b| <[u8; 64]>::try_from(b).ok()) else { return false };
-    let Ok(vk) = VerifyingKey::from_bytes(&o) else { return false };
-    let mut msg = canonical(&signed_part(h));
-    msg.extend_from_slice(blob);
-    vk.verify(&msg, &Signature::from_bytes(&sig)).is_ok()
+    arcade_mesh::canon::verify_json(h, STRIP, "o", blob)
+}
+
+#[cfg(test)]
+#[test]
+fn golden_realtime_signature() {
+    // Captured from the code before signing moved to canon::sign_json: must not change.
+    let k = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let mut h = json!({"t": "rt", "o": hex::encode(k.verifying_key().to_bytes()), "r": "pg/room", "q": 5, "hops": 2, "d": ["x"],
+                       "x": "é☃😀\u{7f}\n", "z": {"b": 1, "a": [1, 2.5, null, true]}});
+    let blob = b"blob\x00\xff";
+    assert_eq!(hex::encode(arcade_mesh::canon::signed_bytes(&h, STRIP, blob)), "7b226f223a2265613461366336336532396335323061626566353530376231333265633566393935343737366165626562653762393234323165656136393134343664323263222c2271223a352c2272223a2270672f726f6f6d222c2274223a227274222c2278223a225c75303065395c75323630335c75643833645c75646530305c75303037665c6e222c227a223a7b2261223a5b312c322e352c6e756c6c2c747275655d2c2262223a317d7d626c6f6200ff");
+    arcade_mesh::canon::sign_json(&k, &mut h, STRIP, blob);
+    assert_eq!(h["sig"], "62f2a9c87a2daebb752215645010c71ae2c461882d351a021472b3a583b668bde9af35eea876d79708d1cca99c0af6b90416ed49c70752c7a4276ca3aaf0fc01");
+    assert!(verify(&h, blob));
+    h["hops"] = json!(3);
+    h["d"] = json!(["y", "z"]);
+    assert!(verify(&h, blob));
+    assert!(!verify(&h, b"other"));
+    h["q"] = json!(6);
+    assert!(!verify(&h, blob));
 }
 
 fn next_q(st: &mut St) -> u64 {
