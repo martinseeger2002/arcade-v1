@@ -568,14 +568,10 @@ fn tx(x: &Ctx, id: &str) -> R {
               "inputs": inputs, "outputs": outputs, "genesis": born, "unit": unit(x.p)}))
 }
 
-fn script_for(x: &Ctx, a: &str) -> Option<Vec<u8>> {
-    address::script_for_address(x.p, a)
-}
-
 fn addr(x: &Ctx, a: &str) -> R {
     let c = x.c();
     let a = a.trim();
-    let script = script_for(x, a).ok_or_else(|| format!("{a} is not a {} address", x.p.name))?;
+    let script = address::script_for_address(x.p, a).ok_or_else(|| format!("{a} is not a {} address", x.p.name))?;
     let mut v = json!({"address": a, "tag": tag_of(x, a), "unit": unit(x.p)});
     if x.has("addresses") {
         let hist = x.node.chain.history_for_script(c, &script).map_err(e)?;
@@ -703,7 +699,7 @@ fn tag_page(x: &Ctx, t: &str) -> R {
     let mut addrs: Vec<(String, String)> = addrs.into_iter().map(|(a, w)| (a, w.to_string())).collect();
     addrs.extend(imported);
     let list: Vec<Value> = addrs.iter().map(|(a, why)| {
-        let bal = if x.has("addresses") { script_for(x, a).and_then(|sc| x.node.chain.balance_for_script(x.c(), &sc).ok()) } else { None };
+        let bal = if x.has("addresses") { address::script_for_address(x.p, a).and_then(|sc| x.node.chain.balance_for_script(x.c(), &sc).ok()) } else { None };
         json!({"address": a, "why": why, "balance": bal})
     }).collect();
     Ok(json!({"tag": t, "home_address": row.address, "claimed_at": row.block_height, "addresses": list,
@@ -736,7 +732,7 @@ fn search(x: &Ctx, q: &str) -> R {
     if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
         return hit("block", digits);
     }
-    if script_for(x, q).is_some() {
+    if address::script_for_address(x.p, q).is_some() {
         return hit("address", q.to_string());
     }
     if q.contains('.') {

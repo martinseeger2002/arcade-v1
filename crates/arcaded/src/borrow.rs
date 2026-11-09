@@ -20,6 +20,7 @@ use crate::node::Node;
 use arcade_chain::params::{by_key, by_net, check_block_work, check_header, ChainParams, PowCheck, ALL_CHAINS};
 use arcade_chain::pow::{meets_target, pow_hash, PowAlgo};
 use arcade_chain::{Block, Hash256, Header, OutPoint, Tx};
+use arcade_ledger::address::script_for_address;
 use arcade_mesh::link::{Frame, Link};
 use arcade_wallet::tx::Utxo;
 use serde_json::{json, Value};
@@ -97,10 +98,6 @@ pub struct Watched {
     pub key: KeySrc,
 }
 
-fn script_of(p: &ChainParams, a: &str) -> Option<Vec<u8>> {
-    arcade_ledger::address::script_for_address(p, a)
-}
-
 /// Every script this wallet watches on a chain: home-wallet tag keys, and keys imported via
 /// wallet.link. HOOK: further sources (e.g. importsvc::wallets_on, which also gives
 /// p2sh-p2wpkh and p2wpkh scripts) go here; everything else works by script.
@@ -118,7 +115,7 @@ pub fn watched(node: &Node, p: &ChainParams) -> Vec<Watched> {
         }
     }
     for k in keys {
-        if let Some(s) = script_of(p, &k.address) {
+        if let Some(s) = script_for_address(p, &k.address) {
             add(&mut out, Watched { address: k.address.clone(), script: s, key: KeySrc::Tag(k.index) });
         }
     }
@@ -132,7 +129,7 @@ pub fn watched(node: &Node, p: &ChainParams) -> Vec<Watched> {
             continue;
         }
         let Some(a) = l["address"].as_str() else { continue };
-        if let Some(s) = script_of(p, a) {
+        if let Some(s) = script_for_address(p, a) {
             add(&mut out, Watched { address: a.to_string(), script: s, key: KeySrc::Imported(format!("{}/{a}", p.net)) });
         }
     }
@@ -141,7 +138,7 @@ pub fn watched(node: &Node, p: &ChainParams) -> Vec<Watched> {
         for item in v.split(',') {
             if let Some((key, a)) = item.trim().split_once(':') {
                 if key == p.key {
-                    if let Some(s) = script_of(p, a) {
+                    if let Some(s) = script_for_address(p, a) {
                         add(&mut out, Watched { address: a.to_string(), script: s, key: KeySrc::None });
                     }
                 }
@@ -1178,7 +1175,7 @@ pub fn send(node: &Node, key: &str, to: &str, amount: u64, from: Option<&str>, b
     if !is_borrowed(p.key) {
         return Err(format!("{} is not borrowed here (installed chains send from the Wallet tab)", p.name));
     }
-    let to_script = script_of(p, to).ok_or_else(|| format!("{to} is not a {} address", p.name))?;
+    let to_script = script_for_address(p, to).ok_or_else(|| format!("{to} is not a {} address", p.name))?;
     // Only standard (P2PKH) addresses can be signed for here; SegWit imports can't spend yet.
     let p2pkh = |sc: &[u8]| sc.len() == 25 && sc[0] == 0x76 && sc[1] == 0xa9;
     let w: Vec<Watched> = watched(node, p).into_iter().filter(|x| p2pkh(&x.script)).collect();
@@ -1418,7 +1415,7 @@ fn x_tx(node: &Node, p: &'static ChainParams, id: &str) -> R {
 
 fn x_addr(node: &Node, p: &'static ChainParams, a: &str) -> R {
     let a = a.trim();
-    let script = script_of(p, a).ok_or_else(|| format!("{a} is not a {} address", p.name))?;
+    let script = script_for_address(p, a).ok_or_else(|| format!("{a} is not a {} address", p.name))?;
     let mut v = json!({"address": a, "tag": null, "unit": crate::explorer::unit(p)});
     if !watched(node, p).iter().any(|w| w.script == script) {
         v["note"] = json!(format!("{} is borrowed: balances are kept for this wallet's own addresses only. Install it in Chains & Coins for every address.", p.name));
