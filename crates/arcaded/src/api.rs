@@ -105,7 +105,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         }
         "wallet.send" => {
             let amount = req["amount"].as_u64().ok_or("amount required (satoshis)")?;
-            crate::coinsend::send(node, s("chain").as_deref(), &s("to").ok_or("to required")?, amount, req["send"] == true)
+            crate::coinsend::send(node, s("chain").as_deref(), &s("to").ok_or("to required")?, amount, s("from").as_deref(), req["send"] == true)
         }
         "wallet.link" => crate::links::link(node, &s("chain").ok_or("chain required")?, &s("wif").ok_or("wif required")?, &s("tag").ok_or("tag required")?),
         "wallet.unlink" => crate::links::unlink(node, &s("chain").ok_or("chain required")?, &s("address").ok_or("address required")?, &s("tag").ok_or("tag required")?),

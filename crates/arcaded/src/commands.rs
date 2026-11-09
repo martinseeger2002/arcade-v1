@@ -76,7 +76,7 @@ cmds! {
     "wallet.keys" Read "chain?" "Your addresses on a chain, their @tags and balances.";
     "dd.wallet" Read "chain?" "Your DigiDollar on DigiByte (chain dgb, the default, or dgbtest): address (DD.../TD...), cents, coins, borrowed, whole (false when only coins from the borrow floor on can be seen).";
     "dd.send" Local "chain?, to, cents, send?" "Send DigiDollars (cents, $1 to $100,000 per send) to a DD.../TD... address, with DGB from the same wallet for the fee (0.35 DGB/kB, at least 0.1, at most 0.5 DGB); send: true broadcasts, otherwise it's only built and shown.";
-    "wallet.send" Local "chain?, to, amount, send?" "Pay amount (satoshis) on a chain (home, installed or borrowed) from this wallet, signed here; send: true broadcasts, otherwise it's only built and shown with its fee (and a warning when the address could be meant for another chain).";
+    "wallet.send" Local "chain?, to, amount, from?, send?" "Pay amount (satoshis) on a chain (home, installed or borrowed) from this wallet (from: one of its addresses or an imported wallet's; otherwise the own address with the most), signed here; send: true broadcasts, otherwise it's only built and shown with its fee (and a warning when the address could be meant for another chain).";
     "wallet.link" Wallet "chain, wif, tag" "Link another wallet to your @tag (signed by both keys).";
     "wallet.unlink" Wallet "chain, address, tag" "Remove a linked wallet.";
     "wallet.links" Read "chain" "Your linked wallets on a chain.";

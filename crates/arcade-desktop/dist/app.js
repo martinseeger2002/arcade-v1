@@ -109,44 +109,7 @@ async function drawAccounts() {
   }));
 }
 
-async function drawImports() {
-  const ch = picked();
-  const all = await api("wallet.imports").catch(() => []);
-  const list = all.filter((w) => w.chain === ch.key);
-  $("w-imps").replaceChildren(...(list.length ? list : [null]).map((w) => {
-    const tr = document.createElement("tr");
-    if (!w) { const td = document.createElement("td"); td.colSpan = 5; td.className = "note"; td.textContent = `None on this chain${all.length ? ` (${all.length} on other chains)` : ""}.`; tr.append(td); return tr; }
-    for (const [text, cls] of [[w.name || "—"], [w.address], [`${w.kind === "phrase" ? "words" : "key"} · ${w.addr_kind}`], [w.balance == null ? "not installed" : coins(w.balance), "num"]]) {
-      const td = document.createElement("td"); td.textContent = text; if (cls) td.className = cls; tr.append(td);
-    }
-    const td = document.createElement("td"); const b = document.createElement("button"); b.textContent = "Remove";
-    b.addEventListener("click", async () => {
-      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Remove: sure?"; return; }
-      try { await api("wallet.import_remove", { chain: ch.key, address: w.address }); msg($("w-msg"), `Forgot ${w.address} and its key.`, "ok"); refreshWallet(); }
-      catch (e) { msg($("w-msg"), e.message, "bad"); }
-    });
-    td.append(b); tr.append(td); return tr;
-  }));
-}
-
-async function refreshWallet() {
-  const ch = picked();
-  $("w-title").textContent = `Wallet · ${ch.name}`;
-  await drawAccounts();
-  $("w-none").hidden = state.wallet; $("w-keys").hidden = !state.wallet;
-  if (!state.wallet) return;
-  drawImports();
-  state.keys = await api("wallet.keys", { chain: ch.key });
-  rows($("w-rows"), state.keys, (k) => [[String(k.index)], [k.address], [k.tag ? "@" + k.tag : "—"], [k.balance == null ? "not installed" : coins(k.balance), "num"]]);
-  // DigiByte receives at dgb1... (its D... addresses are the same strings as Dogecoin's).
-  const legacy = state.keys.filter((k) => k.legacy).map((k) => k.legacy);
-  $("w-legacy").hidden = !legacy.length;
-  $("w-legacy").textContent = legacy.length ? `Coins sent to ${legacy.join(", ")} (the older D... form of the same key) are counted too. Give people the dgb1... address: D... addresses look the same on Dogecoin.` : "";
-  $("w-send-h").textContent = `Send ${TICKERS[ch.key] || ch.name}`;
-  drawDigiDollar(ch);
-  $("w-amt-unit").textContent = TICKERS[ch.key] || "";
-  // Test coins from the mesh are Pepecoin testnet coins.
-  $("w-faucet").hidden = !ch.home;
+async function drawLinks(ch) {
   if (!$("w-ltag").value) {
     const home = await api("wallet.keys", { chain: HOME.key }).catch(() => []);
     const t = home.find((k) => k.tag);
@@ -166,6 +129,166 @@ async function refreshWallet() {
     });
     td.append(b); tr.append(td); return tr;
   }));
+}
+
+// The Wallet tab, as Dogecoin Arcade's: one card for the wallet picked (this arcade's own
+// addresses, then imported wallets, then "+ Import a wallet"), Send and Receive, and the
+// wallet's Activity, Tokens and NFTs underneath.
+const usd = (c) => "$" + (c / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const isDD = (k) => k === "dgb" || k === "dgbtest";
+const W = { chain: null, sel: null, list: [], pickSig: "", tab: "activity", view: null, viewKey: "", viewAt: 0, dd: null, ddAt: 0 };
+const cur = () => W.list.find((w) => w.id === W.sel) || W.list[0];
+const shortAddr = (a) => (a && a.length > 20 ? a.slice(0, 10) + "…" + a.slice(-6) : a || "");
+// Base units ("1234500", 3 decimals) as "1,234.5".
+function units(s, dec) {
+  s = String(s || "0").replace(/^0+(?=\d)/, "");
+  if (!dec) return BigInt(s).toLocaleString();
+  const p = s.padStart(dec + 1, "0");
+  const whole = BigInt(p.slice(0, -dec)).toLocaleString(), frac = p.slice(-dec).replace(/0+$/, "");
+  return frac ? `${whole}.${frac}` : whole;
+}
+function openExplorer(page, id) {
+  const b = document.querySelector('nav button[data-tab="explorer"]');
+  if (!b || !window.arcadeExplorer) return;
+  b.click(); window.arcadeExplorer.go(page, id);
+}
+
+async function refreshWallet() {
+  const ch = picked();
+  $("w-none").hidden = state.wallet; $("w-main").hidden = !state.wallet;
+  if ($("w-more").open) { drawAccounts(); drawLinks(ch); }
+  if (!state.wallet) return;
+  if (W.chain !== ch.key) {
+    Object.assign(W, { chain: ch.key, sel: null, view: null, viewKey: "", dd: null, ddAt: 0 });
+    for (const p of ["w-send-panel", "w-recv-panel", "w-imp-panel"]) $(p).hidden = true;
+    $("w-confirm").hidden = true; msg($("w-send-msg"), "");
+  }
+  const [keys, imps] = await Promise.all([api("wallet.keys", { chain: ch.key }), api("wallet.imports").catch(() => [])]);
+  state.keys = keys;
+  W.list = [
+    ...keys.map((k) => ({ id: "own:" + k.index, own: true, index: k.index, address: k.address, legacy: k.legacy, tag: k.tag, balance: k.balance,
+      label: k.tag ? "@" + k.tag : k.index ? `This arcade's wallet · address ${k.index}` : "This arcade's wallet" })),
+    ...imps.filter((w) => w.chain === ch.key).map((w) => ({ id: "imp:" + w.address, own: false, address: w.address, balance: w.balance, name: w.name,
+      kind: w.kind, addr_kind: w.addr_kind, spendable: w.addr_kind !== "p2sh-p2wpkh",
+      label: `${w.name || "Imported"} · ${shortAddr(w.address)}` })),
+  ];
+  if (!W.list.some((w) => w.id === W.sel)) W.sel = W.list[0] && W.list[0].id;
+  // The picker is rebuilt only when its wallets change, so an open list isn't closed under you.
+  const sig = JSON.stringify(W.list.map((w) => [w.id, w.label]));
+  if (sig !== W.pickSig) {
+    W.pickSig = sig;
+    const own = W.list.filter((w) => w.own), imp = W.list.filter((w) => !w.own);
+    $("w-pick").replaceChildren(
+      ...own.map((w) => h("option", { value: w.id }, w.label)),
+      imp.length ? h("optgroup", { label: "Imported" }, ...imp.map((w) => h("option", { value: w.id }, w.label))) : null,
+      h("option", { value: "+import" }, "+ Import a wallet…"));
+  }
+  $("w-pick").value = W.sel;
+  // DigiDollar: this arcade's DigiByte key (address 0) only.
+  if (isDD(ch.key) && Date.now() - W.ddAt > 20000) {
+    W.ddAt = Date.now();
+    W.dd = await api("dd.wallet", { chain: ch.key }).catch((e) => ({ error: e.message }));
+  }
+  drawCard(ch);
+  const w = cur();
+  const key = `${ch.key}|${w && w.address}`;
+  if (w && (key !== W.viewKey || Date.now() - W.viewAt > 30000)) {
+    if (key !== W.viewKey) { W.view = null; drawPane(ch); }
+    W.viewKey = key; W.viewAt = Date.now();
+    W.view = await api("explorer.address", { chain: ch.key, address: w.address }).catch((e) => ({ error: e.message }));
+    if (W.viewKey === key) drawPane(ch);
+  }
+}
+
+function drawCard(ch) {
+  const w = cur(); if (!w) return;
+  const tk = TICKERS[ch.key] || ch.name;
+  $("w-logo").replaceChildren(coinLogo(ch.key, ch.name, "span", "wl-logo"));
+  $("w-who").textContent = w.own ? (w.tag ? "@" + w.tag : "This arcade's wallet") : `${w.name || "Imported wallet"} · imported ${w.kind === "phrase" ? "from words" : "key"}`;
+  $("w-bal").textContent = w.balance == null ? "—" : coinNum(w.balance);
+  $("w-unit").textContent = tk;
+  const ddOn = w.own && w.index === 0 && isDD(ch.key) && W.dd && !W.dd.error;
+  const sub = [];
+  if (w.balance == null) sub.push(`${ch.name} isn't installed or borrowed with addresses here: add it in Chains & Coins to see balances.`);
+  if (ddOn) sub.push(`${usd(W.dd.cents)} DigiDollar`);
+  if (!w.own && !w.spendable) sub.push("Wrapped SegWit: receive only for now.");
+  $("w-sub").textContent = sub.join(" · ");
+  $("w-addr").textContent = w.address;
+  $("w-forget").hidden = w.own;
+  $("w-faucet").hidden = !(ch.home && w.own);
+  $("w-btn-send").disabled = !w.own && !w.spendable;
+  // The Send panel's assets: the chain's coin, and DigiDollar on DigiByte.
+  const assets = [[ch.key, tk]].concat(ddOn ? [["dd", "DigiDollar ($)"]] : []);
+  const was = $("w-asset").value;
+  if ($("w-asset").options.length !== assets.length || $("w-asset").options[0].value !== ch.key) {
+    $("w-asset").replaceChildren(...assets.map(([v, t]) => h("option", { value: v }, t)));
+    if (assets.some((a) => a[0] === was)) $("w-asset").value = was;
+  }
+  $("w-asset").hidden = assets.length < 2;
+  assetChanged();
+  // Receive: the address, and on DigiByte the DigiDollar one and the older D... form.
+  const rows = [[`${tk} address`, w.address]];
+  if (ddOn) rows.push(["DigiDollar address", W.dd.address]);
+  $("w-recv-list").replaceChildren(...[...rows.map(([l, a]) => h("div", { class: "wl-recv" }, h("span", { class: "lbl" }, l),
+      h("div", {}, h("code", {}, a), " ", h("button", { class: "small", onclick: (e) => copyText(a, e.target) }, "Copy")))),
+    w.legacy ? h("p", { class: "note" }, `Coins sent to ${w.legacy} (the older D... form of the same key) are counted too. Give people the dgb1... address: D... addresses look the same on Dogecoin.`) : null,
+    ddOn && !W.dd.whole ? h("p", { class: "note" }, "DigiByte is borrowed here, so DigiDollar coins received before this arcade began following it aren't seen. Installing DigiByte finds them all.") : null].filter(Boolean));
+}
+
+function assetChanged() {
+  const dd = $("w-asset").value === "dd";
+  $("w-amt-unit").textContent = dd ? "USD" : TICKERS[picked().key] || "";
+  $("w-to").placeholder = dd ? (picked().key === "dgbtest" ? "TD... address" : "DD... address") : `${picked().name} address`;
+}
+
+function drawPane(ch) {
+  document.querySelectorAll(".wl-tabs button").forEach((b) => b.classList.toggle("on", b.dataset.wt === W.tab));
+  const v = W.view, w = cur();
+  const pane = $("w-pane");
+  $("w-note").textContent = (v && v.note) || ""; $("w-note").hidden = !(v && v.note);
+  if (!v) { pane.replaceChildren(h("div", { class: "x-empty" }, "Loading…")); return; }
+  if (v.error) { pane.replaceChildren(h("div", { class: "x-empty bad" }, v.error)); return; }
+  if (W.tab === "activity") {
+    // One row per transaction: what it did to this address in all.
+    const by = new Map();
+    for (const r of v.history || []) {
+      const t = by.get(r.txid) || { txid: r.txid, height: r.height, net: 0 };
+      t.net += (r.received || 0) - (r.sent || 0); by.set(r.txid, t);
+    }
+    const txs = [...by.values()];
+    pane.replaceChildren(txs.length ? h("div", { class: "wl-rows" }, txs.map((t) => h("div", { class: "wl-row click", onclick: () => openExplorer("tx", t.txid) },
+      h("span", { class: "ic " + (t.net >= 0 ? "in" : "out") }, t.net >= 0 ? "↓" : "↑"),
+      h("div", { class: "mid" }, h("div", {}, t.net >= 0 ? "Received" : "Sent"), h("div", { class: "s" }, `block ${num(t.height)} · ${t.txid}`)),
+      h("span", { class: "amt " + (t.net >= 0 ? "in" : "") }, (t.net >= 0 ? "+" : "−") + coins(Math.abs(t.net), ch.key)))))
+      : h("div", { class: "x-empty" }, v.history ? "No activity yet." : "Activity needs the Addresses index for this chain (Chains & Coins)."));
+  } else if (W.tab === "tokens") {
+    const list = [];
+    if (w && w.own && w.index === 0 && isDD(ch.key) && W.dd && !W.dd.error)
+      list.push(h("div", { class: "wl-row" }, h("span", { class: "ic in" }, "$"), h("div", { class: "mid" }, h("div", {}, "DigiDollar"), h("div", { class: "s" }, `${W.dd.coins.length} coin${W.dd.coins.length === 1 ? "" : "s"} · ${W.dd.address}`)), h("span", { class: "amt" }, usd(W.dd.cents))));
+    for (const t of v.tokens || [])
+      list.push(h("div", { class: "wl-row click", onclick: () => openExplorer("token", t.tick) }, h("span", { class: "ic" }, (t.tick || "?")[0].toUpperCase()),
+        h("div", { class: "mid" }, h("div", {}, t.tick), h("div", { class: "s" }, t.transferable !== "0" ? `${units(t.transferable, t.dec)} transferable` : "")),
+        h("span", { class: "amt" }, units(t.overall, t.dec))));
+    pane.replaceChildren(list.length ? h("div", { class: "wl-rows" }, list)
+      : h("div", { class: "x-empty" }, v.tokens ? "No tokens in this wallet." : `No tokens shown: ${ch.name} needs its tokens index here (Chains & Coins).`));
+  } else {
+    const ins = v.inscriptions;
+    if (!ins) { pane.replaceChildren(h("div", { class: "x-empty" }, `No NFTs shown: ${ch.name} needs its ord index here (Chains & Coins).`)); return; }
+    if (!ins.length) { pane.replaceChildren(h("div", { class: "x-empty" }, "No NFTs in this wallet.")); return; }
+    pane.replaceChildren(
+      v.inscription_count > ins.length ? h("p", { class: "note" }, `Showing ${ins.length} of ${num(v.inscription_count)}.`) : "",
+      h("div", { class: "x-grid" }, ins.map((i) => {
+        const c = i.content || {}, t = h("div", { class: "x-thumb" });
+        if (c.kind === "image") t.append(h("img", { src: c.data, alt: `inscription ${i.n}`, loading: "lazy" }));
+        else if (c.kind === "text") t.append(h("pre", {}, c.text.slice(0, 400)));
+        else t.append(h("div", { class: "x-ph" }, c.kind === "html" ? "HTML" : c.kind === "missing" ? "content not stored" : (c.type || "binary")));
+        return h("div", { class: "x-ins", onclick: () => openExplorer("inscription", i.id) }, t, h("div", { class: "cap" }, h("b", {}, `#${num(i.n)}`)));
+      })));
+  }
+}
+
+function copyText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => { const o = btn.textContent; btn.textContent = "Copied"; setTimeout(() => { btn.textContent = o; }, 1200); }).catch(() => {});
 }
 
 async function refreshHandle() {
@@ -237,12 +360,13 @@ $("w-restore").addEventListener("click", async () => {
   try { await api("wallet.create", { phrase: $("w-words").value }); $("w-words").value = ""; msg($("w-msg"), "Wallet restored.", "ok"); refresh(); }
   catch (e) { msg($("w-msg"), e.message, "bad"); }
 });
+$("w-more").addEventListener("toggle", () => { if ($("w-more").open) { drawAccounts(); drawLinks(picked()); } });
 $("w-link").addEventListener("click", async () => {
   try {
     const r = await api("wallet.link", { chain: picked().key, wif: $("w-wif").value, tag: $("w-ltag").value });
     $("w-wif").value = "";
     msg($("w-msg"), `Linked ${r.a} to @${r.tag}, signed by both keys and sent to the mesh.`, "ok");
-    refreshWallet();
+    drawLinks(picked());
   } catch (e) { msg($("w-msg"), e.message, "bad"); }
 });
 $("w-signin").addEventListener("click", async () => {
@@ -261,21 +385,45 @@ $("w-signin").addEventListener("click", async () => {
   } catch (e) { msg($("w-msg"), e.message, "bad"); }
   finally { b.disabled = false; }
 });
+
+// The wallet picker; its last entry opens the import panel.
+const showPanel = (id) => { for (const p of ["w-send-panel", "w-recv-panel", "w-imp-panel"]) $(p).hidden = p === id ? !$(p).hidden : true; };
+$("w-pick").addEventListener("change", () => {
+  const v = $("w-pick").value;
+  if (v === "+import") { $("w-pick").value = W.sel; $("w-imp-panel").hidden = false; $("w-send-panel").hidden = $("w-recv-panel").hidden = true; $("w-isecret").focus(); return; }
+  W.sel = v; $("w-confirm").hidden = true; pendingSend = null; msg($("w-send-msg"), "");
+  drawCard(picked()); refreshWallet();
+});
+$("w-imp-cancel").addEventListener("click", () => { $("w-imp-panel").hidden = true; $("w-isecret").value = ""; });
 $("w-import").addEventListener("click", async () => {
   try {
     const r = await api("wallet.import", { chain: picked().key, secret: $("w-isecret").value, addr_kind: $("w-ikind").value, name: $("w-iname").value });
-    $("w-isecret").value = ""; $("w-iname").value = "";
+    $("w-isecret").value = ""; $("w-iname").value = ""; $("w-imp-panel").hidden = true;
+    W.sel = "imp:" + r.wallet.address;
     msg($("w-msg"), r.imported ? `Imported ${r.wallet.address}.` : `${r.wallet.address} was already here.`, "ok");
     refreshWallet();
   } catch (e) { msg($("w-msg"), e.message, "bad"); }
 });
+$("w-forget").addEventListener("click", async () => {
+  const b = $("w-forget"), w = cur();
+  if (!w || w.own) return;
+  if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Remove: sure? Its key is deleted here"; setTimeout(() => { b.dataset.sure = ""; b.textContent = "Remove this wallet"; }, 5000); return; }
+  b.dataset.sure = ""; b.textContent = "Remove this wallet";
+  try { await api("wallet.import_remove", { chain: picked().key, address: w.address }); W.sel = null; msg($("w-msg"), `Forgot ${w.address} and its key.`, "ok"); refreshWallet(); }
+  catch (e) { msg($("w-msg"), e.message, "bad"); }
+});
+$("w-copy").addEventListener("click", (e) => copyText($("w-addr").textContent, e.target));
+$("w-btn-send").addEventListener("click", () => { showPanel("w-send-panel"); if (!$("w-send-panel").hidden) $("w-to").focus(); });
+$("w-btn-recv").addEventListener("click", () => showPanel("w-recv-panel"));
+$("w-asset").addEventListener("change", () => { assetChanged(); $("w-confirm").hidden = true; pendingSend = null; });
+document.querySelectorAll(".wl-tabs button").forEach((b) => b.addEventListener("click", () => { W.tab = b.dataset.wt; drawPane(picked()); }));
 $("w-faucet").addEventListener("click", async () => {
   try { await api("faucet.ask"); msg($("w-msg"), "Asked the mesh for test coins; any arcade with spare coins can send them.", "ok"); }
   catch (e) { msg($("w-msg"), e.message, "bad"); }
 });
 
-// Send this chain's coin: review first (fee, and a warning when the address could be meant for
-// another chain), then send.
+// Send: review first (fee, and a warning when the address could be meant for another chain),
+// then send. The coin goes from the wallet picked; DigiDollar from this arcade's DigiByte key.
 let pendingSend = null;
 const toSats = (t) => {
   const m = String(t).trim().match(/^(\d+)(?:\.(\d{1,8}))?$/);
@@ -283,16 +431,30 @@ const toSats = (t) => {
   return Number(m[1]) * 1e8 + Number((m[2] || "").padEnd(8, "0"));
 };
 $("w-review").addEventListener("click", async () => {
-  const ch = picked();
+  const ch = picked(), w = cur(), sm = $("w-send-msg");
+  const to = $("w-to").value.trim();
+  if ($("w-asset").value === "dd") {
+    const m = $("w-amt").value.trim().match(/^(\d+)(?:\.(\d{1,2}))?$/);
+    if (!m) { msg(sm, "Enter dollars, for example 12.50", "bad"); return; }
+    const cents = Number(m[1]) * 100 + Number((m[2] || "").padEnd(2, "0"));
+    try {
+      const r = await api("dd.send", { chain: ch.key, to, cents, send: false });
+      pendingSend = { cmd: "dd.send", args: { chain: ch.key, to, cents } };
+      $("w-confirm-text").replaceChildren(
+        h("div", {}, `Send ${usd(r.cents)} DigiDollar to ${r.to}`),
+        h("div", { class: "s" }, `network fee ${coins(r.fee, ch.key)}${r.change_cents ? ` · ${usd(r.change_cents)} back to you` : ""}`));
+      $("w-confirm").hidden = false; msg(sm, "");
+    } catch (e) { msg(sm, e.message, "bad"); }
+    return;
+  }
   const sats = toSats($("w-amt").value);
-  const sm = $("w-send-msg");
   if (!sats) { msg(sm, "Enter an amount, for example 12.5", "bad"); return; }
   // A DigiByte D... address is also a Dogecoin address: say so before anything else.
-  const to = $("w-to").value.trim();
   const dogeLike = ch.key === "dgb" && /^D[1-9A-HJ-NP-Za-km-z]{25,34}$/.test(to);
   try {
-    const r = await api("wallet.send", { chain: ch.key, to: $("w-to").value.trim(), amount: sats, send: false });
-    pendingSend = { chain: ch.key, to: $("w-to").value.trim(), amount: sats };
+    const args = { chain: ch.key, to, amount: sats, from: w.address };
+    const r = await api("wallet.send", { ...args, send: false });
+    pendingSend = { cmd: "wallet.send", args };
     $("w-confirm-text").replaceChildren(
       h("div", {}, `Pay ${coins(r.amount, ch.key)} to ${r.to}`),
       h("div", { class: "s" }, `fee ${coins(r.fee, ch.key)} · ${r.vsize || r.size} bytes · from ${r.from}`),
@@ -311,53 +473,11 @@ $("w-sendnow").addEventListener("click", async () => {
   if (!pendingSend) return;
   const b = $("w-sendnow"); b.disabled = true;
   try {
-    const r = await api("wallet.send", { ...pendingSend, send: true });
+    const r = await api(pendingSend.cmd, { ...pendingSend.args, send: true });
     $("w-confirm").hidden = true; pendingSend = null; $("w-to").value = ""; $("w-amt").value = "";
     msg($("w-send-msg"), `Sent: ${r.txid}`, "ok");
-    refreshWallet();
+    W.viewAt = 0; W.ddAt = 0; refreshWallet();
   } catch (e) { msg($("w-send-msg"), e.message, "bad"); }
-  finally { b.disabled = false; }
-});
-
-// DigiDollar on DigiByte: the wallet key's Taproot address, its coins, and a send.
-const usd = (c) => "$" + (c / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-let pendingDd = null;
-async function drawDigiDollar(ch) {
-  const on = ch.key === "dgb" || ch.key === "dgbtest";
-  $("w-dd").hidden = !on;
-  if (!on) return;
-  try {
-    const d = await api("dd.wallet", { chain: ch.key });
-    $("w-dd-addr").textContent = d.address;
-    $("w-dd-bal").textContent = `${usd(d.cents)} in ${d.coins.length} coin${d.coins.length === 1 ? "" : "s"}`;
-    $("w-dd-to").placeholder = ch.key === "dgbtest" ? "TD... address" : "DD... address";
-    $("w-dd-note").textContent = d.whole ? "Network fees are paid in DGB from this wallet (0.35 DGB per kB, at least 0.1 DGB)."
-      : "DigiByte is borrowed here, so DigiDollar coins received before this arcade began following it aren't seen. Installing DigiByte finds them all. Fees are paid in DGB from this wallet.";
-  } catch (e) { $("w-dd-addr").textContent = "—"; $("w-dd-bal").textContent = e.message; }
-}
-$("w-dd-review").addEventListener("click", async () => {
-  const ch = picked();
-  const m = $("w-dd-amt").value.trim().match(/^(\d+)(?:\.(\d{1,2}))?$/);
-  if (!m) { msg($("w-dd-msg"), "Enter dollars, for example 12.50", "bad"); return; }
-  const cents = Number(m[1]) * 100 + Number((m[2] || "").padEnd(2, "0"));
-  try {
-    const r = await api("dd.send", { chain: ch.key, to: $("w-dd-to").value.trim(), cents, send: false });
-    pendingDd = { chain: ch.key, to: $("w-dd-to").value.trim(), cents };
-    $("w-dd-confirm-text").replaceChildren(
-      h("div", {}, `Send ${usd(r.cents)} DigiDollar to ${r.to}`),
-      h("div", { class: "s" }, `network fee ${coins(r.fee, ch.key)}${r.change_cents ? ` · ${usd(r.change_cents)} back to you` : ""}`));
-    $("w-dd-confirm").hidden = false; msg($("w-dd-msg"), "");
-  } catch (e) { msg($("w-dd-msg"), e.message, "bad"); }
-});
-$("w-dd-cancel").addEventListener("click", () => { pendingDd = null; $("w-dd-confirm").hidden = true; });
-$("w-dd-sendnow").addEventListener("click", async () => {
-  if (!pendingDd) return;
-  const b = $("w-dd-sendnow"); b.disabled = true;
-  try {
-    const r = await api("dd.send", { ...pendingDd, send: true });
-    $("w-dd-confirm").hidden = true; pendingDd = null; $("w-dd-to").value = ""; $("w-dd-amt").value = "";
-    msg($("w-dd-msg"), `Sent: ${r.txid}`, "ok"); refreshWallet();
-  } catch (e) { msg($("w-dd-msg"), e.message, "bad"); }
   finally { b.disabled = false; }
 });
 
