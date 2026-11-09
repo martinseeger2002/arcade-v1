@@ -262,7 +262,8 @@ pub fn serve(node: &Node, link: &mut Link, addr: &str) -> Result<(), LinkError> 
     // UDP beside this link (docs/compat/UDP.md); nothing changes while it is off.
     crate::udpsvc::link_up(node, link);
     let mut last_me = std::time::Instant::now();
-    let r = serve_loop(node, link, addr, &peer, &mut cr_reqs, &mut last_ping, &mut sent_outbox, &mut last_sz, &mut last_hold, &mut last_me);
+    let mut last_offer = crate::coreshare::offer(node).map(|o| o.head["nets"].clone()).unwrap_or(Value::Null);
+    let r = serve_loop(node, link, addr, &peer, &mut cr_reqs, &mut last_ping, &mut sent_outbox, &mut last_sz, &mut last_hold, &mut last_me, &mut last_offer);
     crate::udpsvc::link_down(&peer);
     crate::realtime::link_down(&peer);
     r
@@ -280,6 +281,7 @@ fn serve_loop(
     last_sz: &mut std::time::Instant,
     last_hold: &mut std::time::Instant,
     last_me: &mut std::time::Instant,
+    last_offer: &mut Value,
 ) -> Result<(), LinkError> {
     let cr_reqs = &mut *cr_reqs;
     loop {
@@ -301,6 +303,13 @@ fn serve_loop(
         crate::udpsvc::tick(node, link)?;
         if last_me.elapsed() > Duration::from_secs(60) {
             link.send(&Frame::new(operator_me(node)))?;
+            // The chains we lend, again when they change (a chain finishing its sync, say).
+            if let Some(o) = crate::coreshare::offer(node) {
+                if *last_offer != o.head["nets"] {
+                    *last_offer = o.head["nets"].clone();
+                    link.send(&o)?;
+                }
+            }
             *last_me = std::time::Instant::now();
         }
         if last_hold.elapsed() > Duration::from_secs(crate::shares::every().clamp(20, 120)) {

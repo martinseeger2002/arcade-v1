@@ -13,6 +13,7 @@ use flate2::write::ZlibEncoder;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use arcade_chain::params::ChainParams;
 
 pub const CHUNK: usize = 48 * 1024;
 pub const MAX_CALLS: usize = 500;
@@ -20,12 +21,34 @@ pub const MAX_ASKED: usize = 8 << 20;
 /// The most an answer to our own batch may hold, compressed or inflated.
 pub const MAX_ANSWER: usize = 256 << 20;
 
+/// Chains this arcade lends: the home chain, and every installed chain kept in full (blocks
+/// and coins) that has caught up. A chain still syncing, or sharing its storage, isn't offered.
+pub fn lent(node: &Node) -> Vec<&'static ChainParams> {
+    let mut v: Vec<&'static ChainParams> = vec![node.params];
+    // Copy the runs out first: far_behind takes the same lock (holding it here deadlocked
+    // every mesh link).
+    let runs: Vec<_> = node.extra.lock().unwrap().values().cloned().collect();
+    for r in runs {
+        if r.mode == "full" && !node.far_behind(r.params) && r.peer_tip.load(std::sync::atomic::Ordering::Relaxed) <= node.chain.tip(r.params.chain_no).ok().flatten().map(|t| t.height + 10).unwrap_or(0) {
+            v.push(r.params);
+        }
+    }
+    v
+}
+
 pub fn offer(node: &Node) -> Option<Frame> {
-    let tip = node.chain.tip(node.params.chain_no).ok()??;
-    Some(Frame::new(json!({
-        "t": "cr", "op": "offer",
-        "nets": { node.params.net: {"h": tip.height, "b": tip.hash.to_hex(), "l": 1} }
-    })))
+    let mut nets = serde_json::Map::new();
+    for p in lent(node) {
+        if let Ok(Some(tip)) = node.chain.tip(p.chain_no) {
+            nets.insert(p.net.into(), json!({"h": tip.height, "b": tip.hash.to_hex(), "l": 1}));
+        }
+    }
+    (!nets.is_empty()).then(|| Frame::new(json!({"t": "cr", "op": "offer", "nets": nets})))
+}
+
+fn lent_net(node: &Node, net: &Value) -> Option<&'static ChainParams> {
+    let net = net.as_str()?;
+    lent(node).into_iter().find(|p| p.net == net)
 }
 
 #[derive(Default)]
@@ -65,13 +88,13 @@ fn deflate(b: &[u8]) -> Vec<u8> {
 }
 
 /// Answer the calls in a batch.
-pub fn answer(node: &Node, calls: &[Value]) -> Vec<Value> {
+pub fn answer_on(node: &Node, p: &'static ChainParams, calls: &[Value]) -> Vec<Value> {
     calls
         .iter()
         .map(|c| {
             let method = c.get(0).and_then(Value::as_str).unwrap_or("");
             let params: Vec<Value> = c.get(1).and_then(Value::as_array).cloned().unwrap_or_default();
-            match crate::rpc::call(node, method, &params) {
+            match crate::rpc::call_on(node, p, method, &params) {
                 Ok(r) => json!({"r": r}),
                 Err((code, m)) => json!({"e": [code, m]}),
             }
@@ -82,7 +105,8 @@ pub fn answer(node: &Node, calls: &[Value]) -> Vec<Value> {
 pub fn handle(node: &Node, link: &mut Link, reqs: &mut Requests, f: &Frame) -> Result<(), LinkError> {
     let h = &f.head;
     match h["op"].as_str().unwrap_or("") {
-        "q" if h["net"] == node.params.net => {
+        "q" if lent_net(node, &h["net"]).is_some() => {
+            let p = lent_net(node, &h["net"]).unwrap();
             let id = h["id"].as_u64().unwrap_or(0);
             let buf = reqs.parts.entry(id).or_default();
             buf.extend_from_slice(&f.blob);
@@ -101,14 +125,17 @@ pub fn handle(node: &Node, link: &mut Link, reqs: &mut Requests, f: &Frame) -> R
                 if calls.len() > MAX_CALLS {
                     return Err(format!("at most {MAX_CALLS} calls"));
                 }
-                Ok(serde_json::to_vec(&answer(node, &calls)).unwrap())
+                Ok(serde_json::to_vec(&answer_on(node, p, &calls)).unwrap())
             });
             send(link, id, res, z)
         }
-        "tx" if h["net"] == node.params.net => {
-            if let Ok(tx) = arcade_chain::Tx::parse_with(&f.blob, &node.params.format) {
-                let _ = node.chain.mempool_add(node.params, &tx, arcade_app::now());
-                node.tx_outbox.lock().unwrap().push(f.blob.clone());
+        "tx" if lent_net(node, &h["net"]).is_some() => {
+            let p = lent_net(node, &h["net"]).unwrap();
+            if let Ok(tx) = arcade_chain::Tx::parse_with(&f.blob, &p.format) {
+                let _ = node.chain.mempool_add(p, &tx, arcade_app::now());
+                if p.chain_no == node.params.chain_no {
+                    node.tx_outbox.lock().unwrap().push(f.blob.clone());
+                }
             }
             Ok(())
         }

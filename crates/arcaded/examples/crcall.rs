@@ -21,6 +21,9 @@ fn main() {
     let mut buf = Vec::new();
     loop {
         let f = link.recv().expect("recv");
+        if std::env::var_os("CRCALL_DEBUG").is_some() {
+            eprintln!("<- {} {}", f.kind(), f.head.to_string().chars().take(120).collect::<String>());
+        }
         if f.kind() == "ping" {
             link.send(&Frame::pong(&f)).unwrap();
         }

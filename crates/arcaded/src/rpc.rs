@@ -40,8 +40,8 @@ fn coins(sats: u64) -> f64 {
     sats as f64 / 1e8
 }
 
-pub fn call(node: &Node, method: &str, params: &[Value]) -> RpcResult {
-    let p = node.params;
+/// The same Core-style calls for any chain this arcade stores (lending installed chains).
+pub fn call_on(node: &Node, p: &'static arcade_chain::params::ChainParams, method: &str, params: &[Value]) -> RpcResult {
     let c = p.chain_no;
     let db = &node.chain;
     let e = |x: arcade_store::StoreError| err(-1, x.to_string());
@@ -129,7 +129,7 @@ pub fn call(node: &Node, method: &str, params: &[Value]) -> RpcResult {
             let mut v = json!({"hex": hex::encode(&raw), "txid": txid.to_hex(), "size": raw.len()});
             if let Some(bn) = b {
                 // Find the block hash for this block number via its header record.
-                if let Some((hash, height)) = block_of(node, bn) {
+                if let Some((hash, height)) = block_of(node, p, bn) {
                     v["blockhash"] = json!(hash.to_hex());
                     v["confirmations"] = json!(tip.height - height + 1);
                 }
@@ -181,7 +181,20 @@ pub fn call(node: &Node, method: &str, params: &[Value]) -> RpcResult {
             let raw = param(0).as_str().and_then(|s| hex::decode(s).ok()).ok_or_else(|| err(-22, "TX decode failed"))?;
             let tx = Tx::parse_with(&raw, &p.format).map_err(|_| err(-22, "TX decode failed"))?;
             db.mempool_add(p, &tx, arcade_app::now()).map_err(e)?;
-            node.tx_outbox.lock().unwrap().push(raw);
+            if p.chain_no == node.params.chain_no {
+                node.tx_outbox.lock().unwrap().push(raw);
+            } else {
+                // An installed chain we lend: straight to a few of its own P2P peers.
+                let peers: Vec<String> = node.coin_candidates(p).into_iter().take(4).collect();
+                std::thread::spawn(move || {
+                    for a in peers {
+                        if let Ok(mut peer) = arcade_chain::p2p::Peer::connect(p, &a, std::time::Duration::from_secs(10)) {
+                            let _ = peer.send_tx(&raw);
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
+                    }
+                });
+            }
             Ok(json!(tx.txid.to_hex()))
         }
         "getblockchaininfo" => {
@@ -211,12 +224,12 @@ pub fn call(node: &Node, method: &str, params: &[Value]) -> RpcResult {
 }
 
 /// (hash, height) of a stored block by its local block number.
-fn block_of(node: &Node, b: u32) -> Option<(Hash256, u32)> {
+fn block_of(node: &Node, p: &arcade_chain::params::ChainParams, b: u32) -> Option<(Hash256, u32)> {
     // Block meta holds the header; hash it, then read its record for the height.
-    let c = node.params.chain_no;
+    let c = p.chain_no;
     let raw = node.chain.store.read(|r| r.get(arcade_chaindb::schema::BLOCK_META, &arcade_chaindb::schema::k_block(c, b))).ok()??;
     let h: [u8; 80] = raw.get(..80)?.try_into().ok()?;
-    let hash = node.params.block_id(&arcade_chain::Header::parse(&h));
+    let hash = p.block_id(&arcade_chain::Header::parse(&h));
     let rec = node.chain.header(c, &hash).ok()??;
     Some((hash, rec.height))
 }
