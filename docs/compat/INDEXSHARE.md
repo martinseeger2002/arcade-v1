@@ -109,3 +109,131 @@ C. Related: "kc" known collections (mesh/collectionshare.py). "cr" carries NO in
     range_digest(1496134..1496134) = 49dad94ed23aad45e5a0c40e57269279cb04da0b597775b8f1570540de461833.
 3g. TRAP: bootstrap.py:327-363 has a SECOND, different "index_digest" for the HTTP bootstrap manifest (stale
     column names → sections silently skipped). Never use it for "ix".
+
+---
+# Part 2 of 3: "lx" ledger copies and "dx" ord index
+
+## 4. "lx": ledger copies (mesh/ledgershare.py + ledger_snapshot.py)
+  {"t":"lx","op":"hi","nets":{net:{"h":int,"sn":null|{"id":hex64,"h":int,"n":npieces,"have":"all"|[int..]}}}}
+  {"t":"lx","op":"sq","net":net}                                  (make a copy, I'm far behind)
+  {"t":"lx","op":"g","net":net,"id":int,"what":"manifest","snap":sid,"z":1}
+  {"t":"lx","op":"g","net":net,"id":int,"what":"piece","snap":sid,"i":int,"z":1}
+  {"t":"lx","op":"gb","id":int,"seq":int,"end":bool[,"err":"busy"|"gone"][,"z":1]} + blob slice
+- hi on link_up and every rebalance (:61-88); sq :163; g :166-180 (always z:1); gb :128/139/146.
+- Serving (:114-149): 120 pieces/min per asker (pieces actually served; over → err "busy"); 2 serving at once.
+  manifest bytes = json.dumps(m, sort_keys=True, separators=(",",":")); piece = raw 1 MiB slice; z==1 → zlib 6;
+  60 KB parts, seq from 0, end on the last; an empty answer is one part b"".
+- Receiving (:182-215): parts in order; total ≤ 4 MiB; inflate bounded to 4 MiB, must reach eof; requests
+  forgotten after 300 s; an err pauses that peer 10 s.
+- Offering: settings serve_index_copies / fetch_index_copies, default ON. want_made (:304-317): asked within
+  15 min AND serving AND index not stopped AND core_tip - indexed ≤ 20 AND no fetch running; else not while
+  served in the last 15 min, and only if the last copy is > 6 h old.
+- make (:265-302): VACUUM INTO tmp; DELETE FROM utxo, activity, watched, covered; VACUUM; 1 MiB pieces.
+- manifest = {"net","floor","activation","layout":1,"height","hash","cp","d","s","n","size","piece":1048576,
+  "pieces":[sha256hex..],"at":unix}; height/hash = copy's newest block row; cp = checkpoint(height, floor).
+  id = sha256(json.dumps(manifest, sort_keys=True, separators=(",",":"))).hexdigest() (Python json:
+  ensure_ascii, null, ints without ".0"); the receiver RE-SERIALIZES and compares (:525): byte-exact.
+- offer {"id","h","n","have":"all"} or a sorted list of held pieces while fetching; deleted after 2 h unfetched.
+- Fetching (:403-496): only when (best h heard within 600 s, capped at own core tip) - own ≥ 50000; nobody
+  offering a whole copy → "sq" to the top 3 holders, at most every 10 min; highest fresh whole offer with h ≤
+  core tip wins; manifest re-asked every 60 s; checks id, net, layout 1, same floor and activation, piece 1 MiB,
+  size ≤ len*PIECE, free disk ≥ 3*size; 6 pieces in flight at random, re-ask after 60 s; a wrong sha drops the
+  offer; 600 s stall switches holder; progress saved every 15 s (<index>.part.json); dropped if own index
+  passes its height first.
+- VERIFY before install (:623-655): 1 every piece sha; 2 describe(copy): height, hash, cp, d, s, n all equal
+  the manifest; 3 own (or borrowed) Core getblockhash(height) == hash; 4 cp and d non-null; 5 votes =
+  indexcheck.votes(net, floor, cp), agreed = votes equal to d: REFUSE if agreed < 2 or agreed*2 ≤ voters (the
+  maker votes like anyone). A refused id is never fetched again. Install: file swap, epoch++, record in
+  <index>.copy.json.
+- Confirmation (:676-792), while idle (within 20 of tip, no fetch, no TURN relaying): a shadow index built from
+  own Core, 500 blocks per pass every 15 s; at shadow h ≥ cp+6 compare range_digest(floor..cp) to d; at equal
+  height compare s and n. All equal → "confirmed" (shadow deleted); any difference → "differs": the self-built
+  shadow REPLACES the copy; the maker is named in Admin.
+- Live on Strawberry: serve:true, fetch:true; no copy made or fetched on any chain.
+
+## 5. "dx": ord index (mesh/doginalshare.py, doginal_index.py, ord_notes.py, ord_snapshot.py)
+Every frame carries "net"; frames without it (v1) are ignored.
+### 5a. Frames
+- hi {net, base, mode, walk, helped, v:3, rules[, sn3][, sites][, sites_mb][, sites_pages]}: walk =
+  walker.next_height() if mode=="walk" else None; offer under "sn3" (LAYOUT 3); on link_up and every rebalance
+  unless mode "off". base = STARTS[net]: doge 4600000, main 186920, test 34237, bel 22470, lky 88554, wjk 1,
+  dgb 0, flop 18295. rules = rules_for(net): default 4, doge 5, bel 7, ltc/ltctest 6. A hi with base != own base
+  is ignored; every ls/ld/dn from a peer is IGNORED unless that peer's hi.rules == own rules.
+- ls {net, c, at, until}: I hold chunk c's lease, read to `at`, until now+600 (clamped). On link_up for every
+  own lane, on taking a lane, every 10 blocks. Tie: if I hold the same c and (my at < theirs, or equal and their
+  node_id < mine), I drop it.
+- ld {net, c}: lease let go.
+- dn {net, rows:[[c, hash, births(, nd)]..]}: chunk words. Sender: all own words on link_up, 500 rows/frame,
+  new ones by rowid > said_upto. Receiver: ≤ 1000 rows; hash 64 hex; nd absent or 64 hex; then drops that
+  node's lease on c.
+- q {net, id, question:{what,...}} → a {id, <key>:..., walked_to} | {id, err≤200}: 120 answers/min per peer
+  ("too many questions this minute"); asker waits 15 s; only mode "walk" answers (else "this arcade does not
+  walk this chain"). what{args}: where{id}, token{tick}, number{number|id}, ticks{prefix}, holders{tick,page},
+  kinds{ctype,proto}, typed{ctype,after}, balances{owner}, name{name}, on{txid,vout}, numbers{ids≤500},
+  note{id}, ticklist{} (≤5000), mesh{name}, names_on{coins≤3000}, mesh_directory{all}, sites_search{q≤200,page,
+  per}, moves{chunks≤64} → {str(c): moves_digest|null}; else "no such question".
+- ng {net, c, id} → nb {id, seq, end, nd[, err:"gone"]} + slice: spend notes; blob = ord_notes.pack (zlib 6),
+  60 KB parts, 4 sends at once; receiver total ≤ 64 MiB, parts in order.
+- sq {net}: please make a snapshot; to the furthest walker with v ≥ 3 when ≥ 20000 blocks ahead, nothing
+  offered and may_fetch passes; at most every 10 min.
+- g {net, id, what:"manifest"|"piece", snap[, i], z:1} → gb {id, seq, end[, err:"gone"][, z:1]} + slice: same
+  scheme as lx; raw parts capped at 8 MiB, inflate at 16 MiB; no "busy" (4-at-once semaphore).
+### 5b. Roles
+- Modes walk/help/read/off; setting ord_index:<net>, default "read".
+  walk: whole index, walks every block to 2 under the tip, answers q. help: scans leased chunks of settled
+  blocks (SETTLE 12), says dn, keeps notes; no q. read: no index; looks up via q; still sends hi and reads
+  dn/ls. off: sends nothing.
+- walkers(heard_within=300): mode walk, same rules, hi within 300 s, by walk height descending (snapshots,
+  moves check, default ask). lookup(): walkers heard within 86400 s with walk > own, furthest first, falling
+  back to own; "no such question" from an older walker handled (holders → token).
+- Coverage SUB (coverage.py:213-262): holds "o:<net>" in walk mode; holds "t:<net>" if the ledger is within 20
+  of tip; needs "o:<net>" in read/help, "t:<net>" if > 20 behind; keeper links to up to 3 holders.
+### 5c. Chunks and the chunk hash
+- CHUNK = 100; chunk_of(h) = (h-base)//100; range [base+100c, base+100c+100); ready_chunks(tip) =
+  max(0, (tip-12+1-base)//100).
+- Block line: h = sha256(block_hash.encode() + b"\n"); for txid, n, vin, ctype in found:
+  h.update(f"{txid}i{n}:{vin}:{ctype}\n"); hexdigest. block_hash/txid display hex; ctype = content-type bytes
+  as lowercase hex. found = births in block tx order, then per tx in births_of order: input 0's envelope n=0;
+  on every_input chains later complete envelopes too; on Taproot chains (ltc, ltctest, bel) witness envelopes in
+  input order. The delegate is NOT hashed.
+- Chunk hash = sha256("".join(100 block lines in height order)); only when all 100 blocks present; births = sum
+  of n.
+- LIVE (ord-main, Pepecoin main, base 186920): block 186920 line
+  5a10e2014ae217bdba551ff93ab46eb97e93ebd8dda0527f088bd95394820dca (n=1, block
+  bf00f5fc1816728e12cf99f836859bb0fb02d869c246ef3fad225df044de220b); chunk 0 hash
+  7ee5e962d53692f89ad8ba6fbde371d1346d7e58e98ea0142ea38561fe078364, births 3, nd
+  938f2aee109b5cb8a4a0b15458b2c07d116ca0ce4b6b89378cbd88d0b8933a8b (equal across this node and 4+ peers).
+- Block moves: sha256 over lines "B <iid> #<number> <txid>:<vout>:<off>\n", "M <iid> <txid>:<vout>:<off>\n",
+  "X <iid>\n", "L <iid>\n", "U|L <iid> #<number>\n". moves_digest(c) = sha256("".join(100 block.moves hex)),
+  or None if any missing.
+### 5d. Agreement
+AGREE = 2 identical hashes; AUDIT_MAX = 5. Chunk choice: walk's needed chunks first, then lowest chunk nobody
+said or holds, then audits (fewest agreeing first, random among 16). A differing hash is only shown/warned;
+nothing auto-wiped.
+### 5e. Spend notes (ord_notes.py)
+- nd = sha256(b"ord-notes\n" + notes); pack = zlib 6; unpack limit 256 MiB.
+- Format: u8 version (2; 3 = witness on Taproot chains), varint nblocks; per block: 80-byte header, varint ntx;
+  per tx: txid 32 bytes = bytes.fromhex(display hex) NOT reversed, varint nin; per input: u8 flags (1 coinbase |
+  2 script | 4 witness); not coinbase: prev txid 32 + varint vout; script: varint len + bytes (input 0's big
+  pushes zeroed when they can't matter, :202-236); witness: varint count + (varint len + bytes)*; outputs:
+  varint nout; per output varint value + owner: [0]+20 (p2pkh) | [1]+20 (p2sh) | [2]+hash160(script) |
+  [3,ver,len]+program (v3 only). varint = LEB128.
+- Prefetch: 8 chunks past the walk, from offers[c % len] among peers that sent nd; re-ask after 120 s.
+- Accept: digest == nd; decode gives 100 blocks each proved by its merkle root; chunk hash rebuilt == the hash
+  that peer said. Otherwise (node, c) failed.
+### 5f. Ord snapshots (ord_snapshot.py)
+- Made only in walk mode on ≥ 8 cores, after an sq, SNAP_EVERY 6 h / SERVING 15 min / IDLE 2 h. VACUUM INTO,
+  delete notes, pnote, stitched and meta keys lanes, lease, said_upto.
+- manifest {"net","base","rules","layout":3,"height":walk_next,"size","piece":1048576,"pieces","at"}, id =
+  sha256(compact sort_keys JSON), offered under "sn3".
+- Fetch: may_fetch (≥ 8 cores or allowed per chain; disk ≥ 3*size) and h - own walk ≥ 20000, from walkers();
+  6 in flight (2 on small machines).
+- VERIFY: piece shas; every chunk where ≥ 2 arcades OTHER THAN THE MAKER agree must match the copy's chunk
+  hash; a sample of up to 64 chunks' moves_digest must equal the first other walker answering "q moves"; none
+  answering → accepted as "single" and flagged; mismatch refuses.
+### 5g. "l" lanes (coreshare.py:216-221, 591-611)
+- cr offer nets[net] = {"h","b","l"[,"p"]}, l = lanes_lent() = 4 if cpu_count ≥ 8 else 1: how many ord-index
+  lanes (parallel chunk scans / tx-fetch batches) ONE borrower may run against this sharer's Core; borrower
+  clamps 1..16, default 1. One lane per lent lane, round-robin over lenders; FETCH_BATCH 50 txs in proportion
+  to lanes; a lender missing 3 times rests 5 min. Lanes read raw blocks over cr (getblock/getrawtransaction),
+  proved by rawchain: chain data only.
