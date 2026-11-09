@@ -56,7 +56,8 @@ pub fn copy_state(db: &ChainDb, c: u16, indexer: &str) -> Option<Value> {
     serde_json::from_slice(&v).ok()
 }
 
-fn mark(db: &ChainDb, c: u16, indexer: &str, v: &Value) -> Result<()> {
+/// Set the copy mark of an index on a chain (a later step adds what it checked).
+pub fn set_copy_state(db: &ChainDb, c: u16, indexer: &str, v: &Value) -> Result<()> {
     db.store.write(|w| w.put(schema::STATE, &schema::k_state(c, &format!("copy:{indexer}")), v.to_string().as_bytes())).map_err(e)
 }
 
@@ -335,7 +336,7 @@ pub fn import_ord(db: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, say: 
 
     let name = "ord.v1";
     let ix = ord::OrdIndexer::new(ord::RIDERS);
-    mark(db, c, name, &json!({"state": "copying", "from": path.display().to_string(), "h": top}))?;
+    set_copy_state(db, c, name, &json!({"state": "copying", "from": path.display().to_string(), "h": top}))?;
     say("clearing the ord index");
     clear(db, c, name, &arcade_chaindb::Indexer::tables(&ix))?;
     let mut sink = Sink::new(db, sort_dir(path), opts.spill_bytes);
@@ -581,7 +582,7 @@ pub fn import_ord(db: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, say: 
         "ticks": ticks, "balances": bals, "transfers": xfers, "name_claims": claims, "name_wins": wins,
         "blocks_not_stored": unstored, "todo": todo, "warnings": warnings, "rows": sink.rows,
     });
-    mark(db, c, name, &report)?;
+    set_copy_state(db, c, name, &report)?;
     Ok(report)
 }
 
@@ -676,7 +677,7 @@ pub fn import_ledger(db: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, sa
     }
 
     let name = "ledger.v1";
-    mark(db, c, name, &json!({"state": "copying", "from": path.display().to_string(), "h": top}))?;
+    set_copy_state(db, c, name, &json!({"state": "copying", "from": path.display().to_string(), "h": top}))?;
     say("clearing the ledger index");
     clear(db, c, name, &arcade_chaindb::Indexer::tables(&engine::LedgerIndexer))?;
     let mut sink = Sink::new(db, sort_dir(path), opts.spill_bytes);
@@ -812,6 +813,6 @@ pub fn import_ledger(db: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, sa
         "n": index::names_digest(db, c).map_err(e)?,
         "tables": counts, "blocks_with_records": blocks_with_rows, "blocks_not_stored": unstored, "rows": sink.rows,
     });
-    mark(db, c, name, &report)?;
+    set_copy_state(db, c, name, &report)?;
     Ok(report)
 }

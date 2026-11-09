@@ -465,6 +465,17 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             let started = crate::cbimport::start_verify(node.self_arc(), p.key.to_string());
             Ok(serde_json::json!({"started": started, "note": crate::cbimport::verify_note(p.key)}))
         }
+        // Index copies from old arcades (crate::lxfetch)
+        #[cfg(feature = "oldimport")]
+        "chains.index_copy_status" => Ok(crate::lxfetch::status(node, s("key").as_deref())),
+        #[cfg(feature = "oldimport")]
+        "chains.index_copy_start" | "chains.index_copy_cancel" => {
+            let key = s("key").ok_or("key required")?;
+            if s("index").as_deref() != Some("ledger") {
+                return Err("only the ledger index can be copied so far (index = ledger)".into());
+            }
+            if req["cmd"] == "chains.index_copy_start" { crate::lxfetch::start(node, &key, s("from")) } else { crate::lxfetch::cancel(node, &key) }
+        }
         // Borrowed coins (crate::borrow)
         "borrow.status" => Ok(crate::borrow::status_all(node)),
         "borrow.set" => {

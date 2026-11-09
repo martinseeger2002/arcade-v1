@@ -806,6 +806,11 @@ fn walk_indexes(node: &Node, run: &ChainRun, max_batches: usize) -> bool {
     names.sort_unstable();
     names.dedup();
     for name in names {
+        #[cfg(feature = "oldimport")]
+        if name == "ledger.v1" && crate::lxfetch::holds(p.key) {
+            note(name, Some("waiting for a ledger copy being fetched".into()));
+            continue;
+        }
         let mut problem = None;
         for _ in 0..max_batches {
             if run.stop.load(Ordering::Relaxed) || run.paused.load(Ordering::Relaxed) || crate::coreboot::held(p.key) {
