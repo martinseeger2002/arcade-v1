@@ -8,7 +8,7 @@ use serde_json::Value;
 pub fn ask(node: &Node, addr: &str, tag: &str) -> Result<FaucetRequest, String> {
     let rec = arcade_mesh::welcome::ask(&node.identity, addr, tag, arcade_app::now());
     let id = node.id_hex();
-    node.mesh_outbox.lock().unwrap().push(serde_json::json!({"t": "wl", "recs": [rec]}));
+    node.mesh_outbox.lock().unwrap().push(arcade_mesh::welcome::frame(vec![rec]).head);
     let req = FaucetRequest {
         id: format!("{}:{addr}", node.params.net),
         chain: node.params.chain_no,

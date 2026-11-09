@@ -18,9 +18,7 @@ use std::time::Duration;
 
 const ACCOUNTS: &[u8] = b"accounts";
 
-fn now() -> u64 {
-    arcade_app::now()
-}
+use arcade_app::now;
 
 // ---------------- the account list ----------------
 
@@ -153,6 +151,11 @@ fn arcade_hosts(node: &Node) -> Vec<String> {
     hosts
 }
 
+/// "https://host/" -> "host".
+fn bare_host(h: &str) -> String {
+    h.trim_start_matches("https://").trim_end_matches('/').to_string()
+}
+
 /// Ask one arcade for the sealed vault. `here`: only its own (else it also asks the arcades
 /// it knows, and says which one answered in "from").
 fn ask_vault(host: &str, tag: &str, here: bool) -> Option<(String, Value)> {
@@ -161,7 +164,7 @@ fn ask_vault(host: &str, tag: &str, here: bool) -> Option<(String, Value)> {
     if !v["blob"]["sealed"].is_string() {
         return None;
     }
-    let from = v["from"].as_str().map(|f| f.trim_start_matches("https://").trim_end_matches('/').to_string()).filter(|f| !f.is_empty()).unwrap_or_else(|| host.to_string());
+    let from = v["from"].as_str().map(bare_host).filter(|f| !f.is_empty()).unwrap_or_else(|| host.to_string());
     Some((from, v))
 }
 
@@ -173,7 +176,7 @@ fn find_vault(node: &Node, tag: &str, from: Option<&str>) -> Result<(String, Val
         .map(|r| r.address)
         .ok_or_else(|| format!("@{tag} is not claimed"))?;
     let hosts: Vec<String> = match from {
-        Some(h) => vec![h.trim().trim_start_matches("https://").trim_end_matches('/').to_string()],
+        Some(h) => vec![bare_host(h.trim())],
         None => arcade_hosts(node),
     };
     if hosts.is_empty() {

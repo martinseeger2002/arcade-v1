@@ -707,7 +707,7 @@ fn search(x: &Ctx, q: &str) -> R {
     if q.len() == 66 && q.as_bytes()[64] == b'i' || (q.len() > 65 && q[..64].bytes().all(|b| b.is_ascii_hexdigit()) && q.as_bytes()[64] == b'i') {
         return hit("inscription", q.to_string());
     }
-    if q.len() == 64 && q.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if crate::udpsvc::is_hex(q, 64) {
         let h = Hash256::from_hex(q).map_err(e)?;
         if x.node.chain.header(c, &h).ok().flatten().is_some() {
             return hit("block", q.to_lowercase());

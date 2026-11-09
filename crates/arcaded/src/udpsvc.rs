@@ -144,13 +144,12 @@ fn short(id: &str) -> &str {
     &id[..id.len().min(16)]
 }
 
-fn now_s() -> u64 {
-    arcade_app::now()
-}
+use arcade_app::now as now_s;
 
 use arcade_mesh::random::hex as rand_hex;
 
-fn is_hex(s: &str, n: usize) -> bool {
+/// `s` is `n` hex digits (either case).
+pub fn is_hex(s: &str, n: usize) -> bool {
     s.len() == n && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 

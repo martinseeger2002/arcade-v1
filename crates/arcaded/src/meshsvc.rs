@@ -18,9 +18,7 @@ pub const SEEDS: &[&str] = &[
     "192.168.1.25:8421",
 ];
 
-fn now() -> u64 {
-    arcade_app::now()
-}
+use arcade_app::now;
 
 /// Most mesh links we dial out to (the existing arcade links "everyone" up to 48).
 pub const MAX_OUTBOUND: usize = 48; // the original's EVERYONE_MAX

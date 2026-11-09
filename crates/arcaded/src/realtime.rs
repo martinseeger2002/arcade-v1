@@ -35,9 +35,7 @@ const SEAT_LIFE: Duration = Duration::from_secs(30);
 const OUTQ_MAX: usize = 4000;
 const SHORT: usize = 8;
 
-fn now_s() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
-}
+use arcade_app::now as now_s;
 fn now_us() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as u64
 }

@@ -371,7 +371,7 @@ fn shelf(node: &Node, page: &str) -> (serde_json::Map<String, Value>, serde_json
 
 /// One storage op from an app page (load, set, remove, clear, history).
 pub fn storage(node: &Node, page: &str, op: &str, key: Option<&str>, value: Option<&str>) -> Result<Value, String> {
-    if page.len() != 64 || !page.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !crate::udpsvc::is_hex(page, 64) {
         return Err("no such inscription".into());
     }
     let (mut items, mut hist) = shelf(node, page);
