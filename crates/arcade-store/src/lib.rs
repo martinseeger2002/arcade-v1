@@ -113,6 +113,28 @@ impl Store {
         Ok(store)
     }
 
+    /// Open an existing file for reading only: safe beside the process that writes it (mdbx
+    /// readers don't block the writer). No schema change is made; a write fails.
+    pub fn open_readonly(path: impl AsRef<Path>, schema: &'static Schema) -> Result<Store> {
+        let opts = DatabaseOptions {
+            max_tables: Some(schema.tables.len() as u64 + 1 + ADDON_TABLE_SLOTS),
+            no_sub_dir: true,
+            mode: Mode::ReadOnly,
+            ..Default::default()
+        };
+        let db = Database::open_with_options(path.as_ref(), opts)?;
+        let store = Store { db, schema };
+        let txn = store.db.begin_ro_txn()?;
+        let meta = txn.open_table(Some(META))?;
+        let name: Option<Vec<u8>> = txn.get(&meta, META_SCHEMA)?;
+        if name.as_deref() != Some(schema.name.as_bytes()) {
+            return Err(StoreError::WrongSchema { expected: schema.name.into(), found: String::from_utf8_lossy(&name.unwrap_or_default()).into() });
+        }
+        drop(meta);
+        drop(txn);
+        Ok(store)
+    }
+
     pub fn schema(&self) -> &'static Schema {
         self.schema
     }

@@ -297,6 +297,12 @@ fn check_hashes(db: &ChainDb, c: u16, conn: &Connection, sql: &str, lo: u32, hi:
 // ord
 
 pub fn import_ord(db: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, say: &dyn Fn(&str)) -> Result<Value> {
+    import_ord_from(db, db, p, path, opts, say)
+}
+
+/// As import_ord, with the chain's blocks read from `blocks` (another chain.mdbx, opened
+/// read-only; tests and checks only) while the rows go to `db`.
+pub fn import_ord_from(db: &ChainDb, blocks: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, say: &dyn Fn(&str)) -> Result<Value> {
     let c = p.chain_no;
     let start = ord::ord_start(p).ok_or_else(|| format!("{} has no ord index in V1.0", p.name))?;
     let conn = open(path)?;
@@ -329,7 +335,7 @@ pub fn import_ord(db: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, say: 
     }
 
     say(&format!("checking block hashes {start}..{top}"));
-    let unstored = check_hashes(db, c, &conn, "SELECT height, hash FROM block WHERE height BETWEEN ? AND ? ORDER BY height", start, top)?;
+    let unstored = check_hashes(blocks, c, &conn, "SELECT height, hash FROM block WHERE height BETWEEN ? AND ? ORDER BY height", start, top)?;
     if unstored > 0 && !opts.allow_unstored {
         return Err(format!("{unstored} of the snapshot's blocks are not stored here; store {} to block {top} first", p.name));
     }
@@ -345,6 +351,8 @@ pub fn import_ord(db: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, say: 
     say("inscriptions");
     let mut count = 0u64;
     let mut multi = 0u64;
+    // Multi-piece inscriptions (iid, genesis txid, pieces): their later pieces are found below.
+    let mut multis: Vec<([u8; 36], Hash256, u32)> = Vec::new();
     let mut max_number: Option<u64> = None;
     {
         let mut st = conn
@@ -382,6 +390,7 @@ pub fn import_ord(db: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, say: 
             }
             if pieces > 1 {
                 multi += 1;
+                multis.push((iid, txid(&tx)?, pieces as u32));
             }
             sink.put(ord::IDS, ck(c, &iid), number.to_be_bytes().to_vec())?;
             sink.put(ord::INSC, ck(c, &iid), row.to_string().into_bytes())?;
@@ -418,6 +427,8 @@ pub fn import_ord(db: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, say: 
 
     say("unfinished inscriptions");
     let mut pending = 0u64;
+    // Unfinished multi-piece ones: (key txid, origin, pieces so far, ctype, size).
+    let mut pends: Vec<(Hash256, Hash256, u32, Vec<u8>, u64)> = Vec::new();
     {
         let mut st = conn.prepare("SELECT txid, ctype, left, body, size, pieces, origin FROM pending").map_err(e)?;
         let mut rows = st.query([]).map_err(e)?;
@@ -434,6 +445,9 @@ pub fn import_ord(db: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, say: 
             let body = r.get::<_, Option<Vec<u8>>>(3).map_err(e)?.unwrap_or_default();
             if !body.is_empty() && keep_body(&ct, size) {
                 sink.put(ord::PENDING_BODY, KeyBuf::new().u16(c).bytes(&origin.0).u32(0).done(), body)?;
+            }
+            if pieces > 1 {
+                pends.push((at, origin, pieces as u32, ct.clone(), size));
             }
             pending += 1;
         }
@@ -548,6 +562,15 @@ pub fn import_ord(db: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, say: 
     sink.finish(say)?;
     db.set_indexed_to(c, name, Some(top)).map_err(e)?;
 
+    // Every piece of every multi-piece inscription, found in our stored blocks (§3.1 "txs").
+    let pieces_report = if unstored == 0 {
+        say(&format!("finding the later pieces of {} multi-piece and {} unfinished inscriptions", multis.len(), pends.len()));
+        fill_pieces(db, blocks, p, &multis, &pends, &sort_dir(path), opts.spill_bytes, say)?
+    } else {
+        json!({"skipped": "the chain's blocks are not stored here"})
+    };
+    let pieces_missing = pieces_report["missing"].as_u64().unwrap_or(u64::MAX);
+
     // Chunk hashes: ours, recomputed from the lines just written, against what other arcades
     // said to the snapshot's maker (its "seen" table).
     say("chunk hashes");
@@ -572,18 +595,138 @@ pub fn import_ord(db: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, say: 
         }
     }
     let mut todo = vec!["maps"];
-    if multi > 0 {
+    if (multi > 0 || !pends.is_empty()) && pieces_missing > 0 {
         todo.insert(0, "txs");
     }
     let report = json!({
         "state": "imported", "from": path.display().to_string(), "chain": p.key, "h": top, "start": start,
-        "inscriptions": count, "next": next_number, "multi_piece": multi, "located": located, "pending": pending,
+        "inscriptions": count, "next": next_number, "multi_piece": multi, "pieces": pieces_report, "located": located, "pending": pending,
         "lines": lines, "chunks": chunks, "seen_agree": seen_agree, "seen_differ": seen_differ,
         "ticks": ticks, "balances": bals, "transfers": xfers, "name_claims": claims, "name_wins": wins,
         "blocks_not_stored": unstored, "todo": todo, "warnings": warnings, "rows": sink.rows,
     });
     set_copy_state(db, c, name, &report)?;
     Ok(report)
+}
+
+/// Follows inscription envelopes through stored blocks, as the ord indexer does: the next piece
+/// is the earliest transaction whose input 0 spends an output of the previous piece and reads as
+/// its continuation.
+struct Follow<'a> {
+    b: &'a ChainDb,
+    p: &'a ChainParams,
+    d: ord::Dialect,
+    heights: std::collections::HashMap<u32, Option<u32>>,
+}
+
+impl Follow<'_> {
+    fn height(&mut self, b: u32) -> Result<Option<u32>> {
+        if let Some(h) = self.heights.get(&b) {
+            return Ok(*h);
+        }
+        let h = self.b.block_height_of(self.p.chain_no, b).map_err(e)?;
+        self.heights.insert(b, h);
+        Ok(h)
+    }
+
+    /// The `n` pieces (txid, body bytes) of the envelope started in `genesis`, or why not.
+    fn pieces(&mut self, genesis: &Hash256, n: u32) -> Result<std::result::Result<Vec<(Hash256, Vec<u8>)>, String>> {
+        let (p, c) = (self.p, self.p.chain_no);
+        let Some((mut b, mut pp)) = self.b.tx_location(p, genesis).map_err(e)? else { return Ok(Err(format!("{} is not stored", genesis.to_hex()))) };
+        let Some(mut tx) = self.b.tx_at(p, b, pp).map_err(e)? else { return Ok(Err(format!("{} is not stored", genesis.to_hex()))) };
+        let Some((_, _, r)) = tx.inputs.first().and_then(|i| ord::start(&i.script_sig, self.d)) else {
+            return Ok(Err(format!("{} holds no envelope", genesis.to_hex())));
+        };
+        let mut left = r.left;
+        let mut out = vec![(*genesis, r.body)];
+        while (out.len() as u32) < n {
+            if left == 0 {
+                return Ok(Err(format!("the envelope of {} ends after {} pieces, not {n}", genesis.to_hex(), out.len())));
+            }
+            let mut cands: Vec<(u32, u32, u32)> = Vec::new();
+            for vout in 0..tx.outputs.len() as u32 {
+                let k = schema::k_pos(c, b, pp, vout);
+                if let Some(v) = self.b.store.read(|r| r.get(schema::SPENDS, &k)).map_err(e)? {
+                    let (b2, p2, vin) = (be(&v, 0), be(&v, 4), be(&v, 8));
+                    if vin == 0 {
+                        if let Some(h) = self.height(b2)? {
+                            cands.push((h, p2, b2));
+                        }
+                    }
+                }
+            }
+            cands.sort_unstable();
+            let mut next = None;
+            for (_, p2, b2) in cands {
+                let Some(t2) = self.b.tx_at(p, b2, p2).map_err(e)? else { continue };
+                if let Some(r2) = t2.inputs.first().and_then(|i| ord::more(&i.script_sig, left, self.d)) {
+                    next = Some((b2, p2, t2, r2));
+                    break;
+                }
+            }
+            let Some((b2, p2, t2, r2)) = next else {
+                return Ok(Err(format!("piece {} of {} is not found", out.len(), genesis.to_hex())));
+            };
+            left = r2.left;
+            out.push((t2.txid, r2.body));
+            (b, pp, tx) = (b2, p2, t2);
+        }
+        Ok(Ok(out))
+    }
+}
+
+fn be(v: &[u8], at: usize) -> u32 {
+    u32::from_be_bytes(v[at..at + 4].try_into().unwrap())
+}
+
+/// Fill in what old snapshots don't keep: every piece's txid of each multi-piece inscription
+/// (ord.v1.insc "txs"), and for unfinished ones their pieces' txids and bodies.
+#[allow(clippy::too_many_arguments)]
+fn fill_pieces(db: &ChainDb, blocks: &ChainDb, p: &ChainParams, multis: &[([u8; 36], Hash256, u32)],
+               pends: &[(Hash256, Hash256, u32, Vec<u8>, u64)], tmp: &Path, spill: Option<usize>, say: &dyn Fn(&str)) -> Result<Value> {
+    let c = p.chain_no;
+    let mut f = Follow { b: blocks, p, d: ord::dialect(p), heights: Default::default() };
+    let mut sink = Sink::new(db, tmp.join("pieces"), spill);
+    let (mut done, mut steps) = (0u64, 0u64);
+    let mut missing: Vec<String> = Vec::new();
+    let t0 = std::time::Instant::now();
+    for (i, (iid, genesis, n)) in multis.iter().enumerate() {
+        match f.pieces(genesis, *n)? {
+            Ok(ps) => {
+                let Some(raw) = db.store.read(|r| r.get(ord::INSC, &ck(c, iid))).map_err(e)? else { continue };
+                let mut row: Value = serde_json::from_slice(&raw).map_err(e)?;
+                row["txs"] = json!(ps.iter().map(|x| x.0.to_hex()).collect::<Vec<_>>());
+                sink.put(ord::INSC, ck(c, iid), row.to_string().into_bytes())?;
+                steps += ps.len() as u64;
+                done += 1;
+            }
+            Err(why) => missing.push(why),
+        }
+        if (i + 1) % 20_000 == 0 {
+            say(&format!("  {} of {} multi-piece inscriptions ({:.0}/s)", i + 1, multis.len(), (i + 1) as f64 / t0.elapsed().as_secs_f64()));
+        }
+    }
+    let mut pend_done = 0u64;
+    for (at, origin, n, ct, size) in pends {
+        match f.pieces(origin, *n)? {
+            Ok(ps) if ps.last().map(|x| x.0) == Some(*at) => {
+                for (i, (t, body)) in ps.iter().enumerate() {
+                    if i > 0 {
+                        sink.put(ord::PENDING_TXS, KeyBuf::new().u16(c).bytes(&origin.0).u32(i as u32).done(), t.0.to_vec())?;
+                    }
+                    if keep_body(ct, *size) {
+                        sink.put(ord::PENDING_BODY, KeyBuf::new().u16(c).bytes(&origin.0).u32(i as u32).done(), body.clone())?;
+                    }
+                }
+                pend_done += 1;
+            }
+            Ok(_) => missing.push(format!("the pieces of unfinished {} lead elsewhere than {}", origin.to_hex(), at.to_hex())),
+            Err(why) => missing.push(why),
+        }
+    }
+    sink.finish(say)?;
+    Ok(json!({"multi": multis.len(), "filled": done, "piece_txs": steps, "pending": pends.len(), "pending_filled": pend_done,
+              "missing": missing.len(), "missing_first": &missing[..missing.len().min(20)], "secs": t0.elapsed().as_secs()}))
 }
 
 // ------------------------------------------------------------------------------------------
