@@ -602,7 +602,8 @@ fn connect(node: &Node, p: &ChainParams, height: u32, b: &Block, watch: &HashSet
                 if coin(node, p, &op).is_some() {
                     continue;
                 }
-                let a = arcade_ledger::address::address_of(&o.script_pubkey, p);
+                // As the wallet names it (SegWit outputs too: dgb1...).
+                let a = arcade_ledger::address::wallet_address_of(&o.script_pubkey, p);
                 let row = json!({"v": o.value, "s": hex::encode(&o.script_pubkey), "a": a, "h": height, "cb": tx.is_coinbase(), "sp": null, "sh": null, "src": "block"});
                 undo.push(json!({"add": [tx.txid.to_hex(), vout]}));
                 puts.push((k_c(key, &op), row.to_string().into_bytes()));
@@ -1161,7 +1162,10 @@ pub fn coins(node: &Node, key: &str) -> R {
     let spent = pool_spent(p.key);
     let rows: Vec<Value> = coin_rows(node, p.key)
         .into_iter()
-        .map(|(op, c)| json!({"txid": op.txid.to_hex(), "vout": op.vout, "value": c["v"], "address": c["a"], "height": c["h"], "coinbase": c["cb"],
+        .map(|(op, c)| json!({"txid": op.txid.to_hex(), "vout": op.vout, "value": c["v"],
+                               // Rows kept before SegWit outputs had a name: name them from the script.
+                               "address": if c["a"].is_null() { json!(c["s"].as_str().and_then(|s| hex::decode(s).ok()).and_then(|s| arcade_ledger::address::wallet_address_of(&s, p))) } else { c["a"].clone() },
+                               "height": c["h"], "coinbase": c["cb"],
                                "spent_by": c["sp"], "spent_at": c["sh"], "from": c["src"], "spending": spent.contains(&op)}))
         .collect();
     let unconfirmed: Vec<Value> = ST.pool.lock().unwrap().get(p.key).map(|m| m.iter().map(|(id, v)| json!({"txid": id.to_hex(), "seen": v.1, "size": v.0.len()})).collect()).unwrap_or_default();
@@ -1444,11 +1448,11 @@ fn x_tx(node: &Node, p: &'static ChainParams, id: &str) -> R {
         let prev = ans.get(k).filter(|_| k < n_in).and_then(|x| r(x).ok()).and_then(|x| x.as_str()).and_then(|s| hex::decode(s).ok()).and_then(|b| Tx::parse_with(&b, &p.format).ok()).filter(|pt| pt.txid == i.prevout.txid);
         let o = prev.as_ref().and_then(|pt| pt.outputs.get(i.prevout.vout as usize));
         total_in += o.map(|o| o.value).unwrap_or(0);
-        let a = o.and_then(|o| arcade_ledger::address::address_of(&o.script_pubkey, p));
+        let a = o.and_then(|o| arcade_ledger::address::wallet_address_of(&o.script_pubkey, p));
         json!({"txid": i.prevout.txid.to_hex(), "vout": i.prevout.vout, "value": o.map(|o| o.value), "address": a, "tag": null})
     }).collect();
     let outputs: Vec<Value> = t.outputs.iter().enumerate().map(|(k, o)| {
-        let a = arcade_ledger::address::address_of(&o.script_pubkey, p);
+        let a = arcade_ledger::address::wallet_address_of(&o.script_pubkey, p);
         let unspent = ans.get(n_in + k).and_then(|x| r(x).ok()).map(|x| !x.is_null());
         let ours = coin(node, p, &OutPoint { txid, vout: k as u32 });
         let spent_by = ours.as_ref().and_then(|c| c["sp"].as_str().map(|s| json!({"txid": s, "vin": c["vin"]})))
