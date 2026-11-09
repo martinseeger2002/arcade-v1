@@ -32,9 +32,78 @@ pub fn grouped(digits: &str) -> String {
     o
 }
 
+/// A token amount with its digits grouped: divisible tokens with all 8 decimals
+/// ("1,234.50000000"), others whole ("1,234") (the wallet's form).
+pub fn token_grouped(divisible: bool, units: u64) -> String {
+    if divisible {
+        format!("{}.{:08}", grouped(&(units / COIN).to_string()), units % COIN)
+    } else {
+        grouped(&units.to_string())
+    }
+}
+
+/// A token amount, plain: divisible tokens with trailing zeros dropped ("1234.5"), others
+/// whole (the explorer's form).
+pub fn token_plain(divisible: bool, units: u64) -> String {
+    if divisible {
+        trimmed8(units)
+    } else {
+        units.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wallet's `shown` and the explorer's `token_amount` as they were before moving here,
+    /// as references: the shared forms must give the same text for every input.
+    #[test]
+    fn token_forms_match_the_old_code() {
+        fn old_shown(div: bool, units: u64) -> String {
+            let group = |s: String| {
+                let b = s.as_bytes();
+                let mut o = String::new();
+                for (i, ch) in b.iter().enumerate() {
+                    if i > 0 && (b.len() - i) % 3 == 0 {
+                        o.push(',');
+                    }
+                    o.push(*ch as char);
+                }
+                o
+            };
+            if div {
+                format!("{}.{:08}", group((units / 100_000_000).to_string()), units % 100_000_000)
+            } else {
+                group(units.to_string())
+            }
+        }
+        fn old_token_amount(div: bool, units: u64) -> String {
+            if div {
+                let w = units / 100_000_000;
+                let f = format!("{:08}", units % 100_000_000);
+                let f = f.trim_end_matches('0');
+                if f.is_empty() { w.to_string() } else { format!("{w}.{f}") }
+            } else {
+                units.to_string()
+            }
+        }
+        let mut xs = vec![0u64, 1, 9, 10, 99, 100, 999, 1000, 12_345, 100_000_000, 123_456_789, 150_000_000, 99_999_999_999, u64::MAX];
+        let mut x = 7u64;
+        for _ in 0..2000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            xs.push(x >> (x % 60));
+        }
+        for u in xs {
+            for d in [false, true] {
+                assert_eq!(token_grouped(d, u), old_shown(d, u), "{d} {u}");
+                assert_eq!(token_plain(d, u), old_token_amount(d, u), "{d} {u}");
+            }
+        }
+        assert_eq!(token_grouped(true, 123_456_789_012), "1,234.56789012");
+        assert_eq!(token_grouped(false, 1_234_567), "1,234,567");
+        assert_eq!(token_plain(true, 150_000_000), "1.5");
+    }
 
     #[test]
     fn amounts() {

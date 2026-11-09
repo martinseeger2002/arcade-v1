@@ -257,14 +257,7 @@ fn ledger_count(x: &Ctx) -> u64 {
 
 /// Arcade token amounts: divisible tokens (type 2) have 8 decimals.
 fn token_amount(prop: &Value, units: u64) -> String {
-    if prop["type"].as_u64() == Some(2) {
-        let w = units / 100_000_000;
-        let f = format!("{:08}", units % 100_000_000);
-        let f = f.trim_end_matches('0');
-        if f.is_empty() { w.to_string() } else { format!("{w}.{f}") }
-    } else {
-        units.to_string()
-    }
+    arcade_ledger::amount::token_plain(led::divisible(prop), units)
 }
 
 fn ledger_content(x: &Ctx, txid: &str, cap: usize) -> Value {
@@ -301,7 +294,7 @@ fn ledger_tokens_page(x: &Ctx, off: usize, n: usize) -> Vec<Value> {
     rows.reverse();
     rows.iter().skip(off).take(n).filter_map(|(k, _)| {
         let pid = u32::from_be_bytes(k[k.len() - 4..].try_into().ok()?);
-        let mut v: Value = serde_json::from_slice(&x.node.chain.store.read(|r| r.get(led::PROPERTY, &KeyBuf::new().u16(x.c()).u32(pid).done())).ok()??).ok()?;
+        let mut v: Value = led::property(&x.node.chain, x.c(), pid).ok()??;
         v["total_shown"] = json!(token_amount(&v, v["total"].as_u64().unwrap_or(0)));
         if let Some(i) = v["issuer"].as_str() { v["issuer_tag"] = json!(tag_of(x, i)); }
         Some(v)
@@ -310,15 +303,9 @@ fn ledger_tokens_page(x: &Ctx, off: usize, n: usize) -> Vec<Value> {
 
 fn ledger_token(x: &Ctx, pid: u32) -> R {
     let c = x.c();
-    let mut v: Value = serde_json::from_slice(&x.node.chain.store.read(|r| r.get(led::PROPERTY, &KeyBuf::new().u16(c).u32(pid).done())).map_err(e)?.ok_or_else(|| format!("no arcade token {pid}"))?).map_err(e)?;
+    let mut v: Value = led::property(&x.node.chain, c, pid)?.ok_or_else(|| format!("no arcade token {pid}"))?;
     // Holders: balance rows are keyed by address, so scan this chain's and keep this token's.
-    let rows = x.node.chain.store.read(|r| r.scan_prefix(led::BALANCE, &c.to_be_bytes())).map_err(e)?;
-    let mut hs: Vec<(u64, String)> = rows.iter().filter_map(|(k, b)| {
-        if u32::from_be_bytes(k[k.len() - 4..].try_into().ok()?) != pid { return None; }
-        let bal = u64::from_be_bytes(b[..8].try_into().ok()?);
-        (bal > 0).then(|| (bal, String::from_utf8_lossy(&k[2..k.len() - 5]).into_owned()))
-    }).collect();
-    hs.sort_by(|a, b| b.0.cmp(&a.0));
+    let hs = led::holders(&x.node.chain, c, pid).map_err(e)?;
     v["holders"] = json!(hs.len());
     v["total_shown"] = json!(token_amount(&v, v["total"].as_u64().unwrap_or(0)));
     if let Some(i) = v["issuer"].as_str() { v["issuer_tag"] = json!(tag_of(x, i)); }

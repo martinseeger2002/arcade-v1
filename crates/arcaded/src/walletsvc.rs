@@ -63,43 +63,18 @@ fn all_inscriptions(node: &Node) -> Vec<Value> {
 // ---------------- tokens ----------------
 
 fn prop(node: &Node, pid: u32) -> Option<Value> {
-    node.chain.store.read(|r| r.get(led::PROPERTY, &KeyBuf::new().u16(c(node)).u32(pid).done())).ok().flatten().and_then(|v| serde_json::from_slice(&v).ok())
+    led::property(&node.chain, c(node), pid).ok().flatten()
 }
 
-fn divisible(p: &Value) -> bool {
-    p["type"].as_u64() == Some(2)
-}
+use arcade_ledger::engine::divisible;
 
 fn shown(p: &Value, units: u64) -> String {
-    let group = |s: String| {
-        let b = s.as_bytes();
-        let mut o = String::new();
-        for (i, ch) in b.iter().enumerate() {
-            if i > 0 && (b.len() - i) % 3 == 0 {
-                o.push(',');
-            }
-            o.push(*ch as char);
-        }
-        o
-    };
-    if divisible(p) {
-        format!("{}.{:08}", group((units / 100_000_000).to_string()), units % 100_000_000)
-    } else {
-        group(units.to_string())
-    }
+    arcade_ledger::amount::token_grouped(divisible(p), units)
 }
 
 /// Token holdings of an address: (propertyid, units).
 fn holdings(node: &Node, address: &str) -> Vec<(u32, u64)> {
-    let pre = KeyBuf::new().u16(c(node)).bytes(address.as_bytes()).u8(0).done();
-    node.chain
-        .store
-        .read(|r| r.scan_prefix(led::BALANCE, &pre))
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(k, v)| Some((u32::from_be_bytes(k[k.len() - 4..].try_into().ok()?), u64::from_be_bytes(v.get(..8)?.try_into().ok()?))))
-        .filter(|(_, u)| *u > 0)
-        .collect()
+    led::holdings(&node.chain, c(node), address)
 }
 
 fn balance_rows(node: &Node, list: &[(u32, u64)]) -> Value {
@@ -232,18 +207,7 @@ pub fn route(node: &Node, path: &str, q: &serde_json::Map<String, Value>) -> (u1
         }
         ["holders"] => {
             let Some(pid) = qs("token").or_else(|| qs("ids")).and_then(|t| t.parse::<u32>().ok()) else { return missing("name a token: ?token=<id>") };
-            let rows = node.chain.store.read(|r| r.scan_prefix(led::BALANCE, &cc.to_be_bytes())).unwrap_or_default();
-            let mut hs: Vec<(u64, String)> = rows
-                .iter()
-                .filter_map(|(k, b)| {
-                    if u32::from_be_bytes(k[k.len() - 4..].try_into().ok()?) != pid {
-                        return None;
-                    }
-                    let bal = u64::from_be_bytes(b.get(..8)?.try_into().ok()?);
-                    (bal > 0).then(|| (bal, String::from_utf8_lossy(&k[2..k.len() - 5]).into_owned()))
-                })
-                .collect();
-            hs.sort_by(|a, b| b.0.cmp(&a.0));
+            let hs = led::holders(&node.chain, cc, pid).unwrap_or_default();
             (200, json!({"holders": hs.into_iter().map(|x| x.1).collect::<Vec<_>>()}).to_string())
         }
         ["tx", txid] => tx_status(node, txid).map(|v| (200, v.to_string())).unwrap_or_else(|| missing("this node has never heard of that transaction")),

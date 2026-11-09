@@ -1310,6 +1310,46 @@ impl Indexer for LedgerIndexer {
 // ---------------- fingerprints ----------------
 
 /// The block's digest records (sorted), as index_digest.block_rows.
+/// Divisible arcade tokens (property type 2) have 8 decimals.
+pub fn divisible(prop: &Value) -> bool {
+    prop["type"].as_u64() == Some(2)
+}
+
+/// An arcade token's property record; read and JSON errors as text.
+pub fn property(db: &arcade_chaindb::ChainDb, c: u16, pid: u32) -> std::result::Result<Option<Value>, String> {
+    let raw = db.store.read(|r| r.get(PROPERTY, &KeyBuf::new().u16(c).u32(pid).done())).map_err(|e| e.to_string())?;
+    raw.map(|v| serde_json::from_slice(&v).map_err(|e| e.to_string())).transpose()
+}
+
+/// Token holdings of an address: (propertyid, units), units > 0.
+pub fn holdings(db: &arcade_chaindb::ChainDb, c: u16, address: &str) -> Vec<(u32, u64)> {
+    let pre = KeyBuf::new().u16(c).bytes(address.as_bytes()).u8(0).done();
+    db.store
+        .read(|r| r.scan_prefix(BALANCE, &pre))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(k, v)| Some((u32::from_be_bytes(k[k.len() - 4..].try_into().ok()?), u64::from_be_bytes(v.get(..8)?.try_into().ok()?))))
+        .filter(|(_, u)| *u > 0)
+        .collect()
+}
+
+/// Holders of token `pid`: (units, address), largest first.
+pub fn holders(db: &arcade_chaindb::ChainDb, c: u16, pid: u32) -> Result<Vec<(u64, String)>> {
+    let rows = db.store.read(|r| r.scan_prefix(BALANCE, &c.to_be_bytes()))?;
+    let mut hs: Vec<(u64, String)> = rows
+        .iter()
+        .filter_map(|(k, b)| {
+            if u32::from_be_bytes(k[k.len() - 4..].try_into().ok()?) != pid {
+                return None;
+            }
+            let bal = u64::from_be_bytes(b.get(..8)?.try_into().ok()?);
+            (bal > 0).then(|| (bal, String::from_utf8_lossy(&k[2..k.len() - 5]).into_owned()))
+        })
+        .collect();
+    hs.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(hs)
+}
+
 pub fn block_records(db: &arcade_chaindb::ChainDb, c: u16, h: u32) -> Result<Vec<String>> {
     let mut recs: Vec<String> = match db.store.read(|r| r.get(ROWS, &k(c).u32(h).done()))? {
         Some(v) => String::from_utf8_lossy(&v).split_inclusive('\n').map(String::from).collect(),
