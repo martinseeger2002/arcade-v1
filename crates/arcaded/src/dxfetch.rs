@@ -558,10 +558,17 @@ fn step(node: &Arc<Node>, p: &'static ChainParams) {
                 s.jobs.insert(p.net.to_string(), j);
             }
         } else if s.asked.get(p.net).is_none_or(|t| t.elapsed() > ASK_EVERY) {
-            // Nobody offers one: ask the furthest walker (v3) that is far enough ahead.
+            // Ask a walker to make one only when no arcade offers any snapshot we haven't refused
+            // (one walked past our stored tip is no reason: a fresh one would be past it too), and
+            // only a walker whose walk we could use: our blocks reach within 100 of it. A Dogecoin
+            // snapshot is ~30 GB on the maker's disk, so asking needlessly is costly.
             let refused = s.refused.clone();
-            let asked_ok = |hi: &Value| offer_of(hi).is_none_or(|o| !refused.contains(&o.0));
-            if let Some((peer, w, _)) = walkers(&s, p.net, want).into_iter().find(|(_, w, hi)| hi["v"].as_u64().unwrap_or(0) >= 3 && *w >= have + WORTH && asked_ok(hi)) {
+            let offered = s.heard.iter().any(|((_, n), (at, hi))| n == p.net && at + FRESH >= now() && offer_of(hi).is_some_and(|o| !refused.contains(&o.0)));
+            let usable = |w: u64| w <= tip_h + 100;
+            if offered {
+                return;
+            }
+            if let Some((peer, w, _)) = walkers(&s, p.net, want).into_iter().find(|(_, w, hi)| hi["v"].as_u64().unwrap_or(0) >= 3 && *w >= have + WORTH && usable(*w)) {
                 let _ = node.app.event("chains", &format!("{}: asking arcade {} (walked to {w}) to make an ord snapshot", p.key, short(&peer)));
                 s.outq.entry(peer).or_default().push(Frame::new(json!({"t": "dx", "op": "sq", "net": p.net})));
                 s.asked.insert(p.net.to_string(), Instant::now());
