@@ -23,7 +23,7 @@
   };
   const nameOf = (w) => (w.name ? w.name : w.tag ? "@" + w.tag : w.address ? w.address.slice(0, 10) + "…" : w.fingerprint || "someone");
   const sub = (w) => [w.tag ? "@" + w.tag : null, w.fingerprint].filter(Boolean).join(" · ");
-  const PEP = (sats) => (sats / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 }) + " PEPtest";
+  const PEP = homeCoins;
 
   let view = "chats", open = null, composing = false, lastUnread = null, notified = new Set();
 

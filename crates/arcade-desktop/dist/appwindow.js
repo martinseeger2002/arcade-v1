@@ -48,7 +48,7 @@
     busy = true;
     try { return await fn(); } finally { busy = false; }
   }
-  const pep = (sats) => (sats / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 }) + " PEPtest";
+  const pep = homeCoins;
   let lastSend = 0;
   // Wallet access: what uses the player's key asks first while the switch is off (Yes turns it on).
   async function walletGate(what) {

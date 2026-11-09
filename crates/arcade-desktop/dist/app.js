@@ -10,9 +10,8 @@ async function api(cmd, args = {}) {
 
 // The chain picked at the top (explorer.js owns the picker); every tab follows it.
 const TICKER = { peptest: "PEPtest", pep: "PEP", doge: "DOGE", dgb: "DGB", dgbtest: "DGBtest", kot: "KOT", flop: "FLOP", ltc: "LTC", ltctest: "LTCtest", btc: "BTC", wjk: "WJK" };
-const picked = () => (window.arcadeChain && window.arcadeChain()) || { key: "peptest", name: "Pepecoin testnet", home: true };
+const picked = () => (window.arcadeChain && window.arcadeChain()) || { key: HOME.key, name: HOME.name, home: true };
 const coins = (sats, key) => (sats / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 }) + " " + (TICKER[key || picked().key] || "");
-const pep = (sats) => coins(sats, "peptest");
 window.addEventListener("arcade:chain", () => refresh());
 const short = (s, n = 12) => (s && s.length > n ? s.slice(0, n) + "…" : s || "");
 function msg(el, text, kind = "") { el.textContent = text; el.className = "msg " + kind; }
@@ -134,7 +133,7 @@ async function refreshWallet() {
   // Test coins from the mesh are Pepecoin testnet coins.
   $("w-faucet").hidden = !ch.home;
   if (!$("w-ltag").value) {
-    const home = await api("wallet.keys", { chain: "peptest" }).catch(() => []);
+    const home = await api("wallet.keys", { chain: HOME.key }).catch(() => []);
     const t = home.find((k) => k.tag);
     if (t) $("w-ltag").value = t.tag;
   }
@@ -196,6 +195,7 @@ async function refreshActivity() {
 }
 
 async function refresh() {
+  loadHome();
   try {
     await refreshHome();
     const tab = document.querySelector(".tab.on").id;

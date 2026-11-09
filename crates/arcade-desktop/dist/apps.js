@@ -17,7 +17,7 @@
     for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) e.append(k.nodeType ? k : document.createTextNode(String(k)));
     return e;
   };
-  const PEP = (sats) => (sats / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 }) + " PEPtest";
+  const PEP = homeCoins;
   const ago = (t) => { if (!t) return "waiting"; const s = Date.now() / 1000 - t; return s < 3600 ? `${Math.max(1, Math.round(s / 60))}m ago` : s < 172800 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`; };
   const PERMS = [["wallet", "Wallet access"], ["contacts", "Contacts"], ["groups", "Group chats"], ["media", "Camera & microphone"], ["pictures", "Pictures in the app"], ["notify", "Notifications"]];
   let view = "mine", sort = "popular", query = "", base = "http://127.0.0.1:8420", detail = null;
@@ -52,7 +52,7 @@
 
   async function act(kind, a, extra = {}) {
     try {
-      if (a.chain !== "peptest") throw new Error("likes, comments and tips work on Pepecoin testnet apps for now");
+      if (a.chain !== HOME.key) throw new Error(`likes, comments and tips work on ${HOME.name} apps for now`);
       const r = await api("feed.act", { kind, target: a.txid, ...extra });
       note(`${kind} sent (fee ${PEP(r.fee)}); it counts once it's in a block.`);
     } catch (e) { note(e.message, true); }
@@ -68,7 +68,7 @@
     const openB = h("button", {}, "Open"); openB.onclick = () => open(a);
     const details = h("button", { class: "small" }, "Details"); details.onclick = () => { detail = a; draw(); };
     const comment = h("div", { class: "fd-reply", hidden: true }, (() => { const t = h("input", { placeholder: "Comment…" }); const b = h("button", { class: "small primary" }, "Send"); b.onclick = () => t.value.trim() && act("reply", a, { text: t.value.trim() }); return [t, b]; })());
-    const tip = h("div", { class: "fd-reply", hidden: true }, (() => { const t = h("input", { type: "number", min: "0.01", step: "0.01", placeholder: "PEPtest", style: "width:8em" }); const b = h("button", { class: "small primary" }, "Tip"); b.onclick = () => { const v = Math.round(Number(t.value) * 1e8); if (v > 0) act("tip", a, { amount: v }); }; return [t, b]; })());
+    const tip = h("div", { class: "fd-reply", hidden: true }, (() => { const t = h("input", { type: "number", min: "0.01", step: "0.01", placeholder: homeTicker(), style: "width:8em" }); const b = h("button", { class: "small primary" }, "Tip"); b.onclick = () => { const v = Math.round(Number(t.value) * 1e8); if (v > 0) act("tip", a, { amount: v }); }; return [t, b]; })());
     const btn = (l, f, on) => { const b = h("button", { class: "fd-btn" + (on ? " on" : "") }, l); b.onclick = f; return b; };
     return h("div", { class: "ap-card" }, cover(a),
       h("div", { class: "ap-body" },
