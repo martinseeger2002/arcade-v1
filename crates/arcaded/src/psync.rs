@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 
 const JOB: u32 = 250;
 /// P2P peers kept working at once (the coin's network is the other side of "mesh + P2P").
-const P2P_WANT: usize = 12;
+const P2P_WANT: usize = 24;
+/// A P2P peer delivering under this (bytes/s) is replaced.
+const SLOW_BPS: f64 = 150_000.0;
 /// How far ahead of the connected tip hashes are fetched: at most this many blocks, and no
 /// more than READY_BYTES of finished blocks waiting (old blocks are tiny, new ones are not).
 const AHEAD: u32 = 100_000;
@@ -59,11 +61,13 @@ struct State {
     inflight: BTreeMap<u32, (Vec<Hash256>, Instant, bool)>,
     /// Recent average block size (bytes; 0 = not known yet), to size jobs by bytes.
     avg_block: usize,
+    /// P2P peers (by IP) found too slow: the recruiter rests them.
+    slow: std::collections::HashSet<String>,
 }
 
 /// Bytes one job should carry: one source must finish it well within the connector's wait,
 /// whether blocks are 300 bytes or 1 MB (250 small blocks, or ~30 full Doginals-era ones).
-const JOB_BYTES: usize = 24 << 20;
+const JOB_BYTES: usize = 12 << 20;
 
 /// Raw block bytes a storing round takes at most.
 const ROUND_BYTES: usize = 200 << 20;
@@ -259,9 +263,16 @@ fn worker(pool: &Pool, name: String, mut src: Box<dyn BlockSource + Send + '_>) 
                 st = pool.cv.wait_timeout(st, Duration::from_millis(500)).unwrap().0;
             }
         };
+        let t_job = Instant::now();
         match src.get_blocks(&job.hashes) {
             Ok(raws) if raws.len() == job.hashes.len() => {
                 fails = 0;
+                // A slow P2P peer holds back the blocks the connector waits on: after a sizeable
+                // job delivered at under SLOW_BPS, this worker steps aside (its peer rests) so
+                // the recruiter brings a faster one. Arcades on the mesh always stay.
+                let bytes: usize = raws.iter().map(|r| r.len()).sum();
+                let secs = t_job.elapsed().as_secs_f64().max(0.001);
+                let slow = name.starts_with("P2P ") && bytes >= 4 << 20 && (bytes as f64 / secs) < SLOW_BPS;
                 let mut st = pool.s.lock().unwrap();
                 st.inflight.remove(&job.start);
                 let per = raws.iter().map(|r| r.len()).sum::<usize>() / raws.len().max(1);
@@ -273,6 +284,11 @@ fn worker(pool: &Pool, name: String, mut src: Box<dyn BlockSource + Send + '_>) 
                     st.ready.insert(job.start, (raws, name.clone()));
                 }
                 pool.cv.notify_all();
+                if slow {
+                    st.slow.insert(name.trim_start_matches("P2P ").to_string());
+                    drop(st);
+                    break;
+                }
             }
             _ => {
                 pool.put_back(job);
@@ -420,6 +436,13 @@ pub fn run(node: &Node, p: &'static ChainParams, syncer: &Syncer, top: u32, on_p
                 let p2p_now = pool_r.s.lock().unwrap().p2p;
                 if p2p_now < P2P_WANT {
                     resting.retain(|_, t| t.elapsed() < Duration::from_secs(600));
+                    // Peers that stepped aside for being slow rest too (and leave the busy list).
+                    let slow: Vec<String> = pool_r.s.lock().unwrap().slow.drain().collect();
+                    let ip_of = |a: &str| a.rsplit_once(':').map(|x| x.0.trim_matches(|c| c == '[' || c == ']').to_string()).unwrap_or_default();
+                    for a in busy.iter().filter(|a| slow.contains(&ip_of(a))).cloned().collect::<Vec<_>>() {
+                        busy.remove(&a);
+                        resting.insert(a, Instant::now());
+                    }
                     let cand = node.coin_candidates(p).into_iter().find(|a| !resting.contains_key(a) && !busy.contains(a));
                     match cand {
                         Some(a) => match arcade_chain::p2p::Peer::connect(p, &a, Duration::from_secs(8)) {
