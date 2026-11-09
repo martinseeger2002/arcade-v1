@@ -11,6 +11,13 @@ Dogecoin catching up on the mini PC (main eba674f, `ARCADE_COIN_CACHE_MB=1024`) 
 
 The coins go in at ~375,000 rows/s. The tx index (`core.v1.txs`, txid prefix → block and position) goes in at only ~21,000 rows/s. Memory is fine (1.5 GB anonymous; the rest is the database's file map).
 
+The JB20B (reported by its session):
+- **RAM:** 15.4 GB, 4 CPU threads; Lexar NM620 2 TB NVMe.
+- **Database:** `chain.mdbx` is 446 GB (all chains, Dogecoin at ~5.28 M of 6.45 M); 1.3 TB free.
+- **Memory use:** the arcade uses ~1.5 GB of its own memory. The page cache holds ~11 GB, ~7.7 GB of it the database's file map.
+
+So the tx index is far bigger than memory (the database is ~30 × RAM). Random tx-index writes go to disk, which fits the measured ~21,000 rows/s.
+
 ## Why the tx index is slow, and what can't be changed
 
 - **Option A is already in.** `flush_cache` sorts the tx rows before writing them (`txs.sort_unstable()`). But txids are random, so a flush's sorted rows still land all over a tree of hundreds of millions of rows. Almost every row touches a different leaf page that isn't in memory. That's random disk I/O, and sorting can't fix it.
@@ -24,7 +31,7 @@ The coins go in at ~375,000 rows/s. The tx index (`core.v1.txs`, txid prefix →
 ### 1. Measure first (read-only)
 On a copy of a Dogecoin database (or on the JB20B, read-only, with Martin's OK):
 - **How many txs still have unspent outputs** (distinct block+position in `outputs`) compared with all tx index rows. That is the size of the "live" index below.
-- **Page cache:** the machine's RAM against the tx index's size, to confirm it's random I/O. Read faults during a flush show it.
+- **Page cache:** confirmed from the JB20B's numbers above (index far bigger than RAM). Still to count: txs with unspent outputs against all tx rows, which needs a scan of a Dogecoin database.
 
 ### 2. A small "live" tx index while catching up
 - **New table** `core.v1.live_txs` (txid prefix → block and position), the same rows as `core.v1.txs` but only for **txs that still have an unspent coin**.
