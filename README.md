@@ -59,6 +59,18 @@ To keep the service running while you're logged out, and to start it at boot: `s
 
 From a clone of this repo, `scripts/install-linux.sh` does the same build and install.
 
+### Tuning the sync (environment variables)
+
+Set these in the service's environment, for example with `systemctl --user edit arcaded` and an `Environment=` line, or before `arcaded` when you run it by hand.
+
+| Variable | Meaning |
+|---|---|
+| `ARCADE_COIN_CACHE_MB` | Coin cache while catching up a chain, in MB (default 0 = off). 1024 cuts the coin writes roughly in half on busy chains such as Dogecoin. |
+| `ARCADE_MALLOC_ARENAS` | How many glibc malloc arenas arcaded may use (default 4). More arenas means less waiting between threads but more memory held. A `MALLOC_ARENA_MAX` you set yourself takes precedence. Freed memory is given back to the system once a minute. |
+| `ARCADE_NICE` | Run the service at a lower CPU and disk priority, e.g. 10, so games and the desktop stay smooth while chains catch up (default: normal priority). |
+| `ARCADE_COMMIT_TXS` | Transactions per database commit while catching up (default 20000). |
+| `ARCADE_SYNC_TIMES` | Any value: log how long each part of every sync batch takes. |
+
 ### Uninstall
 
 ```sh

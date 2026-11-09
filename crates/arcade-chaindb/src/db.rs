@@ -1492,7 +1492,11 @@ fn connect_one(
                         // Only coins from before the log began have an address row in place.
                         if log_from.is_none_or(|f| coin.height < f) {
                             match cache.as_deref_mut() {
-                                Some(cc) => cc.by_script_del.push(k_by_script(c, &sid, pb, pp, inp.prevout.vout)),
+                                Some(cc) => {
+                                    let k = k_by_script(c, &sid, pb, pp, inp.prevout.vout);
+                                    cc.bytes += k.len() + 40;
+                                    cc.by_script_del.push(k)
+                                }
                                 None => l.del(BY_SCRIPT, &k_by_script(c, &sid, pb, pp, inp.prevout.vout))?,
                             }
                         }
