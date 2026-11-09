@@ -460,7 +460,11 @@ fn operator_me(node: &Node) -> Value {
         .unwrap()
         .values()
         .take(100)
-        .map(|l| json!({"id": l.node_id, "host": l.addr.trim_start_matches("wss://").split('/').next().unwrap_or("")}))
+        .map(|l| {
+            // The original accepts host names and IPv4 "a.b.c.d:port" only (no IPv6 brackets).
+            let host = l.addr.trim_start_matches("wss://").split('/').next().unwrap_or("");
+            if host.contains('[') { json!({"id": l.node_id}) } else { json!({"id": l.node_id, "host": host}) }
+        })
         .collect();
     let mut me = json!({"t": "op", "op": "me", "version": "V1.0", "lora": false, "links": links});
     if !tag.is_empty() {
