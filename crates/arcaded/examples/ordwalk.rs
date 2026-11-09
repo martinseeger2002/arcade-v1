@@ -4,7 +4,6 @@ use std::sync::Arc;
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let p = &arcade_chain::params::PEPECOIN_TEST;
-    let t0 = std::time::Instant::now();
     let db = arcade_chaindb::ChainDb::open(&a[0]).unwrap();
     db.add_indexer(p.chain_no, Arc::new(arcade_ledger::ord::OrdIndexer::new(&[]))).unwrap();
     let t = std::time::Instant::now();
