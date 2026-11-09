@@ -37,6 +37,7 @@ const STEAL_AFTER: Duration = Duration::from_millis(1500);
 /// out: one more source fetches it too (first copy wins), up to MAX_COPIES. Two slow or stuck
 /// sources used to hold every later block back for many minutes (Dogecoin, 130 MB jobs).
 const RECOPY_AFTER: Duration = Duration::from_secs(45);
+/// Worst case that is ~3 extra downloads of the job (Dogecoin's ~130 MB jobs: ~390 MB).
 const MAX_COPIES: u8 = 4;
 
 struct Job {
@@ -96,6 +97,11 @@ pub struct Pool {
 impl Pool {
     fn put_back(&self, job: Job) {
         let mut st = self.s.lock().unwrap();
+        // A copy that failed isn't out any more: it shouldn't use up one of MAX_COPIES (three
+        // fast failures would otherwise leave only a stuck fourth source).
+        if let Some((_, _, copies)) = st.inflight.get_mut(&job.start) {
+            copies.0 = copies.0.saturating_sub(1).max(1);
+        }
         st.queue.push_front(Job { tries: job.tries + 1, ..job });
         self.cv.notify_all();
     }
