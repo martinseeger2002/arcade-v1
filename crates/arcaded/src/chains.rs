@@ -673,7 +673,8 @@ fn mesh_first(node: &Arc<Node>, run: &ChainRun, syncer: &Syncer) {
     }
     let ours = || node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height as u64).unwrap_or(0);
     let fresh = ours() == 0;
-    let wait_max = Duration::from_secs(if fresh { 90 } else { 20 });
+    // Already hearing offers (the usual case once installed): no need to wait for more.
+    let wait_max = Duration::from_secs(if fresh { 90 } else if node.offers_for(p.key).is_empty() { 20 } else { 0 });
     let t0 = std::time::Instant::now();
     let mut first: Option<std::time::Instant> = None;
     loop {
@@ -752,8 +753,15 @@ fn mesh_first(node: &Arc<Node>, run: &ChainRun, syncer: &Syncer) {
             },
         };
         let how = if kind == "bk" { "blocks" } else { "Core node" };
-        let _ = node.app.event("chains", &format!("bootstrapping {} from arcade {short} at {addr} ({how}, its tip {their})", p.name));
-        *run.source.lock().unwrap() = format!("bootstrap from arcade {short} ({how}, its tip {their})");
+        // Only a real catch-up (2,000+ behind) is a bootstrap; nearer, this is just following the chain
+        // through another arcade (the coin's P2P network doesn't answer, or is behind).
+        // Same line as the "every source at once" catch-up above.
+        let far = their > ours() + 2000;
+        let doing = if far { "bootstrapping from" } else { "following via" };
+        if far {
+            let _ = node.app.event("chains", &format!("bootstrapping {} from arcade {short} at {addr} ({how}, its tip {their})", p.name));
+        }
+        *run.source.lock().unwrap() = format!("{} arcade {short} ({how}, its tip {their})", if far { "bootstrap from" } else { "following via" });
         if let Err(e) = syncer.ensure_genesis(src.as_mut()) {
             let _ = node.app.event("chains", &format!("{}: arcade {addr}: {e}", p.name));
             continue;
@@ -762,14 +770,14 @@ fn mesh_first(node: &Arc<Node>, run: &ChainRun, syncer: &Syncer) {
             if run.stop.load(Ordering::Relaxed) || run.paused.load(Ordering::Relaxed) || crate::coreboot::held(p.key) {
                 return;
             }
-            set(format!("bootstrapping from arcade {short} ({how}): block {} of {their}", ours()));
+            set(format!("{doing} arcade {short} ({how}): block {} of {their}", ours()));
             run.peer_tip.fetch_max(their as u32, Ordering::Relaxed);
             syncer.known_top.set(syncer.known_top.get().max(their as u32));
             let h = syncer.sync_headers_once(src.as_mut());
             let b = syncer.sync_blocks(src.as_mut(), 500, 500);
             match (h, b) {
                 (Ok(hn), Ok(pr)) => {
-                    set(format!("bootstrapping from arcade {short} ({how}): block {} of {their}", ours()));
+                    set(format!("{doing} arcade {short} ({how}): block {} of {their}", ours()));
                     if hn == 0 && pr.blocks == 0 {
                         break;
                     }
@@ -780,7 +788,9 @@ fn mesh_first(node: &Arc<Node>, run: &ChainRun, syncer: &Syncer) {
                 }
             }
         }
-        let _ = node.app.event("chains", &format!("{} bootstrap from arcade {short} reached {}", p.name, ours()));
+        if far {
+            let _ = node.app.event("chains", &format!("{} bootstrap from arcade {short} reached {}", p.name, ours()));
+        }
         if ours() >= their {
             break;
         }
