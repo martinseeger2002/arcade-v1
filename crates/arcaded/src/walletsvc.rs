@@ -411,9 +411,7 @@ pub fn file(node: &Node, page: &str, body: &Value) -> (u16, Value) {
     if requests(node, None).as_array().map(|a| a.len()).unwrap_or(0) >= MAX_WAITING {
         return refuse("more than twenty requests are already waiting".into());
     }
-    let mut id = [0u8; 8];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut id);
-    let id = hex::encode(id);
+    let id = arcade_mesh::random::hex(8);
     let r = json!({"id": id, "page": page, "kind": kind, "to": to, "to_tag": tag_of(node, &to), "units": units, "what": what,
                    "propertyid": body["propertyid"], "inscription": body["inscription"], "from": body["from"],
                    "label": body["label"].as_str().map(|s| s.chars().take(60).collect::<String>()),
@@ -596,8 +594,7 @@ pub fn inscribe(node: &Node, content: &[u8], ctype: &str, json: Option<&str>) ->
     if let Some(j) = json.filter(|j| !j.is_empty()) {
         serde_json::from_str::<Value>(j).map_err(|e| format!("the JSON does not parse: {e}"))?;
     }
-    let mut id = [0u8; 8];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut id);
+    let id: [u8; 8] = arcade_mesh::random::bytes();
     let chunks = arcade_wallet::tx::insc_chunks(content, if ctype.is_empty() { "text/plain" } else { ctype }, json.filter(|j| !j.is_empty()), id)?;
     let (txids, fee) = crate::msgsvc::send_payloads(node, &chunks)?;
     let _ = node.app.event("wallet", &format!("inscribing {} bytes of {ctype} in {} transaction{} ({})", content.len(), txids.len(), if txids.len() == 1 { "" } else { "s" }, txids[0]));

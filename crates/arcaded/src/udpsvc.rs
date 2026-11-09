@@ -148,11 +148,7 @@ fn now_s() -> u64 {
     arcade_app::now()
 }
 
-fn rand_hex(n: usize) -> String {
-    let mut b = vec![0u8; n];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut b);
-    hex::encode(b)
-}
+use arcade_mesh::random::hex as rand_hex;
 
 fn is_hex(s: &str, n: usize) -> bool {
     s.len() == n && s.bytes().all(|b| b.is_ascii_hexdigit())
@@ -946,6 +942,7 @@ pub fn on_frame(node: &Node, link: &mut Link, f: &Frame) -> Result<(), LinkError
 /// Signed by "from": the header without sig, hops and t (introduce.py).
 const UI_STRIP: &[&str] = &["sig", "hops", "t"];
 
+#[cfg(test)]
 fn ui_signed(h: &Value) -> Vec<u8> {
     arcade_mesh::canon::signed_bytes(h, UI_STRIP, b"")
 }

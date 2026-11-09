@@ -44,9 +44,7 @@ pub fn serve(node: Arc<Node>, o: Opts) {
 
 /// The cookie for /rpc: a fresh secret at each start, readable by this user only.
 pub fn write_cookie(home: &std::path::Path) -> std::io::Result<String> {
-    let mut b = [0u8; 32];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut b);
-    let v = format!("__cookie__:{}", hex::encode(b));
+    let v = format!("__cookie__:{}", arcade_mesh::random::hex(32));
     let p = home.join(".cookie");
     let _ = std::fs::remove_file(&p);
     use std::os::unix::fs::OpenOptionsExt;

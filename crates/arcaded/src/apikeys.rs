@@ -40,11 +40,7 @@ pub fn create(node: &Node, name: &str, perms: &[String], tip_limit: u64) -> Resu
             ps.push(perm.name());
         }
     }
-    let mut id = [0u8; 4];
-    let mut secret = [0u8; 16];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut id);
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut secret);
-    let (id, secret) = (hex::encode(id), hex::encode(secret));
+    let (id, secret) = (arcade_mesh::random::hex(4), arcade_mesh::random::hex(16));
     let rec = json!({"id": id, "name": name, "perms": ps, "tip_limit": tip_limit, "created": arcade_app::now(), "last_used": Value::Null,
                      "spent": {"day": today(), "sats": 0}, "hash": hex::encode(sha2::Sha256::digest(secret.as_bytes()))});
     node.app.store.write(|w| w.put(arcade_app::META, &key_of(&id), rec.to_string().as_bytes())).map_err(|e| e.to_string())?;
