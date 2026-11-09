@@ -214,7 +214,7 @@ fn who(node: &Node, origin: &str, member: &str, cred: Option<&Value>) -> Value {
 /// The operator plays as their wallet's address, vouched by a cert from its key; with no
 /// wallet to sign with, as a guest.
 fn my_player(node: &Node, st: &mut St) -> (String, Option<Value>) {
-    let me = hex::encode(node.identity.verifying_key().to_bytes());
+    let me = node.id_hex();
     let x = cert_expiry();
     match crate::msgsvc::sender_key(node) {
         Ok((address, _, sk)) => {
@@ -236,7 +236,7 @@ fn my_player(node: &Node, st: &mut St) -> (String, Option<Value>) {
 }
 
 fn my_id(node: &Node) -> String {
-    hex::encode(node.identity.verifying_key().to_bytes())
+    node.id_hex()
 }
 
 fn short_room(room: &str) -> String {

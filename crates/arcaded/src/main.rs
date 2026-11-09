@@ -174,7 +174,7 @@ fn main() {
     eprintln!(
         "arcaded: home {}, node {}, chain {}",
         home.display(),
-        hex::encode(node.identity.verifying_key().to_bytes()),
+        node.id_hex(),
         node.params.name
     );
 

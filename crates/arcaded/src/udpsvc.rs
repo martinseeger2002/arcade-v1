@@ -137,7 +137,7 @@ fn g() -> &'static Mutex<G> {
 }
 
 fn me(node: &Node) -> String {
-    hex::encode(node.identity.verifying_key().to_bytes())
+    node.id_hex()
 }
 
 fn short(id: &str) -> &str {

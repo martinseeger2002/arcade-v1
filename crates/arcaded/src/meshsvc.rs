@@ -74,7 +74,7 @@ fn share(node: &Node, link: &mut Link) -> Result<(), LinkError> {
 
 fn on_addrs(node: &Node, h: &Value) {
     let Some(list) = h["a"].as_array() else { return };
-    let me = hex::encode(node.identity.verifying_key().to_bytes());
+    let me = node.id_hex();
     for a in list.iter().take(50) {
         let (Some(host), Some(port), id) = (a["h"].as_str(), a["p"].as_u64(), a["id"].as_str().unwrap_or("")) else { continue };
         if id == me || port == 0 || port > 65535 || host.len() > 255 {
@@ -109,7 +109,7 @@ fn on_addrs(node: &Node, h: &Value) {
 /// Arcades that announced themselves on the home chain (MESH records): known peers, dialled.
 pub fn chain_announced(node: &Arc<Node>) -> usize {
     let c = node.params.chain_no;
-    let me = hex::encode(node.identity.verifying_key().to_bytes());
+    let me = node.id_hex();
     // The newest announcement per node key.
     let mut by_key: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for r in arcade_ledger::messages::rows(&node.chain, arcade_ledger::messages::MACHINE, c).unwrap_or_default() {

@@ -42,7 +42,7 @@ pub fn announced(node: &Node) -> Vec<(String, String)> {
 pub fn run(node: Arc<Node>) {
     std::thread::sleep(Duration::from_secs(20));
     loop {
-        let me = hex::encode(node.identity.verifying_key().to_bytes());
+        let me = node.id_hex();
         let linked: std::collections::BTreeSet<String> = node.links.lock().unwrap().values().map(|l| l.node_id.clone()).collect();
         let list = announced(&node);
         // A node with a direct address isn't dialed over wss as well (the original's order).

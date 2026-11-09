@@ -7,7 +7,7 @@ use serde_json::Value;
 /// Queue a signed welcome ask for `addr` (with the tag we want) to every mesh link.
 pub fn ask(node: &Node, addr: &str, tag: &str) -> Result<FaucetRequest, String> {
     let rec = arcade_mesh::welcome::ask(&node.identity, addr, tag, arcade_app::now());
-    let id = hex::encode(node.identity.verifying_key().to_bytes());
+    let id = node.id_hex();
     node.mesh_outbox.lock().unwrap().push(serde_json::json!({"t": "wl", "recs": [rec]}));
     let req = FaucetRequest {
         id: format!("{}:{addr}", node.params.net),
@@ -25,7 +25,7 @@ pub fn ask(node: &Node, addr: &str, tag: &str) -> Result<FaucetRequest, String> 
 
 /// A `wl` frame arrived: remember asks and payments; if someone paid our ask, record it.
 pub fn on_welcome(node: &Node, head: &Value) {
-    let me = hex::encode(node.identity.verifying_key().to_bytes());
+    let me = node.id_hex();
     let Some(recs) = head["recs"].as_array() else { return };
     for r in recs {
         if !arcade_mesh::welcome::verify(r) {
@@ -83,7 +83,7 @@ pub fn pay_asks(node: &Node) {
     if p.net != "test" || !node.app.has_wallet().unwrap_or(false) {
         return; // test coins only
     }
-    let me = hex::encode(node.identity.verifying_key().to_bytes());
+    let me = node.id_hex();
     let now = arcade_app::now();
     let day = now / 86_400;
     let paid_key = format!("welcome_paid:{day}");

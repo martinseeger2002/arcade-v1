@@ -57,7 +57,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
                 "tags": {"indexed_to": indexed_to, "count": tag_count, "names_digest": digest},
                 "profiles": index::profile_count(&node.chain, c).unwrap_or(0),
                 "mesh": {"links": node.links.lock().unwrap().len(), "tips": mesh},
-                "node_id": hex::encode(node.identity.verifying_key().to_bytes()),
+                "node_id": node.id_hex(),
                 "wallet": node.app.has_wallet().unwrap_or(false),
             }))
         }

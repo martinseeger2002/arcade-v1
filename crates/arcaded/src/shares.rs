@@ -54,7 +54,7 @@ pub fn copies() -> usize {
 }
 
 fn me(node: &Node) -> String {
-    hex::encode(node.identity.verifying_key().to_bytes())
+    node.id_hex()
 }
 
 fn score(id: &str, chain: &str, kind: &str, unit: u64) -> u64 {

@@ -96,6 +96,11 @@ pub struct Node {
 
 
 impl Node {
+    /// Our node id: the Ed25519 identity key in hex.
+    pub fn id_hex(&self) -> String {
+        hex::encode(self.identity.verifying_key().to_bytes())
+    }
+
     /// Params of a chain this arcade has (home or installed).
     pub fn chain_params(&self, key: &str) -> Option<&'static ChainParams> {
         if key == self.params.key {
