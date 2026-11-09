@@ -186,6 +186,8 @@ cmds! {
     "share.held" Public "" "V1.0 copies of chain parts held here (blocks, coins, ord, tokens, names, maps, ledger, profiles, messages): id, height, rows, size; and those being made.";
     "share.offers" Public "key" "V1.0 copies other arcades hold for a chain, per part: id, height, how many made it themselves and how many hold it.";
     "share.fetch" Admin "key, fam, id?" "Fetch a part's copy from every arcade holding it at once: the newest one 2 or more arcades made themselves (or the id given). Pieces are checked against the manifest; the copy is then held and served here too.";
+    "share.install" Admin "key" "Install an added chain (or the home chain) from V1.0 copies: its blocks and coins made by 2 or more arcades at the same checkpoint, fetched from every holder and taken in as they come (no replay); the coins are trusted until re-checked.";
+    "share.install_cancel" Admin "key" "Stop installing a chain from copies.";
     "share.cancel" Admin "key, fam" "Stop fetching a copy (its pieces are deleted).";
     "share.auto" Admin "key, on" "Make copies of every part of a chain at each checkpoint (about a day of its blocks) while at the tip; off by default (copies take disk).";
     "share.make" Admin "key, fam" "Make a V1.0 copy of one part of an installed chain now, from one frozen view of the database (in the background; see share.held).";

@@ -31,6 +31,9 @@ const SILENT: Duration = Duration::from_secs(900);
 const BUSY_PAUSE: Duration = Duration::from_secs(10);
 const HEARD_FRESH: u64 = 600;
 const MAX_MANIFEST: usize = 64 << 20;
+/// Pieces fetched ahead of an import (about 512 MB): a fast swarm doesn't fill the disk
+/// with pieces waiting for the importer (docs/V1SHARE.md §5.0).
+const WINDOW: u64 = 64;
 
 /// Makers (arcades that made the copy from their own rows) needed before a copy is used:
 /// Martin's rule, 2 or more. Tests may lower it (ARCADE_COPY_MAKERS).
@@ -59,6 +62,11 @@ struct Job {
     started: u64,
     got: u64,
     rate: VecDeque<(Instant, u64)>,
+    /// Kept and served when complete (a plain fetch), or consumed by an import (deleted as
+    /// they are taken in).
+    keep: bool,
+    /// Import: pieces below this are taken in already.
+    used: u64,
 }
 
 const MANIFEST: u64 = u64::MAX;
@@ -257,6 +265,10 @@ fn job_dir(node: &Node, net: &str, fam: &str, id: &str) -> PathBuf {
 /// share.fetch: fetch a family's copy from every arcade holding it: the newest one at least
 /// min_makers arcades made themselves (or the id given).
 pub fn start(node: &Node, key: &str, fam: &str, id: Option<String>) -> Result<Value, String> {
+    start_job(node, key, fam, id, true)
+}
+
+pub fn start_job(node: &Node, key: &str, fam: &str, id: Option<String>, keep: bool) -> Result<Value, String> {
     let p = arcade_chain::params::by_key(key).ok_or_else(|| format!("unknown chain {key}"))?;
     if !v1copy::FAMILIES.contains(&fam) {
         return Err(format!("family is one of {}", v1copy::FAMILIES.join(", ")));
@@ -296,7 +308,7 @@ pub fn start(node: &Node, key: &str, fam: &str, id: Option<String>) -> Result<Va
     }
     s.jobs.insert(jk, Job {
         net: p.net.to_string(), fam: fam.to_string(), id: id.clone(), dir, manifest, done, inflight: HashMap::new(), holders: HashMap::new(),
-        phase: "fetching".into(), detail: String::new(), started: arcade_app::now(), got: 0, rate: VecDeque::new(),
+        phase: "fetching".into(), detail: String::new(), started: arcade_app::now(), got: 0, rate: VecDeque::new(), keep, used: 0,
     });
     Ok(json!({"fetching": true, "net": p.net, "fam": fam, "id": id, "cp": cp, "makers": makers.len(), "holders": holders.len()}))
 }
@@ -374,7 +386,8 @@ fn schedule(s: &mut State, peer: &str) {
                     let n = m["pieces"].as_array().map(|a| a.len()).unwrap_or(0) as u64;
                     let room = IN_FLIGHT.saturating_sub(mine);
                     // Spread over the copy: each holder starts where the others aren't.
-                    let todo: Vec<u64> = (0..n).filter(|i| !j.done.contains(i) && !j.inflight.contains_key(i)).take(room).collect();
+                    let top = if j.keep { n } else { (j.used + WINDOW).min(n) };
+                    let todo: Vec<u64> = (j.used..top).filter(|i| !j.done.contains(i) && !j.inflight.contains_key(i)).take(room).collect();
                     for i in todo {
                         j.inflight.insert(i, (peer.to_string(), now));
                         new.push(mk(i));
@@ -467,6 +480,11 @@ fn got_piece(j: &mut Job, i: u64, data: &[u8]) -> Result<(), String> {
         j.rate.pop_front();
     }
     let n = m["pieces"].as_array().map(|a| a.len()).unwrap_or(0);
+    if j.done.len() == n && !j.keep {
+        j.phase = "fetched".into();
+        j.detail = format!("all {n} pieces in");
+        return Ok(());
+    }
     if j.done.len() == n {
         // Complete: it becomes a copy held here (re-seeded under the same id, made: false).
         let to = j.dir.parent().unwrap().join(&j.id);
@@ -486,4 +504,57 @@ fn got_piece(j: &mut Job, i: u64, data: &[u8]) -> Result<(), String> {
         j.detail = format!("all {n} pieces in, from {} arcades", j.holders.iter().filter(|(_, h)| h.last_answer.is_some() && !h.gone).count());
     }
     Ok(())
+}
+
+// ---------------- feeding an import ----------------
+
+/// The job key of a family's fetch ("net/fam").
+pub fn job_key(net: &str, fam: &str) -> String {
+    format!("{net}/{fam}")
+}
+
+/// A fetch's manifest, once it is in.
+pub fn job_manifest(jk: &str) -> Option<Value> {
+    st().jobs.get(jk).and_then(|j| j.manifest.clone())
+}
+
+/// Piece `i` of a fetch, when it is in: its file.
+pub fn piece_ready(jk: &str, i: u64) -> Option<PathBuf> {
+    let s = st();
+    let j = s.jobs.get(jk)?;
+    j.done.contains(&i).then(|| j.dir.join(format!("p{i:06}")))
+}
+
+/// The importer has taken piece `i` in: the window moves on and the piece is deleted.
+pub fn used(jk: &str, i: u64) {
+    let mut s = st();
+    if let Some(j) = s.jobs.get_mut(jk) {
+        j.used = j.used.max(i + 1);
+        if !j.keep {
+            let _ = std::fs::remove_file(j.dir.join(format!("p{i:06}")));
+        }
+    }
+}
+
+/// Whether a fetch is still going (not cancelled).
+pub fn alive(jk: &str) -> bool {
+    st().jobs.contains_key(jk)
+}
+
+/// An import is done with its fetch: the job and its folder go.
+pub fn finish(jk: &str) {
+    if let Some(j) = st().jobs.remove(jk) {
+        if !j.keep {
+            let _ = std::fs::remove_dir_all(&j.dir);
+        }
+    }
+}
+
+/// The copy an import would take for a family: (id, cp, makers).
+pub fn best(net: &str, fam: &str) -> Option<(String, u64, usize)> {
+    offers(net, fam)
+        .into_iter()
+        .filter(|(_, (m, _, _, fmt))| m.len() >= min_makers() && *fmt == v1copy::FMT as u64)
+        .max_by_key(|(_, (m, h, cp, _))| (*cp, m.len(), h.len()))
+        .map(|(id, (m, _, cp, _))| (id, cp, m.len()))
 }

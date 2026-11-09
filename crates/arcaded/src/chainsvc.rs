@@ -34,6 +34,10 @@ fn mesh_bootstrap(node: &Node, syncer: &Syncer) {
             continue;
         }
         loop {
+            // A copy is being taken in (docs/V1SHARE.md): leave the chain to it.
+            if crate::coreboot::held(p.key) {
+                return;
+            }
             let h = syncer.sync_headers_once(&mut src);
             let b = syncer.sync_blocks(&mut src, 5000, 250);
             match (h, b) {
@@ -77,6 +81,11 @@ pub fn run(node: Arc<Node>) {
             continue;
         }
         loop {
+            // A copy is being taken in (docs/V1SHARE.md): stand still until it is.
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            if crate::coreboot::park(p.key, &stop, &|s| set_state(&node, s)) {
+                continue;
+            }
             // Headers, then blocks, then queued transactions, then the tag index.
             let mut new = 0;
             match syncer.sync_headers_once(&mut peer) {

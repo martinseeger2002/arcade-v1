@@ -94,7 +94,7 @@ fn best_height(node: &Node, c: u16) -> u32 {
 }
 
 /// Our own headers up to `h` (each checked as any header sync checks it).
-fn headers_to(node: &Node, p: &'static ChainParams, h: u32, cancel: &AtomicBool, note: &dyn Fn(String)) -> Result<(), String> {
+pub(crate) fn headers_to(node: &Node, p: &'static ChainParams, h: u32, cancel: &AtomicBool, note: &dyn Fn(String)) -> Result<(), String> {
     let c = p.chain_no;
     let syncer = Syncer::new(&node.chain, p);
     for _round in 0..5 {

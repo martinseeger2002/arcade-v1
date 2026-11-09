@@ -274,6 +274,8 @@ fn main() {
         ["chain", "share", "fetch", k, f] => json!({"cmd": "share.fetch", "key": k, "fam": f}),
         ["chain", "share", "fetch", k, f, id] => json!({"cmd": "share.fetch", "key": k, "fam": f, "id": id}),
         ["chain", "share", "cancel", k, f] => json!({"cmd": "share.cancel", "key": k, "fam": f}),
+        ["chain", "share", "install", k] => json!({"cmd": "share.install", "key": k}),
+        ["chain", "share", "install", k, "cancel"] => json!({"cmd": "share.install_cancel", "key": k}),
         ["chain", "share", "held"] => json!({"cmd": "share.held"}),
         ["chain", "share", "make", k, f] => json!({"cmd": "share.make", "key": k, "fam": f}),
         ["chain", "index", "copy", "status"] => json!({"cmd": "chains.index_copy_status"}),

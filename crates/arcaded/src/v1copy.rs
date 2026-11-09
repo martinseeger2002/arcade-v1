@@ -335,7 +335,7 @@ pub fn start_make(node: std::sync::Arc<Node>, key: &str, fam: &str) -> Result<Va
 
 /// The copies held here: per chain and family, its manifest summary.
 pub fn held(node: &Node) -> Value {
-    json!({"held": held_list(node), "making": making().iter().cloned().collect::<Vec<_>>(), "fetching": crate::vxshare::status(), "fmt": FMT})
+    json!({"held": held_list(node), "making": making().iter().cloned().collect::<Vec<_>>(), "fetching": crate::vxshare::status(), "installing": crate::v1import::status(), "fmt": FMT})
 }
 
 pub(crate) fn held_list(node: &Node) -> Vec<Value> {

@@ -360,7 +360,7 @@ impl ChainDb {
         let c = params.chain_no;
         self.flush_coins(c)?;
         let tip = self.tip(c)?.ok_or_else(|| err("connect genesis first"))?;
-        let target = *path.last().ok_or_else(|| err("nothing to import"))?;
+        path.last().ok_or_else(|| err("nothing to import"))?;
         if tip.height + path.len() as u32 != to {
             return Err(err(format!("path covers {} blocks above {}, not up to {to}", path.len(), tip.height)));
         }
@@ -403,9 +403,91 @@ impl ChainDb {
             })?;
             note(format!("coin set: {} coins read", rep.read));
         }
+        let sorted = sorter.finish()?;
+        self.finish_coin_import(params, path, to, tip, sorted, rep, trusted, tmp, stop, note)
+    }
+
+    /// Take in a coin set given by position (a V1.0 copy, docs/V1SHARE.md §2): each coin as
+    /// (height, tx position, vout, value, coinbase, script). Heights at or below our tip use
+    /// our own blocks; above it, `path`'s (stored already, as for import_coins).
+    #[allow(clippy::too_many_arguments)]
+    pub fn import_coins_at(
+        &self,
+        params: &ChainParams,
+        path: &[Hash256],
+        to: u32,
+        next: &mut dyn FnMut() -> std::result::Result<Option<(u32, u32, u32, u64, bool, Vec<u8>)>, String>,
+        trusted: &str,
+        tmp: &Path,
+        stop: &AtomicBool,
+        note: Note,
+    ) -> Result<CoinImport> {
+        let c = params.chain_no;
+        self.flush_coins(c)?;
+        let tip = self.tip(c)?.ok_or_else(|| err("connect genesis first"))?;
+        if tip.height + path.len() as u32 != to {
+            return Err(err(format!("path covers {} blocks above {}, not up to {to}", path.len(), tip.height)));
+        }
+        if !path.is_empty() && self.header(c, &path[0])?.map(|r| r.header.prev) != Some(tip.hash) {
+            return Err(err("the copy's blocks don't extend our tip"));
+        }
+        // Block number of every height 0..=to.
+        let mut bs: Vec<u32> = Vec::with_capacity(to as usize + 1);
+        self.store.read(|r| {
+            r.for_each_prefix(HEIGHT, &k_chain(c), |k, v| {
+                if be_u32(k, 2) as usize == bs.len() && bs.len() as u32 <= tip.height {
+                    bs.push(be_u32(v, 32));
+                }
+                Ok((bs.len() as u32) <= tip.height)
+            })
+        })?;
+        if bs.len() as u32 != tip.height + 1 {
+            return Err(err("our best chain has a gap"));
+        }
+        for h in path {
+            let b = self.header(c, h)?.map(|r| r.b).filter(|b| *b != 0).ok_or_else(|| err(format!("block {h} is not stored")))?;
+            bs.push(b);
+        }
+        let mut sorter = Sorter::new(tmp, &format!("coins-{c}"))?;
+        let mut rep = CoinImport::default();
+        while let Some((h, p, vout, value, coinbase, script)) = next().map_err(err)? {
+            if rep.read % 100_000 == 0 {
+                if stop.load(Ordering::Relaxed) {
+                    return Err(err("stopped"));
+                }
+                if rep.read % 1_000_000 == 0 {
+                    note(format!("coin set: {} coins read", rep.read));
+                }
+            }
+            rep.read += 1;
+            rep.read_amount += value as u128;
+            let b = *bs.get(h as usize).ok_or_else(|| err(format!("a coin at height {h}, above the copy's {to}")))?;
+            rep.kept += 1;
+            rep.kept_amount += value as u128;
+            sorter.push(&k_pos(c, b, p, vout), &encode_coin(value, h, coinbase, &script))?;
+        }
+        let sorted = sorter.finish()?;
+        self.finish_coin_import(params, path, to, tip, sorted, rep, trusted, tmp, stop, note)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_coin_import(
+        &self,
+        params: &ChainParams,
+        path: &[Hash256],
+        to: u32,
+        tip: Tip,
+        mut sorted: Sorted,
+        mut rep: CoinImport,
+        trusted: &str,
+        tmp: &Path,
+        stop: &AtomicBool,
+        note: Note,
+    ) -> Result<CoinImport> {
+        let c = params.chain_no;
+        let target = path.last().copied().unwrap_or(tip.hash);
         // 2. Only the differences are written. From here until the tip moves the coins are
         // half old, half new: IMPORTING says so (the arcade holds the chain and redoes it).
-        let mut sorted = sorter.finish()?;
         self.store.write(|w| {
             let mut v = target.0.to_vec();
             v.extend_from_slice(&to.to_be_bytes());

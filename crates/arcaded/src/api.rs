@@ -501,6 +501,8 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "share.held" => Ok(crate::v1copy::held(node)),
         "share.offers" => crate::vxshare::offers_json(node, &s("key").ok_or("key required")?),
         "share.fetch" => crate::vxshare::start(node, &s("key").ok_or("key required")?, &s("fam").ok_or("fam required")?, s("id")),
+        "share.install" => crate::v1import::start(node.self_arc(), &s("key").ok_or("key required")?),
+        "share.install_cancel" => crate::v1import::cancel(&s("key").ok_or("key required")?),
         "share.cancel" => crate::vxshare::cancel(node, &s("key").ok_or("key required")?, &s("fam").ok_or("fam required")?),
         "share.auto" => crate::v1copy::set_auto(node, &s("key").ok_or("key required")?, req["on"] == true),
         "share.make" => crate::v1copy::start_make(node.self_arc(), &s("key").ok_or("key required")?, &s("fam").ok_or("fam required (blocks, coins, ord, ...)")?),
