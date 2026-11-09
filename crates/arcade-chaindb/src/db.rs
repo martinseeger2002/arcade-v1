@@ -32,7 +32,7 @@ pub struct HeaderRec {
 }
 
 impl HeaderRec {
-    fn index_value(&self) -> Vec<u8> {
+    pub(crate) fn index_value(&self) -> Vec<u8> {
         let mut v = Vec::with_capacity(9);
         v.extend_from_slice(&self.height.to_be_bytes());
         v.extend_from_slice(&self.b.to_be_bytes());
@@ -88,7 +88,7 @@ pub fn is_pruned(raw: &[u8]) -> bool {
 }
 
 /// Txid of a stored transaction row (raw or pruned stub).
-fn row_txid(raw: &[u8], params: &ChainParams) -> Result<Hash256> {
+pub(crate) fn row_txid(raw: &[u8], params: &ChainParams) -> Result<Hash256> {
     if is_pruned(raw) {
         return Ok(Hash256(raw[1..33].try_into().unwrap()));
     }
@@ -154,7 +154,7 @@ fn expand_script(r: &[u8], from_tx: impl FnOnce() -> Result<Vec<u8>>) -> Result<
     })
 }
 
-fn encode_coin(value: u64, height: u32, coinbase: bool, script: &[u8]) -> Vec<u8> {
+pub(crate) fn encode_coin(value: u64, height: u32, coinbase: bool, script: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(13 + 22);
     v.extend_from_slice(&value.to_le_bytes());
     v.extend_from_slice(&height.to_le_bytes());
@@ -163,7 +163,7 @@ fn encode_coin(value: u64, height: u32, coinbase: bool, script: &[u8]) -> Vec<u8
     v
 }
 
-fn block_meta(b: &Block) -> Vec<u8> {
+pub(crate) fn block_meta(b: &Block) -> Vec<u8> {
     let mut v = Vec::new();
     v.extend_from_slice(&b.header.encode());
     let aux = b.auxpow.as_ref().map(|a| a.raw.as_slice()).unwrap_or(&[]);
@@ -233,7 +233,7 @@ impl Rd for WriteTxn<'_> {
     }
 }
 
-fn header_rec<R: Rd>(r: &R, c: u16, hash: &Hash256) -> Result<Option<HeaderRec>> {
+pub(crate) fn header_rec<R: Rd>(r: &R, c: u16, hash: &Hash256) -> Result<Option<HeaderRec>> {
     let Some(ix) = r.get(HEADERS, &k_header(c, &hash.0))? else { return Ok(None) };
     let (height, b, status) = (be_u32(&ix, 0), be_u32(&ix, 4), ix[8]);
     let d = r
@@ -276,7 +276,7 @@ pub(crate) fn coin_at<R: Rd>(r: &R, params: &ChainParams, b: u32, p: u32, vout: 
     decode_coin(r, params, b, p, vout, &v).map(Some)
 }
 
-fn decode_coin<R: Rd>(r: &R, params: &ChainParams, b: u32, p: u32, vout: u32, v: &[u8]) -> Result<Coin> {
+pub(crate) fn decode_coin<R: Rd>(r: &R, params: &ChainParams, b: u32, p: u32, vout: u32, v: &[u8]) -> Result<Coin> {
     let c = params.chain_no;
     let script = expand_script(&v[13..], || {
         let raw = r.get(BLOCK_TX, &k_block_tx(c, b, p))?.ok_or(StoreError::Corrupt { table: BLOCK_TX, why: "coin's tx missing" })?;
@@ -1305,18 +1305,18 @@ impl ChainDb {
     }
 }
 
-fn encode_tip(t: &Tip) -> Vec<u8> {
+pub(crate) fn encode_tip(t: &Tip) -> Vec<u8> {
     let mut v = t.hash.0.to_vec();
     v.extend_from_slice(&t.height.to_be_bytes());
     v.extend_from_slice(&t.b.to_be_bytes());
     v
 }
 
-fn decode_tip(v: &[u8]) -> Tip {
+pub(crate) fn decode_tip(v: &[u8]) -> Tip {
     Tip { hash: Hash256(v[..32].try_into().unwrap()), height: be_u32(v, 32), b: be_u32(v, 36) }
 }
 
-fn next_b(w: &WriteTxn, c: u16) -> Result<u32> {
+pub(crate) fn next_b(w: &WriteTxn, c: u16) -> Result<u32> {
     let k = k_state(c, "next_b");
     let n = w.get(STATE, &k)?.map(|v| be_u32(&v, 0)).unwrap_or(1);
     w.put(STATE, &k, &(n + 1).to_be_bytes())?;
