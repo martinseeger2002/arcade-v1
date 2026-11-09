@@ -204,6 +204,8 @@ pub static PEPECOIN_TEST: ChainParams = ChainParams {
     fixed_peers: &[
         "3.216.226.159:44874",
         "34.198.62.248:44874",
+        "195.201.39.118:44874",
+        "52.55.155.188:44874",
         "135.181.168.83:44874",
         "207.244.232.43:44874",
         "147.124.204.26:44874",
@@ -238,8 +240,22 @@ pub static PEPECOIN_MAIN: ChainParams = ChainParams {
     wif_version: 0x9e,
     bip44_coin_type: 3,
     protocol_version: 70016,
-    dns_seeds: &[],
-    fixed_peers: &[],
+    // From Pepecoin Core (pepecoinppc/pepecoin master, chainparams.cpp and chainparamsseeds.h)
+    // and the nodes Strawberry's pepecoind was connected to on 2026-11-09. No user-agent rule:
+    // Pepecoin Core only sanitizes subver (live nodes say /pepetoshi:1.1.0/).
+    dns_seeds: &["seeds.pepecoin.org", "seeds.pepeblocks.com"],
+    fixed_peers: &[
+        "168.119.88.177:33874",
+        "213.197.35.243:33874",
+        "93.198.179.79:33874",
+        "3.216.226.159:33874",
+        "207.244.232.43:33874",
+        "128.140.5.29:33874",
+        "144.76.222.140:33874",
+        "213.181.115.153:33874",
+        "64.227.69.247:33874",
+        "3.73.126.174:33874",
+    ],
     checkpoints: &[],
     coinbase_maturity: 240,
     index_start: 1_208_000,
@@ -592,6 +608,19 @@ fn by_key_exact(key: &str) -> Option<&'static ChainParams> {
 mod tests {
     use super::*;
     use crate::pow::{bits_from_target, pow_hash};
+
+    /// Every chain must have somewhere to find P2P nodes: a DNS seed or a fixed node (Pepecoin
+    /// mainnet once had neither, so it could only follow through other arcades' Core nodes).
+    #[test]
+    fn every_chain_can_find_p2p_peers() {
+        for p in ALL_CHAINS {
+            assert!(!p.dns_seeds.is_empty() || !p.fixed_peers.is_empty(), "{} has no DNS seeds and no fixed peers", p.name);
+            for a in p.fixed_peers {
+                let port = a.rsplit(':').next().and_then(|x| x.parse::<u16>().ok());
+                assert_eq!(port, Some(p.p2p_port), "{}: fixed peer {a} isn't on the chain's P2P port", p.name);
+            }
+        }
+    }
 
     #[test]
     fn genesis_headers_hash_to_genesis() {
