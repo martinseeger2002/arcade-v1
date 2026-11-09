@@ -236,7 +236,9 @@ impl ChainDb {
         let failed: Mutex<Option<arcade_store::StoreError>> = Mutex::new(None);
         const SPAN: u32 = 500;
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 8);
-        let work = || -> Result<()> {
+        // The block each thread is reading now (0 = between spans), shown in the progress note.
+        let at: Vec<std::sync::atomic::AtomicU32> = (0..threads).map(|_| std::sync::atomic::AtomicU32::new(0)).collect();
+        let work = |slot: usize| -> Result<()> {
             loop {
                 if stop.load(Ordering::Relaxed) || failed.lock().unwrap().is_some() {
                     return Ok(());
@@ -250,6 +252,9 @@ impl ChainDb {
                 let mut bytes = 0usize;
                 self.store.read(|r| {
                     for h in from..=to {
+                        at[slot].store(h, Ordering::Relaxed);
+                        let t0 = std::time::Instant::now();
+                        let (mut n_tx, mut n_in, mut prev_bytes) = (0usize, 0usize, 0usize);
                         let Some(hv) = r.get(HEIGHT, &k_height(c, h))? else { continue };
                         let b = be_u32(&hv, 32);
                         for (k, raw) in r.scan_prefix(BLOCK_TX, &k_block(c, b))? {
@@ -258,6 +263,8 @@ impl ChainDb {
                             }
                             let p = be_u32(&k, k.len() - 4);
                             let tx = arcade_chain::Tx::parse_with(&raw, &params.format).map_err(|e| arcade_store::StoreError::Other(e.to_string()))?;
+                            n_tx += 1;
+                            n_in += tx.inputs.len();
                             let t12 = tx.txid.t12();
                             let mut add = |i: usize, key: Vec<u8>, val: &[u8]| {
                                 let r = record(&key, val);
@@ -273,14 +280,14 @@ impl ChainDb {
                                     if crate::db::is_pruned(&fraw) {
                                         return Err(arcade_store::StoreError::Other(format!("block {h}: a spent coin's transaction is not stored here (Shared storage)")));
                                     }
-                                    let ftx = arcade_chain::Tx::parse_with(&fraw, &params.format).map_err(|e| arcade_store::StoreError::Other(e.to_string()))?;
-                                    let Some(out) = ftx.outputs.get(inp.prevout.vout as usize) else { continue };
-                                    let sid = script_id(&out.script_pubkey);
+                                    prev_bytes += fraw.len();
+                                    let Some((out_value, out_script)) = arcade_chain::Tx::output_at(&fraw, &params.format, inp.prevout.vout).map_err(|e| arcade_store::StoreError::Other(e.to_string()))? else { continue };
+                                    let sid = script_id(out_script);
                                     let mut sp = b.to_be_bytes().to_vec();
                                     sp.extend_from_slice(&p.to_be_bytes());
                                     sp.extend_from_slice(&(vin as u32).to_be_bytes());
                                     add(1, k_pos(c, pb, pp, inp.prevout.vout), &sp);
-                                    add(0, k_hist(c, &sid, h, &t12), &hist_val(0, out.value));
+                                    add(0, k_hist(c, &sid, h, &t12), &hist_val(0, out_value));
                                 }
                             }
                             for out in &tx.outputs {
@@ -290,20 +297,27 @@ impl ChainDb {
                                 add(0, k_hist(c, &script_id(&out.script_pubkey), h, &t12), &hist_val(out.value, 0));
                             }
                         }
+                        let took = t0.elapsed();
+                        if took > std::time::Duration::from_secs(2) {
+                            eprintln!("addrbuild: block {h} took {:.1}s: {n_tx} txs, {n_in} inputs, {:.1} MB of spent coins' transactions parsed", took.as_secs_f64(), prev_bytes as f64 / 1e6);
+                        }
                     }
                     Ok(())
                 })?;
+                at[slot].store(0, Ordering::Relaxed);
                 push(&acc, local, bytes, (to - from + 1) as u64)?;
             }
         };
         let mut last_note = std::time::Instant::now();
         std::thread::scope(|sc| {
-            let hs: Vec<_> = (0..threads).map(|_| sc.spawn(|| if let Err(e) = work() { *failed.lock().unwrap() = Some(e) })).collect();
+            let (work, failed) = (&work, &failed);
+            let hs: Vec<_> = (0..threads).map(|i| sc.spawn(move || if let Err(e) = work(i) { *failed.lock().unwrap() = Some(e) })).collect();
             while hs.iter().any(|h| !h.is_finished()) {
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 if last_note.elapsed() > std::time::Duration::from_secs(2) {
                     let done = acc.lock().unwrap().done;
-                    note(format!("building addresses: step 1 of 4, reading the stored blocks (block {} of {upto})", done.min(upto as u64)));
+                    let now: Vec<String> = at.iter().map(|a| a.load(Ordering::Relaxed)).filter(|h| *h > 0).map(|h| h.to_string()).collect();
+                    note(format!("building addresses: step 1 of 4, reading the stored blocks (block {} of {upto}; threads at {})", done.min(upto as u64), now.join(", ")));
                     last_note = std::time::Instant::now();
                 }
             }

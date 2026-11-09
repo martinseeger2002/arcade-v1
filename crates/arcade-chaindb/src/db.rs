@@ -667,9 +667,10 @@ impl ChainDb {
                             if is_pruned(&praw) {
                                 return Err(other("an earlier block's body is held by other arcades (pruned here)"));
                             }
-                            let ptx = Tx::parse_with(&praw, &params.format).map_err(other)?;
-                            let o = ptx.outputs.get(i.prevout.vout as usize).ok_or_else(|| other("bad prevout"))?;
-                            pv.push(Prevout { value: o.value, script: o.script_pubkey.clone() });
+                            // Only the spent output: the previous tx can be a large inscription,
+                            // and parsing (and hashing) all of it per input is the slow part.
+                            let (value, script) = Tx::output_at(&praw, &params.format, i.prevout.vout).map_err(other)?.ok_or_else(|| other("bad prevout"))?;
+                            pv.push(Prevout { value, script: script.to_vec() });
                         }
                     }
                     prevouts.push(pv);
