@@ -543,6 +543,8 @@ impl ChainDb {
                     if page.is_empty() {
                         w.del(STATE, &k_state(c, PENDING))?;
                         w.del(STATE, &k_state(c, TXS_PENDING))?;
+                        // Every tx row is in TXS now: the runs go (txruns).
+                        crate::txruns::drop_all(w, c)?;
                     }
                     return Ok(false);
                 }

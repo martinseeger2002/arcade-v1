@@ -28,6 +28,8 @@ pub const MEMPOOL: &str = "core.v1.mempool"; // C|T12 -> first_seen u64 LE | raw
 pub const MEMPOOL_SPENDS: &str = "core.v1.mempool_spends"; // C|T12|vout -> spending txid (32)
 /// Address rows put off while catching up (see addrbuild): C|height|seq -> tag u8 | klen u16 BE | key | value.
 pub const ADDR_LOG: &str = "core.v1.addr_log";
+/// The tx index in sorted runs while catching up (txruns): C|run u32|T12|B|P -> "".
+pub const TXS_RUNS: &str = "core.v1.txs_runs";
 
 static TABLES: &[TableDef] = &[
     TableDef::plain(HEADERS),
@@ -45,6 +47,7 @@ static TABLES: &[TableDef] = &[
     TableDef::plain(MEMPOOL),
     TableDef::plain(MEMPOOL_SPENDS),
     TableDef::plain(ADDR_LOG),
+    TableDef::plain(TXS_RUNS),
 ];
 
 fn add_addr_log(_w: &arcade_store::WriteTxn) -> arcade_store::Result<()> {

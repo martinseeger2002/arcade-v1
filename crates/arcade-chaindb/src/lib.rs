@@ -9,6 +9,7 @@ pub mod db;
 pub mod indexer;
 pub mod schema;
 pub mod sync;
+pub mod txruns;
 pub mod undo;
 
 pub use db::{ChainDb, Coin, HeaderRec, Tip};
