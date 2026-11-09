@@ -521,64 +521,10 @@ fn unpack_pub(p: &[u8]) -> Option<Frame> {
     Some(Frame { head, blob: p[i..].to_vec() })
 }
 
-/// Python's json.dumps(v, separators=(",", ":"), sort_keys=True): sorted keys, compact, and
-/// non-ASCII escaped as \uXXXX (ensure_ascii). What the original signs.
+/// Python's json.dumps(v, separators=(",", ":"), sort_keys=True) with ensure_ascii: what the
+/// original signs. One implementation (crate::canon); this is its byte form.
 pub fn canonical(v: &Value) -> Vec<u8> {
-    fn put(v: &Value, o: &mut String) {
-        match v {
-            Value::Object(m) => {
-                let mut ks: Vec<&String> = m.keys().collect();
-                ks.sort();
-                o.push('{');
-                for (n, k) in ks.iter().enumerate() {
-                    if n > 0 {
-                        o.push(',');
-                    }
-                    put_str(k, o);
-                    o.push(':');
-                    put(&m[*k], o);
-                }
-                o.push('}');
-            }
-            Value::Array(a) => {
-                o.push('[');
-                for (n, x) in a.iter().enumerate() {
-                    if n > 0 {
-                        o.push(',');
-                    }
-                    put(x, o);
-                }
-                o.push(']');
-            }
-            Value::String(s) => put_str(s, o),
-            other => o.push_str(&other.to_string()),
-        }
-    }
-    fn put_str(s: &str, o: &mut String) {
-        o.push('"');
-        for ch in s.chars() {
-            match ch {
-                '"' => o.push_str("\\\""),
-                '\\' => o.push_str("\\\\"),
-                '\n' => o.push_str("\\n"),
-                '\r' => o.push_str("\\r"),
-                '\t' => o.push_str("\\t"),
-                '\u{8}' => o.push_str("\\b"),
-                '\u{c}' => o.push_str("\\f"),
-                c if (c as u32) < 0x20 || (c as u32) > 0x7f => {
-                    let mut buf = [0u16; 2];
-                    for u in c.encode_utf16(&mut buf) {
-                        o.push_str(&format!("\\u{:04x}", u));
-                    }
-                }
-                c => o.push(c),
-            }
-        }
-        o.push('"');
-    }
-    let mut o = String::new();
-    put(v, &mut o);
-    o.into_bytes()
+    crate::canon::canonical(v).into_bytes()
 }
 
 #[cfg(test)]
@@ -592,6 +538,8 @@ mod pub_tests {
             String::from_utf8(canonical(&v)).unwrap(),
             r#"{"a":"h\u00e9\n\"x\"","b":1,"c":[true,null,{"y":2,"z":"\ud83d\ude00"}]}"#
         );
+        // Python: json.dumps("a\x7fb") == '"a\\u007fb"' (DEL is escaped too).
+        assert_eq!(String::from_utf8(canonical(&json!("a\u{7f}b"))).unwrap(), r#""a\u007fb""#);
     }
 
     #[test]
