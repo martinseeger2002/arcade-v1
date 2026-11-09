@@ -940,7 +940,7 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
                 last_balance = std::time::Instant::now();
             }
             let tip = node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height).unwrap_or(0);
-            // At the network's tip: a checkpoint copy of every part (docs/V1SHARE.md §3).
+            // At the network's tip: copies another arcade asked for at this height (docs/V1SHARE.md §3).
             if b > 0 && tip >= run.peer_tip.load(Ordering::Relaxed) {
                 crate::v1copy::checkpoint(&node, p, tip, crate::v1copy::families_of(&run.mode, &run.indexes));
             }

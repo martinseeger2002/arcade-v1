@@ -42,15 +42,6 @@ pub fn status() -> Value {
 /// share.install: take a chain in from V1.0 copies (blocks and coins) made by 2 or more arcades.
 pub fn start(node: Arc<Node>, key: &str) -> Result<Value, String> {
     let p = node.chain_params(key).ok_or_else(|| format!("{key} is not installed here (add it first)"))?;
-    let (bid, bcp, bm) = vxshare::best(p.net, "blocks").ok_or("no blocks copy made by 2 or more arcades is offered yet")?;
-    let (cid, ccp, cm) = vxshare::best(p.net, "coins").ok_or("no coins copy made by 2 or more arcades is offered yet")?;
-    if bcp != ccp {
-        return Err(format!("the newest blocks copy is at {bcp} and the newest coins copy at {ccp}; they must be at the same height"));
-    }
-    let tip = node.chain.tip(p.chain_no).map_err(|e| e.to_string())?.map(|t| t.height as u64).unwrap_or(0);
-    if tip >= bcp {
-        return Err(format!("{} is at {tip} here already, at or past the copies' {bcp}", p.name));
-    }
     let cancel = Arc::new(AtomicBool::new(false));
     {
         let mut j = jobs();
@@ -59,11 +50,10 @@ pub fn start(node: Arc<Node>, key: &str) -> Result<Value, String> {
         }
         j.insert(p.key.to_string(), Install { phase: "starting".into(), detail: String::new(), started: arcade_app::now(), cancel: cancel.clone(), rows: 0, rows_rate: 0.0 });
     }
-    let (b2, c2) = (bid.clone(), cid.clone());
     std::thread::Builder::new()
         .name(format!("install-{}", p.key))
         .spawn(move || {
-            let r = run(&node, p, &b2, &c2, bcp as u32, &cancel);
+            let r = wait_for_copies(&node, p, &cancel).and_then(|(bid, cid, cp)| run(&node, p, &bid, &cid, cp, &cancel));
             crate::coreboot::hold(p.key, false);
             for f in ["blocks", "coins"] {
                 vxshare::finish(&vxshare::job_key(p.net, f));
@@ -80,7 +70,45 @@ pub fn start(node: Arc<Node>, key: &str) -> Result<Value, String> {
             }
         })
         .map_err(|e| e.to_string())?;
-    Ok(json!({"installing": true, "key": p.key, "cp": bcp, "blocks": {"id": bid, "makers": bm}, "coins": {"id": cid, "makers": cm}}))
+    Ok(json!({"installing": true, "key": p.key}))
+}
+
+/// The network's tip as far as we know: our best header and what arcades say they have.
+fn net_tip(node: &Node, p: &'static ChainParams) -> u32 {
+    let best = node.chain.best_header(p.chain_no).ok().flatten().and_then(|h| node.chain.header(p.chain_no, &h).ok().flatten()).map(|r| r.height).unwrap_or(0);
+    node.offers_for(p.key).iter().map(|o| o.3 as u32).max().unwrap_or(0).max(best)
+}
+
+/// Copies are made only when asked for (Martin): ask the linked V1.0 arcades for blocks
+/// and coins copies at a height a few blocks ahead, and wait until 2 or more arcades made
+/// them. Copies already offered (asked for by someone else lately) are taken as they are.
+fn wait_for_copies(node: &Arc<Node>, p: &'static ChainParams, cancel: &Arc<AtomicBool>) -> Result<(String, String, u32), String> {
+    let t0 = Instant::now();
+    let mut asked: Option<(u32, Instant)> = None;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        let tip = node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height as u64).unwrap_or(0);
+        if let (Some((bid, bcp, _)), Some((cid, ccp, _))) = (vxshare::best(p.net, "blocks"), vxshare::best(p.net, "coins")) {
+            if bcp == ccp && bcp > tip {
+                return Ok((bid, cid, bcp as u32));
+            }
+        }
+        let top = net_tip(node, p);
+        // (Again when that height went by without copies: some arcade wasn't at the tip.)
+        let again = asked.is_none_or(|(h, at)| top > h + 3 && at.elapsed() > Duration::from_secs(60));
+        if again && top > 0 {
+            let h = top + 3;
+            let n = vxshare::ask(p.net, h, &["blocks", "coins"]);
+            asked = Some((h, Instant::now()));
+            set(p.key, "asking", format!("asked {n} V1.0 arcade{} for copies at block {h} (network tip {top}); they are made when the arcades reach it", if n == 1 { "" } else { "s" }));
+        }
+        if t0.elapsed() > Duration::from_secs(1800) {
+            return Err("no copies made by 2 or more arcades came within 30 minutes".into());
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
 }
 
 pub fn cancel(key: &str) -> Result<Value, String> {

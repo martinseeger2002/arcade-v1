@@ -105,7 +105,7 @@ pub fn make(node: &Node, p: &'static ChainParams, fam: &str) -> Result<Value, St
     node.chain.store.read(|r| Ok(make_in(node, p, fam, r))).map_err(|e| e.to_string())?
 }
 
-/// Make a copy of one family from the read transaction `r` (all families of a checkpoint
+/// Make a copy of one family from the read transaction `r` (all families asked for at one height
 /// come from the same one).
 pub fn make_in(node: &Node, p: &'static ChainParams, fam: &str, r: &arcade_store::ReadTxn) -> Result<Value, String> {
     if !FAMILIES.contains(&fam) {
@@ -207,41 +207,6 @@ pub fn make_in(node: &Node, p: &'static ChainParams, fam: &str, r: &arcade_store
     Ok(json!({"id": id, "dir": dir, "net": p.net, "fam": fam, "cp": cp, "rows": pc.rows, "bytes": pc.bytes, "pieces": pc.sums.len(), "secs": secs}))
 }
 
-/// Blocks between checkpoint copies: about a day of the chain's blocks (docs/V1SHARE.md §3).
-pub fn interval(key: &str) -> u32 {
-    // Tests: ARCADE_COPY_EVERY=<blocks>.
-    if let Some(n) = std::env::var("ARCADE_COPY_EVERY").ok().and_then(|v| v.parse::<u32>().ok()).filter(|n| *n > 0) {
-        return n;
-    }
-    match key {
-        "dgb" | "dgbtest" => 5_760,
-        "ltc" | "ltctest" => 576,
-        "btc" => 144,
-        "kot" => 720,
-        _ => 1_440,
-    }
-}
-
-/// Chains whose copies are made at every checkpoint (off unless turned on: copies take disk).
-fn auto_path(node: &Node) -> PathBuf {
-    node.home.join("copies").join("auto.json")
-}
-
-pub fn auto_on(node: &Node, net: &str) -> bool {
-    std::fs::read(auto_path(node)).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).is_some_and(|v| v[net] == true)
-}
-
-/// share.auto: turn checkpoint copies on or off for a chain.
-pub fn set_auto(node: &Node, key: &str, on: bool) -> Result<Value, String> {
-    let p = node.chain_params(key).ok_or_else(|| format!("{key} is not installed here"))?;
-    let path = auto_path(node);
-    let mut v: Value = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
-    v[p.net] = json!(on);
-    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-    std::fs::write(&path, v.to_string()).map_err(|e| e.to_string())?;
-    Ok(json!({"net": p.net, "auto": on, "every": interval(p.key)}))
-}
-
 /// The copy families of an installed chain: its blocks (unless Shared storage prunes them),
 /// its coins, and the indexes it keeps.
 pub fn families_of(mode: &str, indexes: &[String]) -> Vec<String> {
@@ -259,14 +224,29 @@ pub fn families_of(mode: &str, indexes: &[String]) -> Vec<String> {
 }
 
 /// Called by the chain follower after it has connected `tip` and walked the indexes, while
-/// at the network's tip. At a checkpoint (and checkpoint copies on), one read transaction is
+/// at the network's tip. At a height another arcade asked for, one read transaction is
 /// opened here, a frozen view of exactly this height, and the follower goes on as soon as it
 /// is open; the copies are written from it in the background.
 pub fn checkpoint(node: &std::sync::Arc<Node>, p: &'static ChainParams, tip: u32, fams: Vec<String>) {
     static LAST: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<&'static str, u32>>> = std::sync::OnceLock::new();
-    if tip == 0 || tip % interval(p.key) != 0 || !auto_on(node, p.net) {
-        return;
-    }
+    // Made only when an arcade asked for copies at this height (Martin: only when requested).
+    let asked: Option<std::collections::BTreeSet<String>> = {
+        let mut r = requests();
+        match r.get(p.net) {
+            Some((h, _, _)) if *h < tip => {
+                r.remove(p.net);
+                None
+            }
+            Some((h, f, _)) if *h == tip => {
+                let f = f.clone();
+                r.remove(p.net);
+                Some(f)
+            }
+            _ => None,
+        }
+    };
+    let Some(want) = asked else { return };
+    let fams: Vec<String> = fams.into_iter().filter(|f| want.is_empty() || want.contains(f)).collect();
     {
         let mut last = LAST.get_or_init(Default::default).lock().unwrap();
         if last.get(p.net) == Some(&tip) {
@@ -306,6 +286,103 @@ pub fn checkpoint(node: &std::sync::Arc<Node>, p: &'static ChainParams, tip: u32
     }
 }
 
+/// Copies asked for by other arcades: net -> (height, parts, when asked).
+fn requests() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, (u32, std::collections::BTreeSet<String>, u64)>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (u32, std::collections::BTreeSet<String>, u64)>>> = std::sync::OnceLock::new();
+    R.get_or_init(Default::default).lock().unwrap()
+}
+
+/// Answering requests for copies of a chain: on unless the operator turned it off.
+fn serve_path(node: &Node) -> PathBuf {
+    node.home.join("copies").join("serve.json")
+}
+
+pub fn serve_on(node: &Node, net: &str) -> bool {
+    std::fs::read(serve_path(node)).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).map(|v| v[net] != false).unwrap_or(true)
+}
+
+/// share.serve: answer other arcades' requests for copies of a chain (on by default).
+pub fn set_serve(node: &Node, key: &str, on: bool) -> Result<Value, String> {
+    let p = node.chain_params(key).ok_or_else(|| format!("{key} is not installed here"))?;
+    let path = serve_path(node);
+    let mut v: Value = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
+    v[p.net] = json!(on);
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(&path, v.to_string()).map_err(|e| e.to_string())?;
+    Ok(json!({"net": p.net, "serve": on}))
+}
+
+/// Another arcade asks for copies of `net` at height `h` (a few blocks ahead of the tip):
+/// they are made when this arcade's follower reaches it (checkpoint()).
+pub fn request(node: &Node, net: &str, h: u32, fams: std::collections::BTreeSet<String>) -> bool {
+    let Some(p) = arcade_chain::params::by_net(net) else { return false };
+    if node.chain_params(p.key).is_none() || !serve_on(node, net) {
+        return false;
+    }
+    let tip = node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height).unwrap_or(0);
+    // Only heights just ahead of us: a copy can only be made at the moment a block comes in.
+    if h <= tip || h > tip + 100 {
+        return false;
+    }
+    let mut r = requests();
+    let e = r.entry(net.to_string()).or_insert((h, Default::default(), arcade_app::now()));
+    if e.0 != h {
+        *e = (h, Default::default(), arcade_app::now());
+    }
+    e.1.extend(fams);
+    true
+}
+
+pub fn requested() -> Value {
+    json!(requests().iter().map(|(n, (h, f, at))| json!({"net": n, "h": h, "fams": f, "asked": at})).collect::<Vec<_>>())
+}
+
+/// When each copy was last fetched from here (id -> unix time).
+fn last_used() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, u64>> {
+    static U: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::OnceLock::new();
+    U.get_or_init(Default::default).lock().unwrap()
+}
+
+pub fn touch(id: &str) {
+    last_used().insert(id.to_string(), arcade_app::now());
+}
+
+/// Copies nobody fetched for 2 hours are deleted (made on request, they would only take
+/// disk). Runs at most once a minute.
+pub fn sweep(node: &Node) {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<u64>> = std::sync::OnceLock::new();
+    {
+        let mut l = LAST.get_or_init(Default::default).lock().unwrap();
+        let now = arcade_app::now();
+        if *l + 60 > now {
+            return;
+        }
+        *l = now;
+    }
+    let now = arcade_app::now();
+    let root = node.home.join("copies");
+    let Ok(nets) = std::fs::read_dir(&root) else { return };
+    for n in nets.flatten() {
+        let Ok(fams) = std::fs::read_dir(n.path()) else { continue };
+        for f in fams.flatten() {
+            let Ok(ids) = std::fs::read_dir(f.path()) else { continue };
+            for i in ids.flatten() {
+                let name = i.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let made = std::fs::metadata(i.path().join("manifest.json")).and_then(|m| m.modified()).ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+                let used = last_used().get(&name).copied().unwrap_or(0).max(made);
+                if used + 2 * 3600 < now {
+                    let _ = std::fs::remove_dir_all(i.path());
+                    last_used().remove(&name);
+                }
+            }
+        }
+    }
+}
+
 /// Copies being made now: "net/fam".
 fn making() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<String>> {
     static M: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> = std::sync::OnceLock::new();
@@ -335,7 +412,7 @@ pub fn start_make(node: std::sync::Arc<Node>, key: &str, fam: &str) -> Result<Va
 
 /// The copies held here: per chain and family, its manifest summary.
 pub fn held(node: &Node) -> Value {
-    json!({"held": held_list(node), "making": making().iter().cloned().collect::<Vec<_>>(), "fetching": crate::vxshare::status(), "installing": crate::v1import::status(), "fmt": FMT})
+    json!({"held": held_list(node), "requested": requested(), "making": making().iter().cloned().collect::<Vec<_>>(), "fetching": crate::vxshare::status(), "installing": crate::v1import::status(), "fmt": FMT})
 }
 
 pub(crate) fn held_list(node: &Node) -> Vec<Value> {

@@ -129,6 +129,12 @@ pub fn on_frame(node: &Node, link: &mut Link, f: &Frame) -> Result<(), LinkError
             st().heard.insert(peer, (arcade_app::now(), nets));
         }
         "g" => serve(node, link, &f.head)?,
+        "sq" => {
+            let fams = f.head["fams"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).filter(|x| v1copy::FAMILIES.contains(x)).map(String::from).collect()).unwrap_or_default();
+            if let (Some(net), Some(h)) = (f.head["net"].as_str(), f.head["h"].as_u64()) {
+                v1copy::request(node, net, h as u32, fams);
+            }
+        }
         "gb" => on_gb(&peer, f),
         _ => {}
     }
@@ -137,6 +143,7 @@ pub fn on_frame(node: &Node, link: &mut Link, f: &Frame) -> Result<(), LinkError
 
 /// Per link, often: our hi when it changed for this peer, then queued requests.
 pub fn tick(node: &Node, link: &mut Link) -> Result<(), LinkError> {
+    v1copy::sweep(node);
     let peer = link.peer_id.clone();
     let nets = our_nets(node);
     let sig = nets.to_string();
@@ -194,6 +201,7 @@ fn serve(node: &Node, link: &mut Link, h: &Value) -> Result<(), LinkError> {
         };
     }
     let Some(i) = h["i"].as_u64() else { return refuse(link, id, "gone") };
+    v1copy::touch(snap);
     // Per asker: 240 pieces a minute; in all: 6 at once.
     {
         let mut s = st();
@@ -557,4 +565,15 @@ pub fn best(net: &str, fam: &str) -> Option<(String, u64, usize)> {
         .filter(|(_, (m, _, _, fmt))| m.len() >= min_makers() && *fmt == v1copy::FMT as u64)
         .max_by_key(|(_, (m, h, cp, _))| (*cp, m.len(), h.len()))
         .map(|(id, (m, _, cp, _))| (id, cp, m.len()))
+}
+
+/// Ask every V1.0 arcade we hear from to make copies of `fams` at height `h`.
+pub fn ask(net: &str, h: u32, fams: &[&str]) -> usize {
+    let mut s = st();
+    let now = arcade_app::now();
+    let peers: Vec<String> = s.heard.iter().filter(|(_, (at, _))| at + HEARD_FRESH >= now).map(|(p, _)| p.clone()).collect();
+    for p in &peers {
+        s.outq.entry(p.clone()).or_default().push(Frame::new(json!({"t": "vx", "op": "sq", "net": net, "h": h, "fams": fams})));
+    }
+    peers.len()
 }
