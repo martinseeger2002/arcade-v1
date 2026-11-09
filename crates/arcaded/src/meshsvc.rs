@@ -252,6 +252,8 @@ pub fn serve(node: &Node, link: &mut Link, addr: &str) -> Result<(), LinkError> 
     if let Some(lk) = crate::links::frame(node) {
         link.send(&Frame::new(lk))?;
     }
+    // Who runs this arcade: existing arcades show the operator's @tag from this (operators.py).
+    link.send(&Frame::new(operator_me(node)))?;
     let mut cr_reqs = crate::coreshare::Requests::default();
     let mut last_ping = std::time::Instant::now();
     let mut sent_outbox = 0usize;
@@ -259,7 +261,8 @@ pub fn serve(node: &Node, link: &mut Link, addr: &str) -> Result<(), LinkError> 
     crate::realtime::link_up(node, &peer);
     // UDP beside this link (docs/compat/UDP.md); nothing changes while it is off.
     crate::udpsvc::link_up(node, link);
-    let r = serve_loop(node, link, addr, &peer, &mut cr_reqs, &mut last_ping, &mut sent_outbox, &mut last_sz, &mut last_hold);
+    let mut last_me = std::time::Instant::now();
+    let r = serve_loop(node, link, addr, &peer, &mut cr_reqs, &mut last_ping, &mut sent_outbox, &mut last_sz, &mut last_hold, &mut last_me);
     crate::udpsvc::link_down(&peer);
     crate::realtime::link_down(&peer);
     r
@@ -276,6 +279,7 @@ fn serve_loop(
     sent_outbox: &mut usize,
     last_sz: &mut std::time::Instant,
     last_hold: &mut std::time::Instant,
+    last_me: &mut std::time::Instant,
 ) -> Result<(), LinkError> {
     let cr_reqs = &mut *cr_reqs;
     loop {
@@ -295,6 +299,10 @@ fn serve_loop(
         }
         // UDP path: ask, switch over, fall back; proofs and introductions for this link.
         crate::udpsvc::tick(node, link)?;
+        if last_me.elapsed() > Duration::from_secs(60) {
+            link.send(&Frame::new(operator_me(node)))?;
+            *last_me = std::time::Instant::now();
+        }
         if last_hold.elapsed() > Duration::from_secs(crate::shares::every().clamp(20, 120)) {
             link.send(&crate::shares::hold_frame(node))?;
             *last_hold = std::time::Instant::now();
@@ -430,4 +438,34 @@ fn serve_bk(node: &Node, link: &mut Link, addr: &str, h: &Value) -> Result<(), L
         _ => {}
     }
     Ok(())
+}
+
+/// The operator of this arcade's wallet @tag, remembered whenever its own wallet is the active
+/// account (another signed-in account isn't the operator).
+static OWN_TAG: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// {"t":"op","op":"me",...}: what existing arcades show for this arcade (mesh/operators.py:
+/// tag a-z0-9_ 2-24, name <= 60, version <= 40, links <= 100 of {id, tag, host}). No signature:
+/// the link proves who speaks.
+fn operator_me(node: &Node) -> Value {
+    if node.app.active_account().is_empty() {
+        if let Ok((_, tag, _)) = crate::msgsvc::sender_key(node) {
+            *OWN_TAG.lock().unwrap() = tag;
+        }
+    }
+    let tag = OWN_TAG.lock().unwrap().clone().unwrap_or_default();
+    let links: Vec<Value> = node
+        .links
+        .lock()
+        .unwrap()
+        .values()
+        .take(100)
+        .map(|l| json!({"id": l.node_id, "host": l.addr.trim_start_matches("wss://").split('/').next().unwrap_or("")}))
+        .collect();
+    let mut me = json!({"t": "op", "op": "me", "version": "V1.0", "lora": false, "links": links});
+    if !tag.is_empty() {
+        me["tag"] = json!(tag);
+        me["name"] = json!(format!("@{tag}"));
+    }
+    me
 }
