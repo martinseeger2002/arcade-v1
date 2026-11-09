@@ -419,6 +419,23 @@ macro_rules! read_methods {
             Ok(out)
         }
 
+        /// Every (key, value) under `prefix` in key order (each value of a dup key), handed to
+        /// `f` without copying; `f` returns false to stop. For streaming a big range in one
+        /// snapshot (copies of a table family).
+        pub fn for_each_prefix(&self, table: &str, prefix: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> Result<bool>) -> Result<()> {
+            check(self.schema, table)?;
+            let t = self.txn.open_table(Some(table))?;
+            let mut c = self.txn.cursor(&t)?;
+            let mut cur: Option<(std::borrow::Cow<[u8]>, std::borrow::Cow<[u8]>)> = c.set_range(prefix)?;
+            while let Some((k, v)) = cur {
+                if !k.starts_with(prefix) || !f(&k, &v)? {
+                    break;
+                }
+                cur = c.next()?;
+            }
+            Ok(())
+        }
+
         /// Last (greatest) entry whose key starts with `prefix`.
         pub fn last_with_prefix(&self, table: &str, prefix: &[u8]) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
             check(self.schema, table)?;

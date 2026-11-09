@@ -119,6 +119,11 @@ pub fn run(node: Arc<Node>) {
             let best = node.chain.best_header(p.chain_no).ok().flatten().and_then(|h| node.chain.header(p.chain_no, &h).ok().flatten());
             let (th, bh) = (tip.map(|t| t.height).unwrap_or(0), best.map(|b| b.height).unwrap_or(0));
             set_state(&node, if th >= bh { format!("synced at {th}") } else { format!("syncing {th} / {bh}") });
+            // At the tip: a checkpoint copy of every part of the home chain (docs/V1SHARE.md §3).
+            if new > 0 && th >= bh {
+                let ix: Vec<String> = ["ledger", "profiles", "messages", "ord", "tokens", "names", "maps"].iter().map(|s| s.to_string()).collect();
+                crate::v1copy::checkpoint(&node, p, th, crate::v1copy::families_of(&node.home_mode, &ix));
+            }
             if node.mesh_bootstrap && th + 100 < bh {
                 mesh_bootstrap(&node, &syncer);
             }

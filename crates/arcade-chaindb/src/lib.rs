@@ -4,6 +4,7 @@
 
 pub mod addrbuild;
 pub mod coreimport;
+pub mod copyout;
 pub mod db;
 pub mod indexer;
 pub mod schema;

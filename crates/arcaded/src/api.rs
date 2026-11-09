@@ -497,6 +497,10 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
                 _ => Err("index = ledger or ord".into()),
             }
         }
+        // V1.0 copies (crate::v1copy)
+        "share.held" => Ok(crate::v1copy::held(node)),
+        "share.auto" => crate::v1copy::set_auto(node, &s("key").ok_or("key required")?, req["on"] == true),
+        "share.make" => crate::v1copy::start_make(node.self_arc(), &s("key").ok_or("key required")?, &s("fam").ok_or("fam required (blocks, coins, ord, ...)")?),
         // Borrowed coins (crate::borrow)
         "borrow.status" => Ok(crate::borrow::status_all(node)),
         "borrow.set" => {

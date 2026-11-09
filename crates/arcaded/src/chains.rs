@@ -56,7 +56,7 @@ fn is_rider(ix: &str) -> bool {
 }
 
 /// Rows an index owns.
-fn tables_of(index: &str) -> Vec<String> {
+pub(crate) fn tables_of(index: &str) -> Vec<String> {
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     match index {
         "ledger" => arcade_ledger::engine::LedgerIndexer.tables_named(),
@@ -940,6 +940,10 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
                 last_balance = std::time::Instant::now();
             }
             let tip = node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height).unwrap_or(0);
+            // At the network's tip: a checkpoint copy of every part (docs/V1SHARE.md §3).
+            if b > 0 && tip >= run.peer_tip.load(Ordering::Relaxed) {
+                crate::v1copy::checkpoint(&node, p, tip, crate::v1copy::families_of(&run.mode, &run.indexes));
+            }
             set(if h == 0 && b == 0 { format!("synced at {tip}") } else { format!("syncing {tip}") });
             if h == 0 && b == 0 {
                 std::thread::sleep(Duration::from_secs(15));

@@ -50,6 +50,7 @@ mod realtime;
 mod rpc;
 mod sizes;
 mod udpsvc;
+mod v1copy;
 mod shares;
 mod secretbox;
 
