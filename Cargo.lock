@@ -158,7 +158,6 @@ dependencies = [
  "bs58",
  "hex",
  "regex",
- "ripemd",
  "serde_json",
  "sha2 0.11.1",
  "tempfile",

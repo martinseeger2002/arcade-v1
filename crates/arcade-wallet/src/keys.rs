@@ -118,14 +118,8 @@ impl XPriv {
         v.extend_from_slice(&self.chain_code);
         v.push(0);
         v.extend_from_slice(&self.key.secret_bytes());
-        bs58_check(&v)
+        arcade_ledger::address::base58check_payload(&v)
     }
-}
-
-fn bs58_check(v: &[u8]) -> String {
-    // Base58Check over a full payload (no separate version byte).
-    let (ver, rest) = v.split_first().unwrap();
-    arcade_ledger::address::base58check(*ver, rest)
 }
 
 /// The coin key for tag slot `index` on a chain: m/44'/coin'/0'/0/index.
@@ -161,8 +155,7 @@ pub fn from_wif(s: &str) -> Option<(u8, SecretKey, bool)> {
 }
 
 fn sha256d(m: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(Sha256::digest(m)).into()
+    arcade_chain::hash::sha256d(m).0
 }
 
 /// ECDSA over sha256d(message), low-S, DER, hex (as the existing arcades sign wallet imports).

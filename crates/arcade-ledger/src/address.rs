@@ -2,16 +2,19 @@
 
 use crate::script::{classify, ScriptKind};
 use arcade_chain::params::ChainParams;
-use ripemd::Ripemd160;
-use sha2::{Digest, Sha256};
 
-pub fn hash160(data: &[u8]) -> [u8; 20] {
-    Ripemd160::digest(Sha256::digest(data)).into()
-}
+/// RIPEMD-160 of SHA-256 (arcade_chain::hash's, re-exported).
+pub use arcade_chain::hash::hash160;
 
 pub fn base58check(version: u8, payload: &[u8]) -> String {
     let mut v = vec![version];
     v.extend_from_slice(payload);
+    base58check_payload(&v)
+}
+
+/// Base58Check of a whole payload whose version bytes are already in front (extended keys,
+/// multi-byte versions).
+pub fn base58check_payload(v: &[u8]) -> String {
     bs58::encode(v).with_check().into_string()
 }
 
@@ -88,10 +91,78 @@ pub fn p2pkh_script_for_address(p: &ChainParams, a: &str) -> Option<Vec<u8>> {
     p2pkh_hash_of(p, a).map(|h| p2pkh_script(&h))
 }
 
+/// BIP173 bech32 (SegWit v0 addresses).
+pub mod bech32 {
+    const CHARSET: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+    fn polymod(v: &[u8]) -> u32 {
+        const G: [u32; 5] = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+        let mut chk = 1u32;
+        for &x in v {
+            let b = chk >> 25;
+            chk = ((chk & 0x1ffffff) << 5) ^ x as u32;
+            for (i, g) in G.iter().enumerate() {
+                if (b >> i) & 1 == 1 {
+                    chk ^= g;
+                }
+            }
+        }
+        chk
+    }
+
+    fn to5(data: &[u8]) -> Vec<u8> {
+        let (mut acc, mut bits, mut out) = (0u32, 0u32, Vec::new());
+        for &b in data {
+            acc = (acc << 8) | b as u32;
+            bits += 8;
+            while bits >= 5 {
+                bits -= 5;
+                out.push(((acc >> bits) & 31) as u8);
+            }
+        }
+        if bits > 0 {
+            out.push(((acc << (5 - bits)) & 31) as u8);
+        }
+        out
+    }
+
+    pub fn segwit_v0(hrp: &str, program: &[u8]) -> String {
+        let mut data = vec![0u8];
+        data.extend(to5(program));
+        let mut v: Vec<u8> = hrp.bytes().map(|c| c >> 5).collect();
+        v.push(0);
+        v.extend(hrp.bytes().map(|c| c & 31));
+        v.extend(&data);
+        v.extend([0u8; 6]);
+        let m = polymod(&v) ^ 1;
+        let mut s = format!("{hrp}1");
+        for d in data.iter().copied().chain((0..6).map(|i| ((m >> (5 * (5 - i))) & 31) as u8)) {
+            s.push(CHARSET[d as usize] as char);
+        }
+        s
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn bip173_vector() {
+        let h = hex::decode("751e76e8199196d454941c45d1b3a323f1433bd6").unwrap();
+        assert_eq!(segwit_v0("bc", &h), "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use arcade_chain::params::{DIGIBYTE_MAIN, LITECOIN_MAIN};
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn hash160_vectors() {
+        // hash160 of "" and of a compressed pubkey (secp256k1 generator), as Bitcoin Core gives them.
+        assert_eq!(hex::encode(hash160(b"")), "b472a266d0bd89c13706a4132ccfb16f7c3b9fcb");
+        let g = hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798").unwrap();
+        assert_eq!(hex::encode(hash160(&g)), "751e76e8199196d454941c45d1b3a323f1433bd6");
+    }
 
     /// Conformance vectors from the existing arcade (tests/conformance/vectors.json):
     /// H160 = sha256(b"conformance hash160")[:20].

@@ -126,7 +126,7 @@ pub fn read(tx: &Tx) -> Option<DdTx> {
 pub fn address(key: &[u8; 32], testnet: bool) -> String {
     let mut v = if testnet { VERSION_TEST.to_vec() } else { VERSION_MAIN.to_vec() };
     v.extend_from_slice(key);
-    bs58::encode(v).with_check().into_string()
+    crate::address::base58check_payload(&v)
 }
 
 #[cfg(test)]
@@ -175,5 +175,8 @@ mod tests {
         assert_eq!(dd.outputs, vec![(0, [1; 32], 4000), (1, [2; 32], 6000)]);
         assert!(address(&[1; 32], false).starts_with("DD"));
         assert!(address(&[1; 32], true).starts_with("TD"));
+        // Captured before address() moved to address::base58check_payload: must not change.
+        assert_eq!(address(&[1; 32], false), "DD1FLLjJNzBPWAdFvJEigEzeGQwi55Z4P4W8oyY7Tc3rvejnYWiN");
+        assert_eq!(address(&[7; 32], true), "TD1MpJgWjStD7izeBB46PhzXqNKtxrVpiiNAiMtzSYwWXw3J4yuY");
     }
 }
