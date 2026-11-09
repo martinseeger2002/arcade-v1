@@ -406,30 +406,20 @@ pub fn app_read(node: &Node, id: &str, after: u64, limit: usize) -> Result<Value
 
 /// Seal text for the group's live room (secretbox under the group's live key, base64(nonce || box)).
 pub fn seal_live(node: &Node, id: &str, text: &str) -> Result<Value, String> {
-    use crypto_secretbox::aead::{Aead, AeadCore, KeyInit};
-    use base64::Engine;
-    let g = get(node, id).ok_or("not a group of yours")?;
-    let key = live(&secret_of(&g).ok_or("bad group key")?, "arcade-group-live/1\n", 32);
-    let c = crypto_secretbox::XSalsa20Poly1305::new_from_slice(&key).map_err(|e| e.to_string())?;
-    let nonce = crypto_secretbox::XSalsa20Poly1305::generate_nonce(&mut rand_core::OsRng);
-    let ct = c.encrypt(&nonce, text.as_bytes()).map_err(|e| e.to_string())?;
-    let mut b = nonce.to_vec();
-    b.extend_from_slice(&ct);
-    Ok(json!({"sealed": base64::engine::general_purpose::STANDARD.encode(b)}))
+    let key = live_key(node, id)?;
+    Ok(json!({"sealed": crate::secretbox::seal(&key, text.as_bytes())}))
 }
 
 pub fn open_live(node: &Node, id: &str, sealed: &str) -> Result<Value, String> {
-    use crypto_secretbox::aead::{Aead, KeyInit};
-    use base64::Engine;
-    let g = get(node, id).ok_or("not a group of yours")?;
-    let key = live(&secret_of(&g).ok_or("bad group key")?, "arcade-group-live/1\n", 32);
-    let c = crypto_secretbox::XSalsa20Poly1305::new_from_slice(&key).map_err(|e| e.to_string())?;
-    let b = base64::engine::general_purpose::STANDARD.decode(sealed.trim()).unwrap_or_default();
-    if b.len() < 24 + 16 {
-        return Ok(json!({"text": Value::Null}));
-    }
-    let text = c.decrypt(crypto_secretbox::Nonce::from_slice(&b[..24]), &b[24..]).ok().and_then(|p| String::from_utf8(p).ok());
+    let key = live_key(node, id)?;
+    let text = crate::secretbox::open(&key, sealed).ok().and_then(|p| String::from_utf8(p).ok());
     Ok(json!({"text": text}))
+}
+
+/// The group's live-room key: sha512("arcade-group-live/1\n" || group secret)[..32].
+fn live_key(node: &Node, id: &str) -> Result<[u8; 32], String> {
+    let g = get(node, id).ok_or("not a group of yours")?;
+    Ok(live(&secret_of(&g).ok_or("bad group key")?, "arcade-group-live/1\n", 32).try_into().unwrap())
 }
 
 /// Add members to a group: the invite (with the key) goes to them alone, and one line to the

@@ -315,15 +315,10 @@ fn mailbox_key(msg_secret: &[u8; 32]) -> [u8; 32] {
 }
 
 fn open_mailbox(msg_secret: &[u8; 32], b64: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine as _;
-    use crypto_secretbox::aead::{Aead, KeyInit};
-    let key = mailbox_key(msg_secret);
-    let raw = base64::engine::general_purpose::STANDARD.decode(b64.trim()).map_err(|_| "bad mailbox")?;
-    if raw.len() < 24 + 16 {
-        return Err("bad mailbox".into());
-    }
-    let c = crypto_secretbox::XSalsa20Poly1305::new_from_slice(&key).map_err(|e| e.to_string())?;
-    c.decrypt(crypto_secretbox::Nonce::from_slice(&raw[..24]), &raw[24..]).map_err(|_| "the mailbox didn't open with this account's key".to_string())
+    crate::secretbox::open(&mailbox_key(msg_secret), b64).map_err(|e| match e {
+        crate::secretbox::OpenError::Bad => "bad mailbox".to_string(),
+        crate::secretbox::OpenError::Decrypt => "the mailbox didn't open with this account's key".to_string(),
+    })
 }
 
 #[cfg(test)]

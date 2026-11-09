@@ -39,6 +39,7 @@ mod rpc;
 mod sizes;
 mod udpsvc;
 mod shares;
+mod secretbox;
 
 use node::Node;
 use std::sync::{Arc, Mutex};
