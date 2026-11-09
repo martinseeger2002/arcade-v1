@@ -143,6 +143,7 @@ async function refreshWallet() {
   $("w-legacy").hidden = !legacy.length;
   $("w-legacy").textContent = legacy.length ? `Coins sent to ${legacy.join(", ")} (the older D... form of the same key) are counted too. Give people the dgb1... address: D... addresses look the same on Dogecoin.` : "";
   $("w-send-h").textContent = `Send ${TICKERS[ch.key] || ch.name}`;
+  drawDigiDollar(ch);
   $("w-amt-unit").textContent = TICKERS[ch.key] || "";
   // Test coins from the mesh are Pepecoin testnet coins.
   $("w-faucet").hidden = !ch.home;
@@ -315,6 +316,48 @@ $("w-sendnow").addEventListener("click", async () => {
     msg($("w-send-msg"), `Sent: ${r.txid}`, "ok");
     refreshWallet();
   } catch (e) { msg($("w-send-msg"), e.message, "bad"); }
+  finally { b.disabled = false; }
+});
+
+// DigiDollar on DigiByte: the wallet key's Taproot address, its coins, and a send.
+const usd = (c) => "$" + (c / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+let pendingDd = null;
+async function drawDigiDollar(ch) {
+  const on = ch.key === "dgb" || ch.key === "dgbtest";
+  $("w-dd").hidden = !on;
+  if (!on) return;
+  try {
+    const d = await api("dd.wallet", { chain: ch.key });
+    $("w-dd-addr").textContent = d.address;
+    $("w-dd-bal").textContent = `${usd(d.cents)} in ${d.coins.length} coin${d.coins.length === 1 ? "" : "s"}`;
+    $("w-dd-to").placeholder = ch.key === "dgbtest" ? "TD... address" : "DD... address";
+    $("w-dd-note").textContent = d.whole ? "Network fees are paid in DGB from this wallet (0.35 DGB per kB, at least 0.1 DGB)."
+      : "DigiByte is borrowed here, so DigiDollar coins received before this arcade began following it aren't seen. Installing DigiByte finds them all. Fees are paid in DGB from this wallet.";
+  } catch (e) { $("w-dd-addr").textContent = "—"; $("w-dd-bal").textContent = e.message; }
+}
+$("w-dd-review").addEventListener("click", async () => {
+  const ch = picked();
+  const m = $("w-dd-amt").value.trim().match(/^(\d+)(?:\.(\d{1,2}))?$/);
+  if (!m) { msg($("w-dd-msg"), "Enter dollars, for example 12.50", "bad"); return; }
+  const cents = Number(m[1]) * 100 + Number((m[2] || "").padEnd(2, "0"));
+  try {
+    const r = await api("dd.send", { chain: ch.key, to: $("w-dd-to").value.trim(), cents, send: false });
+    pendingDd = { chain: ch.key, to: $("w-dd-to").value.trim(), cents };
+    $("w-dd-confirm-text").replaceChildren(
+      h("div", {}, `Send ${usd(r.cents)} DigiDollar to ${r.to}`),
+      h("div", { class: "s" }, `network fee ${coins(r.fee, ch.key)}${r.change_cents ? ` · ${usd(r.change_cents)} back to you` : ""}`));
+    $("w-dd-confirm").hidden = false; msg($("w-dd-msg"), "");
+  } catch (e) { msg($("w-dd-msg"), e.message, "bad"); }
+});
+$("w-dd-cancel").addEventListener("click", () => { pendingDd = null; $("w-dd-confirm").hidden = true; });
+$("w-dd-sendnow").addEventListener("click", async () => {
+  if (!pendingDd) return;
+  const b = $("w-dd-sendnow"); b.disabled = true;
+  try {
+    const r = await api("dd.send", { ...pendingDd, send: true });
+    $("w-dd-confirm").hidden = true; pendingDd = null; $("w-dd-to").value = ""; $("w-dd-amt").value = "";
+    msg($("w-dd-msg"), `Sent: ${r.txid}`, "ok"); refreshWallet();
+  } catch (e) { msg($("w-dd-msg"), e.message, "bad"); }
   finally { b.disabled = false; }
 });
 

@@ -98,6 +98,11 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
                        "balance": balance, "borrowed": !installed && crate::borrow::is_borrowed(cp.key)})
             }).collect::<Vec<_>>()))
         }
+        "dd.wallet" => crate::ddsvc::wallet(node, s("chain").as_deref()),
+        "dd.send" => {
+            let cents = req["cents"].as_i64().ok_or("cents required (DigiDollar cents: $12.50 is 1250)")?;
+            crate::ddsvc::send(node, s("chain").as_deref(), &s("to").ok_or("to required (a DD... or TD... address)")?, cents, req["send"] == true)
+        }
         "wallet.send" => {
             let amount = req["amount"].as_u64().ok_or("amount required (satoshis)")?;
             crate::coinsend::send(node, s("chain").as_deref(), &s("to").ok_or("to required")?, amount, req["send"] == true)

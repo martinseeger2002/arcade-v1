@@ -188,6 +188,11 @@ pub fn sign_keyhash(p: &ChainParams, version: i32, utxos: &[Utxo], outs: &[TxOut
     let h = arcade_ledger::address::hash160(&pk.serialize());
     let p2pkh = arcade_ledger::address::p2pkh_script(&h);
     let p2wpkh = arcade_ledger::address::p2wpkh_script(&h);
+    // The key's own Taproot output (no script tree): DigiDollar coins.
+    let p2tr = crate::taproot::output_key(&pk).map(|q| crate::taproot::p2tr_script(&q));
+    let outs_tr: Vec<(u64, Vec<u8>)> = outs.iter().map(|o| (o.value, o.script.clone())).collect();
+    let spent: Vec<crate::taproot::SpentInput> =
+        utxos.iter().map(|u| crate::taproot::SpentInput { outpoint: u.outpoint, sequence: u32::MAX, amount: u.value, script: &u.script }).collect();
     let mut script_sigs: Vec<Vec<u8>> = Vec::with_capacity(utxos.len());
     let mut witnesses: Vec<Vec<Vec<u8>>> = Vec::with_capacity(utxos.len());
     for (i, u) in utxos.iter().enumerate() {
@@ -213,6 +218,17 @@ pub fn sign_keyhash(p: &ChainParams, version: i32, utxos: &[Utxo], outs: &[TxOut
             der.push(SIGHASH_ALL as u8);
             script_sigs.push(Vec::new());
             witnesses.push(vec![der, pk.serialize().to_vec()]);
+        } else if Some(&u.script) == p2tr.as_ref() {
+            if !p.format.segwit {
+                return Err(format!("{} has no Taproot", p.name));
+            }
+            let kp = crate::taproot::tweaked_keypair(key, None).ok_or("the key can't be tweaked")?;
+            let sh = crate::taproot::sighash_default(version, 0, &spent, &outs_tr, i);
+            // Auxiliary randomness for the nonce (BIP340): fresh bytes, mixed with the sighash.
+            let mut aux = [0u8; 32];
+            getrandom::getrandom(&mut aux).map_err(|e| format!("no randomness: {e}"))?;
+            script_sigs.push(Vec::new());
+            witnesses.push(vec![crate::taproot::sign(&kp, &sh, &aux).to_vec()]);
         } else {
             return Err("a coin this key can't sign for".into());
         }
@@ -240,11 +256,24 @@ pub fn sign_keyhash(p: &ChainParams, version: i32, utxos: &[Utxo], outs: &[TxOut
     Tx::parse_with(&raw, &p.format).map_err(|e| format!("built a tx that doesn't parse: {e}"))
 }
 
-/// Check every input of a tx we built with sign_keyhash (P2PKH and P2WPKH), before sending.
+/// Check every input of a tx we built with sign_keyhash (P2PKH, P2WPKH, own Taproot key path),
+/// before sending.
 pub fn verify_keyhash(p: &ChainParams, tx: &Tx, utxos: &[Utxo]) -> bool {
     let outs: Vec<TxOutSpec> = tx.outputs.iter().map(|o| TxOutSpec { value: o.value, script: o.script_pubkey.clone() }).collect();
+    let outs_tr: Vec<(u64, Vec<u8>)> = outs.iter().map(|o| (o.value, o.script.clone())).collect();
+    let spent: Vec<crate::taproot::SpentInput> = utxos
+        .iter()
+        .zip(&tx.inputs)
+        .map(|(u, i)| crate::taproot::SpentInput { outpoint: u.outpoint, sequence: i.sequence, amount: u.value, script: &u.script })
+        .collect();
     for (i, u) in utxos.iter().enumerate() {
-        if p2wpkh_hash(&u.script).is_some() {
+        if u.script.len() == 34 && u.script[0] == 0x51 && u.script[1] == 0x20 {
+            let w = &tx.inputs[i].witness;
+            let Ok(q) = secp256k1::XOnlyPublicKey::from_slice(&u.script[2..]) else { return false };
+            if w.len() != 1 || !crate::taproot::verify(&q, &crate::taproot::sighash_default(tx.version, tx.lock_time, &spent, &outs_tr, i), &w[0]) {
+                return false;
+            }
+        } else if p2wpkh_hash(&u.script).is_some() {
             let w = &tx.inputs[i].witness;
             if w.len() != 2 {
                 return false;

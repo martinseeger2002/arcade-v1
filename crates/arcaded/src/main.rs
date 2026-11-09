@@ -14,6 +14,7 @@ mod borrow;
 mod appsvc;
 mod walletsvc;
 mod coinsend;
+mod ddsvc;
 mod commands;
 mod chainsvc;
 mod chains;

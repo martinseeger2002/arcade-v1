@@ -8,6 +8,7 @@ license.workspace = true
 arcade-chain = { version = "0.1.0", path = "../arcade-chain" }
 arcade-ledger = { version = "0.1.0", path = "../arcade-ledger" }
 bip39 = { version = "2", features = ["rand"] }
+getrandom = "0.2"
 hex = "0.4.3"
 hmac = "0.13.0"
 secp256k1 = { version = "0.29", features = ["global-context", "recovery"] }
