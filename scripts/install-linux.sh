@@ -160,6 +160,7 @@ Environment=ARCADE_HOME=$HOME_DIR
 ExecStart=$BIN/arcaded --home $HOME_DIR --http-port $HTTP_PORT --mesh-port $MESH_PORT --stun-port $STUN_PORT
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=300
 
 [Install]
 WantedBy=default.target

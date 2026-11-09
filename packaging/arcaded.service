@@ -11,6 +11,8 @@ Group=arcade
 ExecStart=/usr/bin/arcaded --home /var/lib/arcade
 Restart=on-failure
 RestartSec=5
+# Stopping writes the coin cache to the database first (up to a minute or two while catching up).
+TimeoutStopSec=300
 StateDirectory=arcade
 StateDirectoryMode=0750
 UMask=0007

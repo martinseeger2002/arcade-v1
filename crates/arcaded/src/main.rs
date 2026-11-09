@@ -111,6 +111,42 @@ fn tame_malloc() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn tame_malloc() {}
 
+/// Set by SIGTERM / SIGINT; the "stop" thread flushes and exits.
+static STOP_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_stop_signal(_: libc::c_int) {
+    STOP_ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// On SIGTERM (systemctl stop, kill) or SIGINT (Ctrl-C): write every chain's coin cache to the
+/// database, then exit. Without this a restart while catching up threw away everything since
+/// the last cache flush (up to 10 minutes of blocks): the tip was wound back to "coins_at".
+fn stop_cleanly_on_signal(node: Arc<Node>) {
+    unsafe {
+        libc::signal(libc::SIGTERM, on_stop_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_stop_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
+    }
+    std::thread::Builder::new()
+        .name("stop".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if STOP_ASKED.load(std::sync::atomic::Ordering::SeqCst) {
+                eprintln!("arcaded: stopping: writing the coin caches");
+                let t = std::time::Instant::now();
+                for c in 0..=255u16 {
+                    if !node.chain.coins_settled(c) {
+                        if let Err(e) = node.chain.flush_coins(c) {
+                            eprintln!("arcaded: chain {c}: coin cache not written: {e}");
+                        }
+                    }
+                }
+                eprintln!("arcaded: stopped ({:.1}s)", t.elapsed().as_secs_f64());
+                std::process::exit(0);
+            }
+        })
+        .unwrap();
+}
+
 fn main() {
     tame_malloc();
     be_polite();
@@ -302,5 +338,6 @@ fn main() {
         let n = node.clone();
         std::thread::Builder::new().name("http".into()).spawn(move || http::serve(n, o)).unwrap();
     }
+    stop_cleanly_on_signal(node.clone());
     api::serve(node, home.join("arcaded.sock"));
 }
