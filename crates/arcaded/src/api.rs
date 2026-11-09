@@ -225,7 +225,15 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "wallet.deny" => crate::walletsvc::deny(node, &s("id").ok_or("id required")?),
         "apps.owner" => Ok(crate::walletsvc::owner_identity(node, &s("page").ok_or("page required")?)),
         "apps.owner_send" => crate::walletsvc::owner_send(node, &s("page").ok_or("page required")?, &req["request"]),
-        "realtime.join" => crate::realtime::join(node, &s("page").ok_or("page required")?, &s("game").unwrap_or_default(), &s("room").ok_or("room required")?),
+        "realtime.join" => {
+            let who = s("member").filter(|m| !m.is_empty()).map(|m| (m, Some(req["cred"].clone()).filter(|c| !c.is_null())));
+            crate::realtime::join_as(node, &s("page").ok_or("page required")?, &s("game").unwrap_or_default(), &s("room").ok_or("room required")?, who)
+        }
+        "realtime.cert" => crate::realtime::cert(node, &s("address").ok_or("address required")?),
+        "tx.coins" => crate::sitesvc::coins(node, req),
+        "tx.activity" => crate::sitesvc::activity(node, req),
+        "tx.fee" => crate::sitesvc::fee(node, req),
+        "tx.broadcast" => crate::sitesvc::broadcast(node, req),
         "realtime.send" => crate::realtime::send(node, &s("token").ok_or("token required")?, req["data"].as_str(), req["b64"].as_str()),
         "realtime.leave" => crate::realtime::leave(node, &s("token").ok_or("token required")?),
         "realtime.poll" => crate::realtime::poll(&s("token").ok_or("token required")?, req["wait"].as_u64().unwrap_or(0)),

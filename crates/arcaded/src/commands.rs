@@ -65,6 +65,11 @@ cmds! {
     "mesh.udp_set" Admin "on?, lan_dial?, stun_port?, drop?" "Turn UDP paths and introductions on or off (ARCADE_MESH_UDP=0 overrides), offer LAN addresses to every peer, set the STUN port for the next start (0 = none); drop = a peer id prefix whose path to fail now (falls back to TCP).";
     "events" Read "n?, kind?" "Recent activity (newest first), optionally of one kind.";
     "mempool" Public "" "Home chain transactions waiting for a block.";
+    // For a website server in front of this arcade (its users hold their own keys)
+    "tx.coins" Public "addresses, chain?" "Spendable coins of up to 500 addresses (confirmed, not spent by a waiting transaction, and unconfirmed outputs), to build a transaction for a browser to sign. Home or installed chain, Addresses index on.";
+    "tx.activity" Public "addresses, since?, chain?" "What changed for up to 500 addresses: history rows above height since, and waiting transactions paying or spending them; height to pass as since next time.";
+    "tx.fee" Public "chain?" "The fee rate (per 1000 bytes) and dust limit this arcade builds transactions with.";
+    "tx.broadcast" Post "hex, chain?" "Send a transaction signed elsewhere (a website user's browser): every input must spend a coin this arcade knows, outputs no more than inputs; pooled here and sent to the coin's network.";
     // Wallet
     "wallet.create" Local "phrase?" "Create a wallet (or restore one from 12 words). Returns the new words once.";
     "wallet.phrase" Local "" "The wallet's 12 words.";
@@ -190,7 +195,8 @@ cmds! {
     "apps.review" Admin "chain, txid, verdict" "Clear or confirm an app flagged as a lookalike.";
     "apps.trust" Admin "address, on?" "Trust a publisher (never flagged as a lookalike).";
     "apps.storage" Local "page, op, key?, value?" "An app page's saves (load, set, remove, clear, history), as arcade.storage.";
-    "realtime.join" Local "page, room, game?" "Join a room over the mesh as this arcade's player (game defaults to the page): a token, me and the members.";
+    "realtime.join" Local "page, room, game?, member?, cred?" "Join a room over the mesh as this arcade's player (game defaults to the page): a token, me and the members. A website joins for its user with member (their address, or a guest id) and cred {a, x, s} signed over realtime.cert's words.";
+    "realtime.cert" Public "address" "The words an address signs (Core signmessage) to play through this arcade, and their expiry: a website's user signs them in the browser and the site passes {a: address, x: expires, s: signature} to realtime.join.";
     "realtime.send" Local "token, data?, b64?" "Send to everyone in the room: text or base64 bytes, at most 512 bytes, about 5 a second.";
     "realtime.leave" Local "token" "Leave the room.";
     "realtime.poll" Local "token, wait?" "Room events for this seat (join, leave, message), waiting up to wait ms (15000 at most); a seat not polled for 30 s is let go.";

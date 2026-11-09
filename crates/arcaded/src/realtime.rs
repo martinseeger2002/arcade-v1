@@ -666,7 +666,20 @@ fn token() -> String {
 }
 
 /// realtime.join: page (the app's txid), game (default: the page), room.
-pub fn join(node: &Node, page: &str, game: &str, room: &str) -> Result<Value, String> {
+/// What a website user's browser signs to play through this arcade (Core signmessage with the
+/// address's key): the words, the expiry to send back in the cred, and this arcade's node id.
+pub fn cert(node: &Node, address: &str) -> Result<Value, String> {
+    if arcade_ledger::address::script_for_address(node.params, address).is_none() {
+        return Err(format!("{address} is not a {} address", node.params.name));
+    }
+    let x = cert_expiry();
+    let me = my_id(node);
+    Ok(json!({"words": cert_words(&me, address, x), "expires": x, "node": me, "address": address}))
+}
+
+/// Join as `who` = (member, cred) instead of this arcade's own player: a website's user, vouched
+/// by a cert their address signed for this arcade (`cert`), or a guest ("guest-" + 8 hex).
+pub fn join_as(node: &Node, page: &str, game: &str, room: &str, who_as: Option<(String, Option<Value>)>) -> Result<Value, String> {
     let game = if game.is_empty() { page } else { game };
     if !game_ok(game) {
         return Err("game is 1 to 64 letters, digits or . _ : -".into());
@@ -683,7 +696,21 @@ pub fn join(node: &Node, page: &str, game: &str, room: &str) -> Result<Value, St
     if !st.locals.contains_key(&full) && st.locals.len() >= MAX_ROOMS {
         return Err("this arcade is in too many rooms".into());
     }
-    let (member, cred) = my_player(node, &mut st);
+    let (member, cred) = match who_as {
+        Some((m, c)) => {
+            let c = c.filter(|c| !c.is_null());
+            let origin = my_id(node);
+            if !vet(node, &mut st, &origin, &m, c.as_ref()) {
+                return Err(if c.is_none() {
+                    "a member without a cred must be a guest (\"guest-\" + 8 hex)".into()
+                } else {
+                    "that cred doesn't vouch for the member here (a = member, signed words from realtime.cert, not expired)".into()
+                });
+            }
+            (m, c)
+        }
+        None => my_player(node, &mut st),
+    };
     let l = st.locals.entry(full.clone()).or_default();
     let new = !l.members.contains_key(&member);
     l.members.entry(member.clone()).or_insert(Seat { cred: cred.clone(), sessions: 0 }).sessions += 1;

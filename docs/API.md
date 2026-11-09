@@ -83,6 +83,15 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 | `mesh.udp` | `/api/v1/mesh/udp` | read | — | UDP hole punching: STUN server and proved addresses, NAT kind, which links run over UDP paths (RTT, packets), introductions. |
 | `mesh.udp_set` | `/api/v1/mesh/udp_set` | admin | on?, lan_dial?, stun_port?, drop? | Turn UDP paths and introductions on or off (ARCADE_MESH_UDP=0 overrides), offer LAN addresses to every peer, set the STUN port for the next start (0 = none); drop = a peer id prefix whose path to fail now (falls back to TCP). |
 
+### Tx
+
+| method | route | needs | params | what |
+|---|---|---|---|---|
+| `tx.coins` | `/api/v1/tx/coins` | public | addresses, chain? | Spendable coins of up to 500 addresses (confirmed, not spent by a waiting transaction, and unconfirmed outputs), to build a transaction for a browser to sign. Home or installed chain, Addresses index on. |
+| `tx.activity` | `/api/v1/tx/activity` | public | addresses, since?, chain? | What changed for up to 500 addresses: history rows above height since, and waiting transactions paying or spending them; height to pass as since next time. |
+| `tx.fee` | `/api/v1/tx/fee` | public | chain? | The fee rate (per 1000 bytes) and dust limit this arcade builds transactions with. |
+| `tx.broadcast` | `/api/v1/tx/broadcast` | post | hex, chain? | Send a transaction signed elsewhere (a website user's browser): every input must spend a coin this arcade knows, outputs no more than inputs; pooled here and sent to the coin's network. |
+
 ### Wallet
 
 | method | route | needs | params | what |
@@ -232,6 +241,10 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 | `chains.index_add` | `/api/v1/chains/index_add` | admin | key, index | Add an index to a chain. |
 | `chains.index_remove` | `/api/v1/chains/index_remove` | admin | key, index | Remove an index from a chain. |
 | `chains.remove` | `/api/v1/chains/remove` | admin | key | Remove a chain and its data. |
+| `chains.copy_status` | `/api/v1/chains/copy_status` | public | key? | Core-data copies (cb) linked arcades offer for installed chains, the fetch and import in progress, and whether a chain's coin set is trusted from a copy or verified. |
+| `chains.copy_start` | `/api/v1/chains/copy_start` | admin | key, what? | Bootstrap a chain from the best copy offered: what = coins (the coin set; missing blocks are fetched from the network and stored, default) or all (the copy's blocks too). |
+| `chains.copy_cancel` | `/api/v1/chains/copy_cancel` | admin | key | Stop fetching a copy (its pieces are deleted) or decline the offer: the chain syncs the usual way. |
+| `chains.copy_verify` | `/api/v1/chains/copy_verify` | admin | key | Re-check a coin set taken from a copy: derive it from the blocks again (ours replaces it if it differs). |
 
 ### Borrow
 
@@ -273,7 +286,8 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 
 | method | route | needs | params | what |
 |---|---|---|---|---|
-| `realtime.join` | `/api/v1/realtime/join` | local | page, room, game? | Join a room over the mesh as this arcade's player (game defaults to the page): a token, me and the members. |
+| `realtime.join` | `/api/v1/realtime/join` | local | page, room, game?, member?, cred? | Join a room over the mesh as this arcade's player (game defaults to the page): a token, me and the members. A website joins for its user with member (their address, or a guest id) and cred {a, x, s} signed over realtime.cert's words. |
+| `realtime.cert` | `/api/v1/realtime/cert` | public | address | The words an address signs (Core signmessage) to play through this arcade, and their expiry: a website's user signs them in the browser and the site passes {a: address, x: expires, s: signature} to realtime.join. |
 | `realtime.send` | `/api/v1/realtime/send` | local | token, data?, b64? | Send to everyone in the room: text or base64 bytes, at most 512 bytes, about 5 a second. |
 | `realtime.leave` | `/api/v1/realtime/leave` | local | token | Leave the room. |
 | `realtime.poll` | `/api/v1/realtime/poll` | local | token, wait? | Room events for this seat (join, leave, message), waiting up to wait ms (15000 at most); a seat not polled for 30 s is let go. |

@@ -33,6 +33,7 @@ mod meshsource;
 mod miner;
 mod meshsvc;
 mod msgsvc;
+mod sitesvc;
 mod grpsvc;
 mod feedsvc;
 mod node;
