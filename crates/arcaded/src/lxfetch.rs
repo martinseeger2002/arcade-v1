@@ -494,13 +494,19 @@ fn step(node: &Arc<Node>, p: &'static ChainParams) {
                 s.jobs.insert(p.net.to_string(), j);
             }
         } else {
-            // Nobody offers a whole copy: ask the 3 furthest ahead to make one, every 10 minutes.
+            // Nobody offers a whole copy: ask the 3 furthest ahead to make one, every 10 minutes,
+            // but only when no copy at all is offered (one past our stored tip is no reason) and
+            // only arcades whose copy we could use (indexed within 100 of our stored tip).
+            let offered = s.heard.values().any(|h| h.at + FRESH >= now() && offer_of(h, p.net).is_some_and(|o| !s.refused.contains(&o.0)));
+            if offered {
+                return;
+            }
             let mut ahead: Vec<(u64, String)> = s
                 .heard
                 .iter()
                 .filter(|(_, h)| h.at + FRESH >= now())
                 .filter_map(|(peer, h)| h.nets[p.net]["h"].as_u64().map(|x| (x, peer.clone())))
-                .filter(|(x, _)| *x >= have + WORTH)
+                .filter(|(x, _)| *x >= have + WORTH && *x <= tip_h + 100)
                 .collect();
             if !ahead.is_empty() && s.asked.get(p.net).is_none_or(|t| t.elapsed() > ASK_EVERY) {
                 ahead.sort();
