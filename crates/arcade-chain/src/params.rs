@@ -353,8 +353,12 @@ pub static KOTIA_MAIN: ChainParams = ChainParams {
     wif_version: 173,
     bip44_coin_type: 3,
     protocol_version: 70013,
+    // Kotia Core v2.4 (eleonoraandrea/kotiacash) lists node1, node2 and secondnode.kotia.cash;
+    // node2 resolves to Cloudflare proxy addresses that carry no P2P, and node1 and secondnode
+    // are the same single node. So also the nodes that served a whole V1.0 sync from block 0
+    // on 2026-11-09 (one of them an arcade's).
     dns_seeds: &["node1.kotia.cash", "secondnode.kotia.cash"],
-    fixed_peers: &["94.156.144.178:46174"],
+    fixed_peers: &["94.156.144.178:46174", "156.67.28.112:46174", "[2a02:c207:2367:7616::1]:46174"],
     checkpoints: &[],
     coinbase_maturity: 20,
     index_start: 1_530_000,
