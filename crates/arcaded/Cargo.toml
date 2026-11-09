@@ -9,6 +9,8 @@ arcade-app = { version = "0.1.0", path = "../arcade-app" }
 arcade-chain = { version = "0.1.0", path = "../arcade-chain" }
 arcade-chaindb = { version = "0.1.0", path = "../arcade-chaindb" }
 arcade-ledger = { version = "0.1.0", path = "../arcade-ledger" }
+# Taking old arcades' index copies in (docs/INDEXBOOT.md); brings a bundled, read-only SQLite.
+arcade-oldimport = { version = "0.1.0", path = "../arcade-oldimport", optional = true }
 crypto_box = "0.9"
 crypto_secretbox = { version = "0.1", features = ["salsa20"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
@@ -29,6 +31,10 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 secp256k1 = "0.29"
+
+[features]
+default = ["oldimport"]
+oldimport = ["dep:arcade-oldimport"]
 
 [dev-dependencies]
 tempfile = "3.27.0"

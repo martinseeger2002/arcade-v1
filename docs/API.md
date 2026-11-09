@@ -245,6 +245,9 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 | `chains.copy_start` | `/api/v1/chains/copy_start` | admin | key, what? | Bootstrap a chain from the best copy offered: what = coins (the coin set; missing blocks are fetched from the network and stored, default) or all (the copy's blocks too). |
 | `chains.copy_cancel` | `/api/v1/chains/copy_cancel` | admin | key | Stop fetching a copy (its pieces are deleted) or decline the offer: the chain syncs the usual way. |
 | `chains.copy_verify` | `/api/v1/chains/copy_verify` | admin | key | Re-check a coin set taken from a copy: derive it from the blocks again (ours replaces it if it differs). |
+| `chains.index_copy_status` | `/api/v1/chains/index_copy_status` | public | key? | Index copies (docs/INDEXBOOT.md): what old arcades offer per chain, the fetch, its votes, and whether an index here came from a copy. |
+| `chains.index_copy_start` | `/api/v1/chains/index_copy_start` | admin | key, index, from? | Fetch an index copy now from the best offer (index = ledger; from = one arcade's node id): it is taken in only if 2 or more other arcades agree with it. |
+| `chains.index_copy_cancel` | `/api/v1/chains/index_copy_cancel` | admin | key, index | Stop fetching an index copy (its pieces are deleted). |
 
 ### Borrow
 

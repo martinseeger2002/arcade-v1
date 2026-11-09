@@ -28,6 +28,9 @@ const HELP: &str = "arcade — Arcade V1.0
   arcade chain copy status [key]             Core-data copies (cb) offered, fetches in progress, trusted/verified coin sets
   arcade chain copy start <key> [coins|all]  bootstrap from the best copy (coins: coin set only, the default)
   arcade chain copy cancel|verify <key>      stop a fetch (sync it myself) | re-check a copied coin set now
+  arcade chain index copy status [key]       index copies old arcades offer, fetches, votes, copied indexes
+  arcade chain index copy start <key> ledger [--from NODE]   take a ledger copy now (2+ other arcades must agree)
+  arcade chain index copy cancel <key> ledger                stop fetching it
   arcade chain pause|resume|remove <key>
   arcade chain index add|remove <key> <index>
   arcade ledger [height]         ledger fingerprints vs. other arcades; a block's digest rows
@@ -265,6 +268,11 @@ fn main() {
         ["chain", "copy", "start", k, w] => json!({"cmd": "chains.copy_start", "key": k, "what": w}),
         ["chain", "copy", "cancel", k] => json!({"cmd": "chains.copy_cancel", "key": k}),
         ["chain", "copy", "verify", k] => json!({"cmd": "chains.copy_verify", "key": k}),
+        ["chain", "index", "copy", "status"] => json!({"cmd": "chains.index_copy_status"}),
+        ["chain", "index", "copy", "status", k] => json!({"cmd": "chains.index_copy_status", "key": k}),
+        ["chain", "index", "copy", "start", k, ix] => json!({"cmd": "chains.index_copy_start", "key": k, "index": ix}),
+        ["chain", "index", "copy", "start", k, ix, "--from", node] => json!({"cmd": "chains.index_copy_start", "key": k, "index": ix, "from": node}),
+        ["chain", "index", "copy", "cancel", k, ix] => json!({"cmd": "chains.index_copy_cancel", "key": k, "index": ix}),
         ["chain", "index", "add", k, ix] => json!({"cmd": "chains.index_add", "key": k, "index": ix}),
         ["chain", "index", "remove", k, ix] => json!({"cmd": "chains.index_remove", "key": k, "index": ix}),
         ["chain", "add", k, rest @ ..] => {

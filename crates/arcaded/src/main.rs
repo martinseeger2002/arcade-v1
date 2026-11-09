@@ -29,6 +29,8 @@ mod http;
 mod importsvc;
 mod ledger;
 mod links;
+#[cfg(feature = "oldimport")]
+mod lxfetch;
 mod meshsource;
 mod miner;
 mod meshsvc;
@@ -179,6 +181,12 @@ fn main() {
         // "cb" Core-data copies: asking, fetching, taking in, re-checking.
         let n = node.clone();
         std::thread::Builder::new().name("coreboot".into()).spawn(move || coreboot::run(n)).unwrap();
+    }
+    #[cfg(feature = "oldimport")]
+    {
+        // "lx" ledger copies from old arcades: fetching, voting, taking in.
+        let n = node.clone();
+        std::thread::Builder::new().name("lx copies".into()).spawn(move || lxfetch::run(n)).unwrap();
     }
     let _ = node.app.event("service", "arcaded started");
     eprintln!(

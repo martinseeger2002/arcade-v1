@@ -5,7 +5,8 @@ Status: **approved by Martin 2026-11-09; being built phase by phase (§11).** Dr
 | Phase | State |
 |---|---|
 | 1. Converter and fixtures | **built**: `crates/arcade-oldimport` (library + `arcade-oldimport` tool), tests in `tests/convert.rs`. Checked on real files, see §8.1 results. |
-| 2 to 6 | not started |
+| 2. lx client (ledger) | **built**: `crates/arcaded/src/lxfetch.rs`, feature `oldimport` (default on). Tested live, see §8.2 results. |
+| 3 to 6 | not started |
 
 ## Martin's decisions
 
@@ -181,6 +182,9 @@ For Dogecoin ord (180 M inscriptions) this re-check is days of background work. 
      - Rows are written in key order (sorted runs on disk, then a merge with mdbx `append`). Writing in the old files' row order instead took 14 min 41 s, ~1 TB of SSD writes and 19 GB of half-full pages; sorted, it's ~19 GB of writes. For Dogecoin (10x) expect ~25 min, ~95 GB of tables, and the same again in temporary run files during the conversion (§10).
      - Still to do for §8.1: compare converted ord records with a natively walked V1.0 ord index (the mini PC's Pepecoin one).
 2. **Pepecoin testnet ledger over lx** from an old arcade, into a fresh V1.0 home. Our `d/s/n` at the copy height must equal both the manifest and the V1.0 index we already have. The re-check runs to `verified`.
+   - **Results (2026-11-09, GX10, phase 2):** a throwaway V1.0 home (a copy of the GX10's Pepecoin testnet chain with its ledger index emptied) linked to the live mesh. Strawberry offered a whole lx copy (`fa873224…`, block 1,562,519, 427 pieces); `arcade chain index copy start peptest ledger` fetched it, **8 of 8** other arcades agreed with its `d` at 1,562,500, it converted, and `d`, `s` and `n` equaled the manifest. Afterwards `arcade ledger` showed `d_match` with all 8 peers and the walk went on to the tip; the pieces were deleted.
+   - Finding: V1.0 walks the Pepecoin testnet ledger (66,000 blocks) natively in under 10 s, so for this chain a copy only matters as a cross-check. Copies pay off for ord (§8.3) and for long chains.
+   - While a copy is being fetched (at most 30 min from its start) or converted, that chain's own ledger walk waits, so the two don't race.
 3. **Pepecoin mainnet ord** (Strawberry walks it, 100%) over dx, into a fresh home. Compare against the mini PC's own walked ord index (its oracle).
 4. **Native `vx` copies** of the same indexes between the GX10 and the mini PC, then the address index (the `B` remapping).
 5. **Dogecoin ord from Strawberry:**

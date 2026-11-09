@@ -15,6 +15,10 @@ pub fn catch_up(node: &Node) -> Result<u32, String> {
     }
     let running = node.chain.indexers_for(node.params.chain_no);
     for name in INDEXES.iter().filter(|i| running.contains(i)) {
+        #[cfg(feature = "oldimport")]
+        if *name == "ledger.v1" && crate::lxfetch::holds(node.params.key) {
+            continue; // a ledger copy is on its way (crate::lxfetch)
+        }
         loop {
             if node.home_mode == "shared" {
                 crate::shares::prepare_backfill(node, node.params, name, 500)?;

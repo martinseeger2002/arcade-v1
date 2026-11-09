@@ -302,6 +302,8 @@ fn serve_loop(
         // UDP path: ask, switch over, fall back; proofs and introductions for this link.
         crate::udpsvc::tick(node, link)?;
         crate::coreboot::tick(node, link)?;
+        #[cfg(feature = "oldimport")]
+        crate::lxfetch::tick(link)?;
         if last_me.elapsed() > Duration::from_secs(60) {
             link.send(&Frame::new(operator_me(node)))?;
             // The chains we lend, again when they change (a chain finishing its sync, say).
@@ -339,7 +341,11 @@ fn serve_loop(
         };
         match f.kind() {
             "ping" => link.send(&Frame::pong(&f))?,
+            #[cfg(feature = "oldimport")]
+            "ix" if f.head["op"] == "a" => crate::lxfetch::on_ix(&link.peer_id, &f.head),
             "ix" if f.head["op"] == "tip" => {
+                #[cfg(feature = "oldimport")]
+                crate::lxfetch::on_ix(&link.peer_id, &f.head);
                 if let Some(t) = f.head["nets"].get(node.params.net) {
                     node.mesh_tips.lock().unwrap().insert(
                         addr.to_string(),
@@ -366,6 +372,8 @@ fn serve_loop(
             "ud" | "st" | "ui" => crate::udpsvc::on_frame(node, link, &f)?,
             "ka" => {} // TCP keepalive while frames go over UDP
             "cb" => crate::coreboot::on_frame(node, link, &f)?,
+            #[cfg(feature = "oldimport")]
+            "lx" => crate::lxfetch::on_frame(node, link, &f)?,
             "cr" => {
                 if f.head["op"] == "offer" {
                     note_offer(node, &link.peer_id, addr, "cr", &f.head["nets"]);
