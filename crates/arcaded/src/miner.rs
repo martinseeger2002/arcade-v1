@@ -24,9 +24,18 @@ pub struct MinerState {
     pub started: std::sync::Mutex<Option<Instant>>,
 }
 
-fn push(s: &mut Vec<u8>, d: &[u8]) {
-    s.push(d.len() as u8);
-    s.extend_from_slice(d);
+use arcade_wallet::tx::push;
+
+#[cfg(test)]
+#[test]
+fn coinbase_pushes_unchanged() {
+    // The miner's own push (a length byte, then the data) for what it pushes (<= 75 bytes).
+    for n in 0..=75usize {
+        let d = vec![7u8; n];
+        let mut a = Vec::new();
+        push(&mut a, &d);
+        assert_eq!(a, [&[n as u8][..], &d].concat());
+    }
 }
 
 struct Template {

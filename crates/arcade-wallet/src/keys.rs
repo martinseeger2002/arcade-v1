@@ -177,16 +177,7 @@ pub fn verify_message(pubkey_hex: &str, message: &[u8], sig_hex: &str) -> bool {
 pub const PEPECOIN_MAGIC: &str = "Pepecoin Signed Message:\n";
 
 fn varstr(b: &[u8], out: &mut Vec<u8>) {
-    let n = b.len();
-    if n < 0xfd {
-        out.push(n as u8);
-    } else if n <= 0xffff {
-        out.push(0xfd);
-        out.extend_from_slice(&(n as u16).to_le_bytes());
-    } else {
-        out.push(0xfe);
-        out.extend_from_slice(&(n as u32).to_le_bytes());
-    }
+    arcade_chain::encode::write_varint(out, b.len() as u64);
     out.extend_from_slice(b);
 }
 
@@ -230,6 +221,16 @@ pub fn verifymessage(address: &str, sig_b64: &str, magic: &str, message: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Captured before varstr moved onto arcade_chain's write_varint (a 300-byte message takes
+    /// the 0xfd length form): must not change.
+    #[test]
+    fn golden_core_digest() {
+        let long = "x".repeat(300);
+        assert_eq!(hex::encode(core_digest(PEPECOIN_MAGIC, "arcade-realtime\nx")), "372ff978ad34fa25391e77469cc3b68419296da1b2e14311f2d238d9e895fc32");
+        assert_eq!(hex::encode(core_digest(PEPECOIN_MAGIC, &long)), "0396ef31488592139137443573e98e2f23ad24bd9eb2c2050052fcc66fbb1150");
+        assert_eq!(signmessage(&SecretKey::from_slice(&[7u8; 32]).unwrap(), PEPECOIN_MAGIC, &long), "IPFDmlQICZdo+YsnN5mh27n7aKmY0HTX7+1sVRnK9Pv1Kl0SpMjw1HFH8vmTx+Z24RbrbBbXsy8ymx6RKCX5JO8=");
+    }
 
     #[test]
     fn core_signmessage_round_trip() {
