@@ -44,20 +44,8 @@
 
   <!-- Wallet -->
   <section id="wallet" class="tab">
-    <h1 id="w-title">Wallet</h1>
-    <h2>Accounts</h2>
-    <table><thead><tr><th>Account</th><th>Address</th><th>From</th><th></th></tr></thead><tbody id="w-accs"></tbody></table>
-    <details id="w-signin-box">
-      <summary>Sign in with a Dogecoin Arcade account</summary>
-      <p class="note">Your account's words are kept on the arcade that holds your account, sealed under your password; any arcade hands out the sealed copy and only your password opens it, here on this PC. Your imported wallets, groups, address book and blocked list come with it. The password is not stored.</p>
-      <div class="row">
-        <span class="at">@</span><input id="w-stag" placeholder="yourtag" maxlength="24" autocomplete="off" style="max-width:10em">
-        <input id="w-spw" type="password" placeholder="password" autocomplete="off" style="max-width:14em">
-        <input id="w-sfrom" placeholder="arcade (optional, e.g. dogecoinarcade.com)" autocomplete="off">
-        <button class="primary" id="w-signin">Sign in</button>
-      </div>
-    </details>
     <div id="w-none" hidden>
+      <h1>Wallet</h1>
       <p>Your wallet is a 12-word recovery phrase. It lives on this PC with no password; the phrase is the only backup.</p>
       <div class="row">
         <button class="primary" id="w-create">Create a new wallet</button>
@@ -72,57 +60,92 @@
       <label><input type="checkbox" id="w-saved"> I wrote them down</label>
       <div class="row"><button class="primary" id="w-done" disabled>Done</button></div>
     </div>
-    <div id="w-keys" hidden>
-      <table><thead><tr><th>#</th><th>Address</th><th>Tag</th><th class="num">Balance</th></tr></thead><tbody id="w-rows"></tbody></table>
-      <p class="note" id="w-legacy" hidden></p>
-      <div class="row"><button id="w-faucet">Ask the mesh for test coins</button></div>
-      <h2 id="w-send-h">Send</h2>
-      <div class="row">
-        <input id="w-to" placeholder="address" autocomplete="off" style="flex:1;min-width:16em">
-        <input id="w-amt" placeholder="amount" inputmode="decimal" autocomplete="off" style="max-width:9em">
-        <span class="home-ticker" id="w-amt-unit"></span>
-        <button id="w-review">Review</button>
+
+    <div id="w-main" hidden>
+      <div class="wl-hero">
+        <div class="wl-top">
+          <span id="w-logo"></span>
+          <span class="wl-who" id="w-who"></span>
+          <select id="w-pick" title="Which wallet"></select>
+        </div>
+        <div class="wl-bal"><span id="w-bal">—</span> <span class="wl-unit" id="w-unit"></span></div>
+        <div class="wl-sub" id="w-sub"></div>
+        <div class="wl-addrrow">
+          <code id="w-addr"></code>
+          <button class="small" id="w-copy">Copy</button>
+          <button class="small" id="w-forget" hidden>Remove this wallet</button>
+        </div>
+        <div class="wl-actions">
+          <button class="primary" id="w-btn-send">Send ↑</button>
+          <button class="primary" id="w-btn-recv">Receive ↓</button>
+          <button id="w-faucet">Test coins</button>
+        </div>
       </div>
-      <p class="msg" id="w-send-msg"></p>
-      <div id="w-dd" hidden>
-        <h2>DigiDollar</h2>
-        <table><tbody>
-          <tr><td>Address</td><td id="w-dd-addr"></td></tr>
-          <tr><td>Balance</td><td id="w-dd-bal"></td></tr>
-        </tbody></table>
-        <p class="note" id="w-dd-note"></p>
+
+      <div id="w-imp-panel" class="wl-panel" hidden>
+        <h2>Import a wallet</h2>
+        <p class="wl-hint">Paste a private key (WIF) or another wallet's 12 or 24 words; words give that wallet's first address. Kept here, encrypted; nothing is published.</p>
+        <textarea id="w-isecret" rows="2" placeholder="private key (WIF) or recovery words" autocomplete="off" spellcheck="false"></textarea>
         <div class="row">
-          <input id="w-dd-to" placeholder="DD... address" autocomplete="off" style="flex:1;min-width:16em">
-          <span class="at">$</span><input id="w-dd-amt" placeholder="amount" inputmode="decimal" autocomplete="off" style="max-width:8em">
-          <button id="w-dd-review">Review</button>
-        </div>
-        <p class="msg" id="w-dd-msg"></p>
-        <div id="w-dd-confirm" class="warn" hidden>
-          <div id="w-dd-confirm-text"></div>
-          <div class="row"><button class="primary" id="w-dd-sendnow">Send</button><button id="w-dd-cancel">Cancel</button></div>
+          <label class="wl-hint">Address kind <select id="w-ikind"><option value="legacy">legacy</option><option value="p2wpkh">SegWit (p2wpkh)</option><option value="p2sh-p2wpkh">wrapped SegWit (p2sh-p2wpkh, receive only)</option></select></label>
+          <input id="w-iname" placeholder="name (optional)" maxlength="60" autocomplete="off" style="max-width:12em">
+          <button class="primary" id="w-import">Import</button>
+          <button id="w-imp-cancel">Cancel</button>
         </div>
       </div>
-      <div id="w-confirm" class="warn" hidden>
-        <div id="w-confirm-text"></div>
-        <div class="row"><button class="primary" id="w-sendnow">Send</button><button id="w-cancel">Cancel</button></div>
+
+      <div id="w-send-panel" class="wl-panel" hidden>
+        <h2>Send</h2>
+        <div class="row">
+          <select id="w-asset"></select>
+          <input id="w-to" placeholder="address" autocomplete="off" style="flex:1;min-width:16em">
+          <input id="w-amt" placeholder="amount" inputmode="decimal" autocomplete="off" style="max-width:9em">
+          <span class="wl-unit" id="w-amt-unit"></span>
+          <button class="primary" id="w-review">Review</button>
+        </div>
+        <p class="msg" id="w-send-msg"></p>
+        <div id="w-confirm" class="warn" hidden>
+          <div id="w-confirm-text"></div>
+          <div class="row"><button class="primary" id="w-sendnow">Send</button><button id="w-cancel">Cancel</button></div>
+        </div>
       </div>
-      <h2>Linked wallets</h2>
-      <p class="note">Attach another wallet on this chain to your @tag. The wallet's key and your @tag's key both sign the link, so other arcades can check it. The key is kept here, encrypted.</p>
-      <table><thead><tr><th>Address</th><th>Tag</th><th class="num">Balance</th><th></th></tr></thead><tbody id="w-links"></tbody></table>
-      <div class="row">
-        <span class="at">@</span><input id="w-ltag" placeholder="yourtag" maxlength="24" autocomplete="off" style="max-width:10em">
-        <input id="w-wif" type="password" placeholder="private key (WIF)" autocomplete="off">
-        <button id="w-link">Link wallet</button>
+
+      <div id="w-recv-panel" class="wl-panel" hidden>
+        <h2>Receive</h2>
+        <div id="w-recv-list"></div>
       </div>
-      <h2>Imported wallets</h2>
-      <p class="note">Wallets from elsewhere this account holds: a private key (WIF) or another wallet's words (its first address). Kept here, encrypted; nothing is published. Sending from SegWit kinds isn't supported yet.</p>
-      <table><thead><tr><th>Name</th><th>Address</th><th>Kind</th><th class="num">Balance</th><th></th></tr></thead><tbody id="w-imps"></tbody></table>
-      <div class="row">
-        <input id="w-isecret" type="password" placeholder="private key (WIF) or 12 words" autocomplete="off">
-        <select id="w-ikind"><option value="legacy">legacy</option><option value="p2sh-p2wpkh">p2sh-p2wpkh</option><option value="p2wpkh">p2wpkh</option></select>
-        <input id="w-iname" placeholder="name (optional)" maxlength="60" autocomplete="off" style="max-width:10em">
-        <button id="w-import">Import</button>
+
+      <div class="wl-tabs">
+        <button data-wt="activity" class="on">Activity</button>
+        <button data-wt="tokens">Tokens</button>
+        <button data-wt="nfts">NFTs</button>
       </div>
+      <div id="w-pane"></div>
+      <p class="wl-hint" id="w-note" hidden></p>
+
+      <details id="w-more">
+        <summary>Accounts, sign-in and linked wallets</summary>
+        <h2>Accounts</h2>
+        <table><thead><tr><th>Account</th><th>Address</th><th>From</th><th></th></tr></thead><tbody id="w-accs"></tbody></table>
+        <details id="w-signin-box">
+          <summary>Sign in with a Dogecoin Arcade account</summary>
+          <p class="note">Your account's words are kept on the arcade that holds your account, sealed under your password; any arcade hands out the sealed copy and only your password opens it, here on this PC. Your imported wallets, groups, address book and blocked list come with it. The password is not stored.</p>
+          <div class="row">
+            <span class="at">@</span><input id="w-stag" placeholder="yourtag" maxlength="24" autocomplete="off" style="max-width:10em">
+            <input id="w-spw" type="password" placeholder="password" autocomplete="off" style="max-width:14em">
+            <input id="w-sfrom" placeholder="arcade (optional, e.g. dogecoinarcade.com)" autocomplete="off">
+            <button class="primary" id="w-signin">Sign in</button>
+          </div>
+        </details>
+        <h2>Linked wallets</h2>
+        <p class="note">Attach another wallet on this chain to your @tag. The wallet's key and your @tag's key both sign the link, so other arcades can check it. The key is kept here, encrypted.</p>
+        <table><thead><tr><th>Address</th><th>Tag</th><th class="num">Balance</th><th></th></tr></thead><tbody id="w-links"></tbody></table>
+        <div class="row">
+          <span class="at">@</span><input id="w-ltag" placeholder="yourtag" maxlength="24" autocomplete="off" style="max-width:10em">
+          <input id="w-wif" type="password" placeholder="private key (WIF)" autocomplete="off">
+          <button id="w-link">Link wallet</button>
+        </div>
+      </details>
     </div>
     <p class="msg" id="w-msg"></p>
   </section>

@@ -63,14 +63,15 @@ pub fn warning(p: &ChainParams, to: &str) -> Option<String> {
 
 /// wallet.send: pay `amount` (satoshis) to `to` on a chain from one of this wallet's keys,
 /// signed here. With broadcast false it is only built and shown (fee, size, warning).
-pub fn send(node: &Node, key: Option<&str>, to: &str, amount: u64, broadcast: bool) -> R {
+pub fn send(node: &Node, key: Option<&str>, to: &str, amount: u64, from: Option<&str>, broadcast: bool) -> R {
+    let from = from.map(str::trim).filter(|f| !f.is_empty());
     let p: &'static ChainParams = match key.filter(|k| !k.is_empty()) {
         Some(k) => by_key(k).ok_or_else(|| format!("unknown chain {k}"))?,
         None => node.params,
     };
     let warn = warning(p, to);
     if crate::borrow::is_borrowed(p.key) {
-        let mut v = crate::borrow::send(node, p.key, to, amount, None, broadcast)?;
+        let mut v = crate::borrow::send(node, p.key, to, amount, from, broadcast)?;
         v["chain"] = json!(p.key);
         v["warning"] = json!(warn);
         return Ok(v);
@@ -109,12 +110,47 @@ pub fn send(node: &Node, key: Option<&str>, to: &str, amount: u64, broadcast: bo
             }
         }
         let total: u64 = coins.iter().map(|u| u.value).sum();
+        let picked = from.is_some_and(|f| scripts.iter().any(|(a, _)| a == f));
+        if picked {
+            best = Some((k.index, scripts, coins, u64::MAX));
+            break;
+        }
         if best.as_ref().is_none_or(|b| total > b.3) {
             best = Some((k.index, scripts, coins, total));
         }
     }
-    let (index, scripts, coins, _) = best.ok_or("this wallet has no address on that chain")?;
-    let sk = node.app.tag_key(p, index).map_err(|e| e.to_string())?.1;
+    // An imported wallet picked by its address spends its own coins, change back to it.
+    let imported = match from {
+        Some(f) if !best.as_ref().is_some_and(|b| b.1.iter().any(|(a, _)| a == f)) => {
+            let (_, sc, sk, kind) = crate::importsvc::wallets_on(node, p.key).into_iter().find(|w| w.0 == f).ok_or("that address is not one of this wallet's (own or imported) on this chain")?;
+            let keyhash = (sc.len() == 25 && sc[0] == 0x76 && sc[1] == 0xa9 && kind == "legacy") || (sc.len() == 22 && sc[0] == 0 && sc[1] == 20);
+            let pk = PublicKey::from_secret_key(arcade_wallet::secp256k1::SECP256K1, &sk);
+            if !keyhash || !key_scripts(p, &pk).iter().any(|(_, s)| *s == sc) {
+                return Err("this imported wallet's kind can't be spent here yet (only legacy compressed and p2wpkh)".into());
+            }
+            let mut coins = Vec::new();
+            for (op, value, _h) in node.chain.coins_for_script(p, &sc).map_err(|e| e.to_string())? {
+                if node.chain.mempool_spender(p.chain_no, &op).map_err(|e| e.to_string())?.is_some() {
+                    continue;
+                }
+                if let Some(c) = node.chain.coin(p, &op).map_err(|e| e.to_string())? {
+                    if c.coinbase && c.height + p.coinbase_maturity > tip {
+                        continue;
+                    }
+                }
+                coins.push(Utxo { outpoint: op, value, script: sc.clone() });
+            }
+            Some((sk, vec![(f.to_string(), sc)], coins))
+        }
+        _ => None,
+    };
+    let (sk, scripts, coins) = match imported {
+        Some(x) => x,
+        None => {
+            let (index, scripts, coins, _) = best.ok_or("this wallet has no address on that chain")?;
+            (node.app.tag_key(p, index).map_err(|e| e.to_string())?.1, scripts, coins)
+        }
+    };
     let fp = fee_policy(p);
     let tx = arcade_wallet::tx::build_send_keyhash(p, &to_script, amount, &sk, &coins, &scripts[0].1, fp.fallback_per_kb.max(fp.floor_per_kb), fp.dust, arcade_app::now() as u32)?;
     let ins: u64 = tx.inputs.iter().filter_map(|i| coins.iter().find(|c| c.outpoint == i.prevout).map(|c| c.value)).sum();
