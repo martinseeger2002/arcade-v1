@@ -97,11 +97,8 @@ pub struct Pool {
 impl Pool {
     fn put_back(&self, job: Job) {
         let mut st = self.s.lock().unwrap();
-        // A copy that failed isn't out any more: it shouldn't use up one of MAX_COPIES (three
-        // fast failures would otherwise leave only a stuck fourth source).
-        if let Some((_, _, copies)) = st.inflight.get_mut(&job.start) {
-            copies.0 = copies.0.saturating_sub(1).max(1);
-        }
+        // The job goes back to the front and the next worker keeps its in-flight entry (and copy
+        // count): a failed copy is replaced one for one, so the count stays right.
         st.queue.push_front(Job { tries: job.tries + 1, ..job });
         self.cv.notify_all();
     }
