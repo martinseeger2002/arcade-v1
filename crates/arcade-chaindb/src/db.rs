@@ -489,6 +489,16 @@ impl ChainDb {
     }
 
     /// Use a coin cache of `mb` MB while catching up (0 = none).
+    /// Open a chain.mdbx for reading only (safe while its arcaded runs): reads work, writes fail.
+    pub fn open_readonly(path: impl AsRef<Path>) -> Result<ChainDb> {
+        Ok(ChainDb {
+            store: Store::open_readonly(path, &CHAIN_SCHEMA)?,
+            indexers: Default::default(),
+            caches: Default::default(),
+            cache_bytes: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
     pub fn set_coin_cache_mb(&self, mb: usize) {
         self.cache_bytes.store(mb << 20, std::sync::atomic::Ordering::Relaxed);
     }
