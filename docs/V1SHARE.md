@@ -12,6 +12,7 @@ Status: **approved by Martin 2026-11-09 ("write the plan and then start building
 - Once Dogecoin is at the tip on the mini PC, a **new V1.0 install should get it faster** from V1.0 arcades. That covers the chain itself (blocks and coins) and the indexes (ord, ledger, addresses, ...).
 - **Several V1.0 arcades share the same copy at the same time**, so it gets faster as there are more V1.0 arcades (torrent-style).
 - **Pick the parts you want**, as Chains & Coins already lets you: for example **only Dogecoin's ord index**, without the Dogecoin blocks or coins (§5.1).
+- **Every part is optional except the home chain and its index.** The home chain (Pepecoin testnet by default) and the arcade's own index on it (the arcade ledger: @tags, messages, posts, tokens, apps) are always installed. Every other chain, and every part of each one (blocks, coins, addresses, ord, tokens, names, maps, ledger), is picked or left out.
 - **Trust** (from INDEXBOOT): use a copy once **2 or more other arcades** agree with it, then rebuild it from our own blocks in the background ("trusted" now, "verified" later).
 
 This replaces INDEXBOOT §2.2, §5 "Native copies" and §7 (phase 5, `vx`), and adds what V1.0 lacked for chains: today V1.0 **takes** chain copies from old arcades (`cb`, from their Core's files) but **makes** none (`meshview.rs`: "V1.0 makes no chain copies").
@@ -84,7 +85,7 @@ Each step is resumable and can be cancelled. A failed check refuses that id, and
 
 ### 5.1 Only the parts you pick
 
-Every family is its own copy, so an install takes only what was picked in Chains & Coins:
+Every family is its own copy, so an install takes only what was picked in Chains & Coins. The **home chain** is the exception: its blocks, coins and arcade index are always taken (they are what an arcade is), and only its other parts are optional.
 
 | Picked | Taken from copies | Kept current by |
 |---|---|---|
