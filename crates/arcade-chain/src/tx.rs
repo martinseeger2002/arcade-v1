@@ -80,6 +80,39 @@ impl Tx {
         Ok(tx)
     }
 
+    /// One output (value, scriptPubKey) of a serialized transaction, without decoding the
+    /// rest: inputs are skipped by their lengths, nothing is hashed or copied. `None` when the
+    /// transaction has fewer outputs. For spent-coin lookups, where the spending side only
+    /// needs that one output (re-parsing a large inscription transaction per input is slow).
+    pub fn output_at<'a>(bytes: &'a [u8], fmt: &Format, vout: u32) -> Result<Option<(u64, &'a [u8])>, DecodeError> {
+        let mut r = Reader::new(bytes);
+        r.i32()?;
+        if fmt.tx_time {
+            r.u32()?;
+        }
+        if fmt.segwit && r.peek(2).map(|b| b[0] == 0 && b[1] != 0).unwrap_or(false) {
+            r.bytes(2)?;
+        }
+        let n_in = r.len()?;
+        for _ in 0..n_in {
+            r.bytes(36)?;
+            r.var_bytes()?;
+            r.u32()?;
+        }
+        let n_out = r.len()?;
+        if vout as usize >= n_out {
+            return Ok(None);
+        }
+        for i in 0..n_out {
+            let value = r.u64()?;
+            let script = r.var_bytes()?;
+            if i == vout as usize {
+                return Ok(Some((value, script)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Decode one transaction from the reader (it may be followed by more data).
     pub fn decode(r: &mut Reader) -> Result<Tx, DecodeError> {
         Self::decode_with(r, &Format::BITCOIN)
@@ -260,6 +293,30 @@ mod tests {
         let mut bad = hx.clone();
         bad[5] = 0x02;
         assert!(Tx::parse(&bad).is_err(), "unknown flags are refused");
+    }
+
+    /// output_at gives the same output as the full parse: legacy, segwit and timed (PoS) txs,
+    /// every vout, and None past the last one.
+    #[test]
+    fn output_at_matches_full_parse() {
+        let legacy = hex::decode(GENESIS_TX).unwrap();
+        let lt = Tx::parse(&legacy).unwrap();
+        let mut sw = Vec::new();
+        sw.extend_from_slice(&legacy[..4]);
+        sw.extend_from_slice(&[0x00, 0x01]);
+        let body_end = legacy.len() - 4;
+        sw.extend_from_slice(&legacy[4..body_end]);
+        sw.extend_from_slice(&[0x01, 0x02, 0xaa, 0xbb]);
+        sw.extend_from_slice(&legacy[body_end..]);
+        let kotia = hex::decode("01000000f0cddb6a01d17aa9770e9acc1951c5c0baa937d79ed1ef1ca2a4d682a5a38a59caf9b35a0b0100000000ffffffff03005a6202000000001976a914ecc6eedb31bc622d1f8dd722cacab2852113bfb888ac0000000000000000166a14617263616465206b6f7469612066697874757265f05f9303000000001976a914f627f2a55c5fd2f86c15d14c28dada92e7b8ccc088ac00000000").unwrap();
+        for (raw, fmt) in [(&legacy, Format::BITCOIN), (&sw, Format::BITCOIN), (&kotia, Format::POS_TIMED)] {
+            let tx = Tx::parse_with(raw, &fmt).unwrap();
+            for (i, o) in tx.outputs.iter().enumerate() {
+                assert_eq!(Tx::output_at(raw, &fmt, i as u32).unwrap(), Some((o.value, o.script_pubkey.as_slice())));
+            }
+            assert_eq!(Tx::output_at(raw, &fmt, tx.outputs.len() as u32).unwrap(), None);
+        }
+        assert_eq!(lt.outputs.len(), 1);
     }
 
     #[test]
