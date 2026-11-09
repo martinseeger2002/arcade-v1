@@ -1,18 +1,5 @@
 // Chains & Coins: install, follow, pause and remove chains by hand (arcaded chains.* API).
 (() => {
-  const $ = (id) => document.getElementById(id);
-  const invoke = window.__TAURI__.core.invoke;
-  const api = async (cmd, args = {}) => {
-    const r = await invoke("api", { req: { cmd, ...args } });
-    if (!r.ok) throw new Error(r.error || "failed");
-    return r.result;
-  };
-  // The original Dogecoin Arcade's coin icons (coins/<key>.png); others get a letter.
-  // What people call each coin (the keys underneath stay as the mesh knows them).
-  const TICKERS = { peptest: "PEPtest", pep: "PEP", doge: "DOGE", dgb: "DGB", dgbtest: "DGBtest", kot: "KOT", flop: "FLOP", ltc: "LTC", ltctest: "LTCtest", btc: "BTC", wjk: "WJK" };
-  const COIN_ICONS = ["peptest", "pep", "doge", "dgb", "dgbtest", "kot", "flop", "ltc", "ltctest", "btc", "wjk"];
-  const ICON_FILE = (k) => `coins/${k}.${k === "btc" ? "svg" : "png"}`;
-  const COLORS = { peptest: "#2e8b44", pep: "#3f9c55", dgb: "#0066cc", dgbtest: "#3388dd", kot: "#7a4cc2", flop: "#d0602a", ltc: "#345d9d", ltctest: "#5b7fb8", btc: "#f7931a" };
   const MODES = [
     ["full", "Full", "Blocks, coins, and your chosen indexes. Serves the mesh.", true],
     ["shared", "Shared", "Coins, plus your share of the blocks, ord records and token ticks; the rest is held by other arcades and fetched when needed.", true],
@@ -35,17 +22,12 @@
   const RIDERS = ["names", "maps", "tokens"];
   let chains = [], open = null, mode = "full", watching = null, poll = null;
 
-  function msg(text, bad) { const m = $("c-msg"); m.textContent = text; m.className = "msg " + (bad ? "bad" : "ok"); }
+  const msg = (text, bad) => say("c-msg", text, bad);
 
   // ---------- borrowed coins (borrow.* API) ----------
-  const coinAmt = (sat, key) => `${(Number(sat || 0) / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 })} ${TICKERS[key] || key}`;
-  function logoOf(key, name) {
-    const logo = document.createElement("div"); logo.className = "logo";
-    if (COIN_ICONS.includes(key)) { const img = document.createElement("img"); img.src = ICON_FILE(key); img.alt = ""; logo.append(img); logo.classList.add("img"); }
-    else { logo.style.background = COLORS[key] || "#777"; logo.textContent = (name || key)[0]; }
-    return logo;
-  }
-  function bmsg(text, bad) { const m = $("c-bmsg"); m.textContent = text; m.className = "msg " + (bad ? "bad" : "ok"); }
+  const coinAmt = (sat, key) => `${coinNum(Number(sat || 0))} ${TICKERS[key] || key}`;
+  const logoOf = (key, name) => coinLogo(key, name, "div", "logo");
+  const bmsg = (text, bad) => say("c-bmsg", text, bad);
   async function setBorrow(args, what) {
     try { await api("borrow.set", args); bmsg(what); refresh(); } catch (e) { bmsg(e.message, true); }
   }

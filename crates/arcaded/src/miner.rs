@@ -24,9 +24,18 @@ pub struct MinerState {
     pub started: std::sync::Mutex<Option<Instant>>,
 }
 
-fn push(s: &mut Vec<u8>, d: &[u8]) {
-    s.push(d.len() as u8);
-    s.extend_from_slice(d);
+use arcade_wallet::tx::push;
+
+#[cfg(test)]
+#[test]
+fn coinbase_pushes_unchanged() {
+    // The miner's own push (a length byte, then the data) for what it pushes (<= 75 bytes).
+    for n in 0..=75usize {
+        let d = vec![7u8; n];
+        let mut a = Vec::new();
+        push(&mut a, &d);
+        assert_eq!(a, [&[n as u8][..], &d].concat());
+    }
 }
 
 struct Template {
@@ -91,9 +100,7 @@ pub fn run(node: Arc<Node>) {
         let _ = node.app.event("mine", "create a wallet first");
         return;
     };
-    let pay = arcade_ledger::address::p2pkh_script(
-        &arcade_ledger::address::decode_base58check(&key.address).unwrap().1.try_into().unwrap(),
-    );
+    let pay = arcade_ledger::address::p2pkh_script_for_address(p, &key.address).expect("own address");
     *node.miner.started.lock().unwrap() = Some(Instant::now());
     let _ = node.app.event("mine", &format!("mining to {} with {threads} threads", key.address));
     let mut extranonce: u64 = arcade_app::now() << 16;

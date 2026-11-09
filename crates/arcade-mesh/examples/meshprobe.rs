@@ -2,7 +2,7 @@
 //! they send for a few seconds. Uses a throwaway identity; sends nothing but auth/pong.
 use arcade_mesh::link::{Frame, Link};
 use ed25519_dalek::SigningKey;
-use serde_json::json;
+
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -26,8 +26,7 @@ fn main() {
                         match l.recv() {
                             Ok(f) => {
                                 if f.kind() == "ping" {
-                                    let n = f.head["n"].as_str().unwrap_or("").chars().take(16).collect::<String>();
-                                    let _ = l.send(&Frame::new(json!({"t":"pong","n":n})));
+                                    let _ = l.send(&Frame::pong(&f));
                                 }
                                 let k = f.kind().to_string();
                                 if let Ok(key) = std::env::var("SHOW") {

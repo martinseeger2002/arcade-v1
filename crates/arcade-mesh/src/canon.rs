@@ -77,10 +77,55 @@ fn write_str(out: &mut String, s: &str) {
     out.push('"');
 }
 
+/// What an Ed25519-signed JSON record signs: canonical JSON of `v` without the `strip` fields,
+/// followed by `blob` (empty for records without one).
+pub fn signed_bytes(v: &Value, strip: &[&str], blob: &[u8]) -> Vec<u8> {
+    let mut m = v.as_object().cloned().unwrap_or_default();
+    for k in strip {
+        m.remove(*k);
+    }
+    let mut out = canonical(&Value::Object(m)).into_bytes();
+    out.extend_from_slice(blob);
+    out
+}
+
+/// Sign `v` (see signed_bytes) and set its "sig" to the hex signature.
+pub fn sign_json(key: &ed25519_dalek::SigningKey, v: &mut Value, strip: &[&str], blob: &[u8]) {
+    use ed25519_dalek::Signer;
+    let sig = key.sign(&signed_bytes(v, strip, blob));
+    v["sig"] = Value::String(hex::encode(sig.to_bytes()));
+}
+
+/// True if `v["sig"]` is the signature (see signed_bytes) by the hex Ed25519 key in `v[key_field]`.
+pub fn verify_json(v: &Value, strip: &[&str], key_field: &str, blob: &[u8]) -> bool {
+    use ed25519_dalek::Verifier;
+    let (Some(k), Some(sig)) = (v[key_field].as_str(), v["sig"].as_str()) else { return false };
+    let (Ok(k), Ok(sig)) = (hex::decode(k), hex::decode(sig)) else { return false };
+    let (Ok(k), Ok(sig)) = (<[u8; 32]>::try_from(k), <[u8; 64]>::try_from(sig)) else { return false };
+    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&k) else { return false };
+    vk.verify(&signed_bytes(v, strip, blob), &ed25519_dalek::Signature::from_bytes(&sig)).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sign_and_verify_json() {
+        let k = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let mut v = json!({"k": hex::encode(k.verifying_key().to_bytes()), "b": "é", "hops": 1});
+        assert_eq!(signed_bytes(&v, &["sig", "hops"], b"!"), format!("{{\"b\":\"\\u00e9\",\"k\":\"{}\"}}!", v["k"].as_str().unwrap()).into_bytes());
+        sign_json(&k, &mut v, &["sig", "hops"], b"!");
+        assert!(verify_json(&v, &["sig", "hops"], "k", b"!"));
+        assert!(!verify_json(&v, &["sig", "hops"], "k", b"?"));
+        assert!(!verify_json(&v, &["sig"], "k", b"!"));
+        assert!(!verify_json(&v, &["sig", "hops"], "nokey", b"!"));
+        v["hops"] = json!(5);
+        assert!(verify_json(&v, &["sig", "hops"], "k", b"!"));
+        v["b"] = json!("e");
+        assert!(!verify_json(&v, &["sig", "hops"], "k", b"!"));
+    }
 
     #[test]
     fn matches_python_dumps() {

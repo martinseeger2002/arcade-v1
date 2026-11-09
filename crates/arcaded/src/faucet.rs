@@ -7,8 +7,8 @@ use serde_json::Value;
 /// Queue a signed welcome ask for `addr` (with the tag we want) to every mesh link.
 pub fn ask(node: &Node, addr: &str, tag: &str) -> Result<FaucetRequest, String> {
     let rec = arcade_mesh::welcome::ask(&node.identity, addr, tag, arcade_app::now());
-    let id = hex::encode(node.identity.verifying_key().to_bytes());
-    node.mesh_outbox.lock().unwrap().push(serde_json::json!({"t": "wl", "recs": [rec]}));
+    let id = node.id_hex();
+    node.mesh_outbox.lock().unwrap().push(arcade_mesh::welcome::frame(vec![rec]).head);
     let req = FaucetRequest {
         id: format!("{}:{addr}", node.params.net),
         chain: node.params.chain_no,
@@ -25,7 +25,7 @@ pub fn ask(node: &Node, addr: &str, tag: &str) -> Result<FaucetRequest, String> 
 
 /// A `wl` frame arrived: remember asks and payments; if someone paid our ask, record it.
 pub fn on_welcome(node: &Node, head: &Value) {
-    let me = hex::encode(node.identity.verifying_key().to_bytes());
+    let me = node.id_hex();
     let Some(recs) = head["recs"].as_array() else { return };
     for r in recs {
         if !arcade_mesh::welcome::verify(r) {
@@ -83,7 +83,7 @@ pub fn pay_asks(node: &Node) {
     if p.net != "test" || !node.app.has_wallet().unwrap_or(false) {
         return; // test coins only
     }
-    let me = hex::encode(node.identity.verifying_key().to_bytes());
+    let me = node.id_hex();
     let now = arcade_app::now();
     let day = now / 86_400;
     let paid_key = format!("welcome_paid:{day}");
@@ -113,15 +113,9 @@ pub fn pay_asks(node: &Node) {
     };
     for ask in open.into_iter().take(DAILY_CAP - paid_today.len()) {
         let (Some(asker), Some(addr)) = (ask["a"].as_str(), ask["addr"].as_str()) else { continue };
-        let Some((ver, h)) = arcade_ledger::address::decode_base58check(addr) else { continue };
-        if ver != p.p2pkh_version || h.len() != 20 {
-            continue;
-        }
-        let to = arcade_ledger::address::p2pkh_script(&h.try_into().unwrap());
+        let Some(to) = arcade_ledger::address::p2pkh_script_for_address(p, addr) else { continue };
         let Ok((k, sk)) = node.app.tag_key(p, 0) else { return };
-        let script = arcade_ledger::address::p2pkh_script(
-            &arcade_ledger::address::decode_base58check(&k.address).unwrap().1.try_into().unwrap(),
-        );
+        let script = arcade_ledger::address::p2pkh_script_for_address(p, &k.address).expect("own address");
         let coins = crate::claims::spendable(node, &script);
         let tx = match arcade_wallet::tx::build_send(p, &to, AMOUNT, &sk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST, now as u32) {
             Ok(t) => t,

@@ -15,7 +15,7 @@ impl Ix {
         self.link.send(&Frame::new(q)).unwrap();
         loop {
             let f = match self.link.recv() { Ok(f) => f, Err(e) => panic!("link: {e}") };
-            if f.kind() == "ping" { let n = f.head["n"].clone(); self.link.send(&Frame::new(json!({"t":"pong","n":n}))).unwrap(); continue; }
+            if f.kind() == "ping" { self.link.send(&Frame::pong(&f)).unwrap(); continue; }
             if f.kind() == "ix" && f.head["op"] == "a" && f.head["id"] == self.id {
                 if let Some(e) = f.head["err"].as_str() { panic!("peer error: {e}"); }
                 std::thread::sleep(Duration::from_millis(600)); // stay under 120 questions/minute

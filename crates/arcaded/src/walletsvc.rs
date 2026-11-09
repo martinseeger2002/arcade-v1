@@ -63,43 +63,18 @@ fn all_inscriptions(node: &Node) -> Vec<Value> {
 // ---------------- tokens ----------------
 
 fn prop(node: &Node, pid: u32) -> Option<Value> {
-    node.chain.store.read(|r| r.get(led::PROPERTY, &KeyBuf::new().u16(c(node)).u32(pid).done())).ok().flatten().and_then(|v| serde_json::from_slice(&v).ok())
+    led::property(&node.chain, c(node), pid).ok().flatten()
 }
 
-fn divisible(p: &Value) -> bool {
-    p["type"].as_u64() == Some(2)
-}
+use arcade_ledger::engine::divisible;
 
 fn shown(p: &Value, units: u64) -> String {
-    let group = |s: String| {
-        let b = s.as_bytes();
-        let mut o = String::new();
-        for (i, ch) in b.iter().enumerate() {
-            if i > 0 && (b.len() - i) % 3 == 0 {
-                o.push(',');
-            }
-            o.push(*ch as char);
-        }
-        o
-    };
-    if divisible(p) {
-        format!("{}.{:08}", group((units / 100_000_000).to_string()), units % 100_000_000)
-    } else {
-        group(units.to_string())
-    }
+    arcade_ledger::amount::token_grouped(divisible(p), units)
 }
 
 /// Token holdings of an address: (propertyid, units).
 fn holdings(node: &Node, address: &str) -> Vec<(u32, u64)> {
-    let pre = KeyBuf::new().u16(c(node)).bytes(address.as_bytes()).u8(0).done();
-    node.chain
-        .store
-        .read(|r| r.scan_prefix(led::BALANCE, &pre))
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(k, v)| Some((u32::from_be_bytes(k[k.len() - 4..].try_into().ok()?), u64::from_be_bytes(v.get(..8)?.try_into().ok()?))))
-        .filter(|(_, u)| *u > 0)
-        .collect()
+    led::holdings(&node.chain, c(node), address)
 }
 
 fn balance_rows(node: &Node, list: &[(u32, u64)]) -> Value {
@@ -145,8 +120,7 @@ pub fn wallet(node: &Node) -> Value {
     let mut spendable = 0u64;
     let mut sums: std::collections::BTreeMap<u32, u64> = Default::default();
     for a in &addrs {
-        if let Ok(h) = arcade_ledger::address::decode_base58check(a).ok_or(()).and_then(|(_, h)| <[u8; 20]>::try_from(h).map_err(|_| ())) {
-            let script = arcade_ledger::address::p2pkh_script(&h);
+        if let Some(script) = arcade_ledger::address::p2pkh_script_for_address(p, a) {
             spendable += crate::claims::spendable(node, &script).iter().map(|u| u.value).sum::<u64>();
         }
         for (pid, u) in holdings(node, a) {
@@ -233,18 +207,7 @@ pub fn route(node: &Node, path: &str, q: &serde_json::Map<String, Value>) -> (u1
         }
         ["holders"] => {
             let Some(pid) = qs("token").or_else(|| qs("ids")).and_then(|t| t.parse::<u32>().ok()) else { return missing("name a token: ?token=<id>") };
-            let rows = node.chain.store.read(|r| r.scan_prefix(led::BALANCE, &cc.to_be_bytes())).unwrap_or_default();
-            let mut hs: Vec<(u64, String)> = rows
-                .iter()
-                .filter_map(|(k, b)| {
-                    if u32::from_be_bytes(k[k.len() - 4..].try_into().ok()?) != pid {
-                        return None;
-                    }
-                    let bal = u64::from_be_bytes(b.get(..8)?.try_into().ok()?);
-                    (bal > 0).then(|| (bal, String::from_utf8_lossy(&k[2..k.len() - 5]).into_owned()))
-                })
-                .collect();
-            hs.sort_by(|a, b| b.0.cmp(&a.0));
+            let hs = led::holders(&node.chain, cc, pid).unwrap_or_default();
             (200, json!({"holders": hs.into_iter().map(|x| x.1).collect::<Vec<_>>()}).to_string())
         }
         ["tx", txid] => tx_status(node, txid).map(|v| (200, v.to_string())).unwrap_or_else(|| missing("this node has never heard of that transaction")),
@@ -331,7 +294,7 @@ fn resolve_to(node: &Node, to: &str) -> Result<String, String> {
         return arcade_ledger::index::tag_row(&node.chain, c(node), &t.to_lowercase()).map_err(|e| e.to_string())?.map(|r| r.address).ok_or_else(|| format!("nobody holds @{t}"));
     }
     match arcade_ledger::address::decode_base58check(to) {
-        Some((v, h)) if h.len() == 20 && v == node.params.p2pkh_version => Ok(to.to_string()),
+        Some(_) if arcade_ledger::address::p2pkh_hash_of(node.params, to).is_some() => Ok(to.to_string()),
         Some(_) => Err("that is an address on another chain".into()),
         None => Err("not an address: give an address or an @tag".into()),
     }
@@ -412,9 +375,7 @@ pub fn file(node: &Node, page: &str, body: &Value) -> (u16, Value) {
     if requests(node, None).as_array().map(|a| a.len()).unwrap_or(0) >= MAX_WAITING {
         return refuse("more than twenty requests are already waiting".into());
     }
-    let mut id = [0u8; 8];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut id);
-    let id = hex::encode(id);
+    let id = arcade_mesh::random::hex(8);
     let r = json!({"id": id, "page": page, "kind": kind, "to": to, "to_tag": tag_of(node, &to), "units": units, "what": what,
                    "propertyid": body["propertyid"], "inscription": body["inscription"], "from": body["from"],
                    "label": body["label"].as_str().map(|s| s.chars().take(60).collect::<String>()),
@@ -432,8 +393,7 @@ pub fn file(node: &Node, page: &str, body: &Value) -> (u16, Value) {
 fn build(node: &Node, r: &Value, send: bool) -> Result<(String, u64, Vec<Value>), String> {
     let p = node.params;
     let to = r["to"].as_str().unwrap_or("");
-    let to_h: [u8; 20] = arcade_ledger::address::decode_base58check(to).and_then(|(_, h)| h.try_into().ok()).ok_or("bad address")?;
-    let to_script = arcade_ledger::address::p2pkh_script(&to_h);
+    let to_script = arcade_ledger::address::p2pkh_script_for_address(p, to).ok_or("bad address")?;
     let units = r["units"].as_u64().unwrap_or(0);
     // Which of our addresses pays (and holds what moves).
     let from = match r["kind"].as_str().unwrap_or("") {
@@ -452,8 +412,8 @@ fn build(node: &Node, r: &Value, send: bool) -> Result<(String, u64, Vec<Value>)
         },
     };
     let sk = key_for(node, &from)?;
-    let from_h: [u8; 20] = arcade_ledger::address::decode_base58check(&from).and_then(|(_, h)| h.try_into().ok()).ok_or("bad address")?;
-    let coins = crate::claims::spendable(node, &arcade_ledger::address::p2pkh_script(&from_h));
+    let from_script = arcade_ledger::address::p2pkh_script_for_address(p, &from).ok_or("bad address")?;
+    let coins = crate::claims::spendable(node, &from_script);
     let now = arcade_app::now() as u32;
     let tx = match r["kind"].as_str().unwrap_or("") {
         "coins" => arcade_wallet::tx::build_send(p, &to_script, units, &sk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST, now),
@@ -598,8 +558,7 @@ pub fn inscribe(node: &Node, content: &[u8], ctype: &str, json: Option<&str>) ->
     if let Some(j) = json.filter(|j| !j.is_empty()) {
         serde_json::from_str::<Value>(j).map_err(|e| format!("the JSON does not parse: {e}"))?;
     }
-    let mut id = [0u8; 8];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut id);
+    let id: [u8; 8] = arcade_mesh::random::bytes();
     let chunks = arcade_wallet::tx::insc_chunks(content, if ctype.is_empty() { "text/plain" } else { ctype }, json.filter(|j| !j.is_empty()), id)?;
     let (txids, fee) = crate::msgsvc::send_payloads(node, &chunks)?;
     let _ = node.app.event("wallet", &format!("inscribing {} bytes of {ctype} in {} transaction{} ({})", content.len(), txids.len(), if txids.len() == 1 { "" } else { "s" }, txids[0]));

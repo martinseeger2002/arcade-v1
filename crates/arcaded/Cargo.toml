@@ -18,7 +18,6 @@ arcade-mesh = { version = "0.1.0", path = "../arcade-mesh" }
 arcade-store = { version = "0.1.0", path = "../arcade-store" }
 arcade-wallet = { version = "0.1.0", path = "../arcade-wallet" }
 base64 = "0.23.1"
-blake2 = "0.10"
 libc = "0.2"
 pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 aes-gcm = "0.10"

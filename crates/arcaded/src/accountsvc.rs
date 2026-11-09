@@ -18,9 +18,7 @@ use std::time::Duration;
 
 const ACCOUNTS: &[u8] = b"accounts";
 
-fn now() -> u64 {
-    arcade_app::now()
-}
+use arcade_app::now;
 
 // ---------------- the account list ----------------
 
@@ -153,6 +151,11 @@ fn arcade_hosts(node: &Node) -> Vec<String> {
     hosts
 }
 
+/// "https://host/" -> "host".
+fn bare_host(h: &str) -> String {
+    h.trim_start_matches("https://").trim_end_matches('/').to_string()
+}
+
 /// Ask one arcade for the sealed vault. `here`: only its own (else it also asks the arcades
 /// it knows, and says which one answered in "from").
 fn ask_vault(host: &str, tag: &str, here: bool) -> Option<(String, Value)> {
@@ -161,7 +164,7 @@ fn ask_vault(host: &str, tag: &str, here: bool) -> Option<(String, Value)> {
     if !v["blob"]["sealed"].is_string() {
         return None;
     }
-    let from = v["from"].as_str().map(|f| f.trim_start_matches("https://").trim_end_matches('/').to_string()).filter(|f| !f.is_empty()).unwrap_or_else(|| host.to_string());
+    let from = v["from"].as_str().map(bare_host).filter(|f| !f.is_empty()).unwrap_or_else(|| host.to_string());
     Some((from, v))
 }
 
@@ -173,7 +176,7 @@ fn find_vault(node: &Node, tag: &str, from: Option<&str>) -> Result<(String, Val
         .map(|r| r.address)
         .ok_or_else(|| format!("@{tag} is not claimed"))?;
     let hosts: Vec<String> = match from {
-        Some(h) => vec![h.trim().trim_start_matches("https://").trim_end_matches('/').to_string()],
+        Some(h) => vec![bare_host(h.trim())],
         None => arcade_hosts(node),
     };
     if hosts.is_empty() {
@@ -310,26 +313,26 @@ fn bring_mailbox(node: &Node, host: &str, login: &ed25519_dalek::SigningKey, mk:
 }
 
 /// base64(nonce24 || secretbox) under blake2b-256(messaging secret || "arcade-mailbox/1").
+fn mailbox_key(msg_secret: &[u8; 32]) -> [u8; 32] {
+    arcade_mesh::udp::blake2b(&[&msg_secret[..], b"arcade-mailbox/1"].concat(), 32, b"").try_into().unwrap()
+}
+
 fn open_mailbox(msg_secret: &[u8; 32], b64: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine as _;
-    use blake2::digest::{Update, VariableOutput};
-    use crypto_secretbox::aead::{Aead, KeyInit};
-    let mut h = blake2::Blake2bVar::new(32).unwrap();
-    h.update(msg_secret);
-    h.update(b"arcade-mailbox/1");
-    let mut key = [0u8; 32];
-    h.finalize_variable(&mut key).unwrap();
-    let raw = base64::engine::general_purpose::STANDARD.decode(b64.trim()).map_err(|_| "bad mailbox")?;
-    if raw.len() < 24 + 16 {
-        return Err("bad mailbox".into());
-    }
-    let c = crypto_secretbox::XSalsa20Poly1305::new_from_slice(&key).map_err(|e| e.to_string())?;
-    c.decrypt(crypto_secretbox::Nonce::from_slice(&raw[..24]), &raw[24..]).map_err(|_| "the mailbox didn't open with this account's key".to_string())
+    crate::secretbox::open(&mailbox_key(msg_secret), b64).map_err(|e| match e {
+        crate::secretbox::OpenError::Bad => "bad mailbox".to_string(),
+        crate::secretbox::OpenError::Decrypt => "the mailbox didn't open with this account's key".to_string(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mailbox_key_is_unchanged() {
+        // python3: hashlib.blake2b(bytes([3]*32) + b"arcade-mailbox/1", digest_size=32)
+        assert_eq!(hex::encode(mailbox_key(&[3; 32])), "6445b8bb38000b3ad8173cc095097f495494d6799aa6194355a33b57c5e5d9e0");
+    }
 
     #[test]
     fn opens_what_webcrypto_seals() {

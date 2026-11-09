@@ -12,7 +12,6 @@
 
 use crate::node::Node;
 use arcade_mesh::link::{canonical, Frame};
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -36,21 +35,21 @@ const SEAT_LIFE: Duration = Duration::from_secs(30);
 const OUTQ_MAX: usize = 4000;
 const SHORT: usize = 8;
 
-fn now_s() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
-}
+use arcade_app::now as now_s;
 fn now_us() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as u64
 }
 
 /// blake2b(room, digest_size=8).hexdigest()
 pub fn room_id(room: &str) -> String {
-    use blake2::digest::{Update, VariableOutput};
-    let mut h = blake2::Blake2bVar::new(8).unwrap();
-    h.update(room.as_bytes());
-    let mut out = [0u8; 8];
-    h.finalize_variable(&mut out).unwrap();
-    hex::encode(out)
+    hex::encode(arcade_mesh::udp::blake2b(room.as_bytes(), 8, b""))
+}
+
+#[cfg(test)]
+#[test]
+fn room_id_is_unchanged() {
+    // python3: hashlib.blake2b(b"pg/room", digest_size=8).hexdigest()
+    assert_eq!(room_id("pg/room"), "1984c9d33727d8ad");
 }
 
 fn is_guest(m: &str) -> bool {
@@ -131,27 +130,35 @@ fn rt() -> &'static Rt {
 
 // ---------------- signing ----------------
 
-fn signed_part(h: &Value) -> Value {
-    let mut m = h.as_object().cloned().unwrap_or_default();
-    for k in ["sig", "hops", "d"] {
-        m.remove(k);
-    }
-    Value::Object(m)
-}
+/// Signed by the origin ("o"): the header without sig, hops and d, then the payload.
+const STRIP: &[&str] = &["sig", "hops", "d"];
 
 fn sign(node: &Node, h: &mut Value, blob: &[u8]) {
-    let mut msg = canonical(&signed_part(h));
-    msg.extend_from_slice(blob);
-    h["sig"] = json!(hex::encode(node.identity.sign(&msg).to_bytes()));
+    arcade_mesh::canon::sign_json(&node.identity, h, STRIP, blob);
 }
 
 fn verify(h: &Value, blob: &[u8]) -> bool {
-    let Some(o) = h["o"].as_str().and_then(|o| hex::decode(o).ok()).and_then(|b| <[u8; 32]>::try_from(b).ok()) else { return false };
-    let Some(sig) = h["sig"].as_str().and_then(|s| hex::decode(s).ok()).and_then(|b| <[u8; 64]>::try_from(b).ok()) else { return false };
-    let Ok(vk) = VerifyingKey::from_bytes(&o) else { return false };
-    let mut msg = canonical(&signed_part(h));
-    msg.extend_from_slice(blob);
-    vk.verify(&msg, &Signature::from_bytes(&sig)).is_ok()
+    arcade_mesh::canon::verify_json(h, STRIP, "o", blob)
+}
+
+#[cfg(test)]
+#[test]
+fn golden_realtime_signature() {
+    // Captured from the code before signing moved to canon::sign_json: must not change.
+    let k = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let mut h = json!({"t": "rt", "o": hex::encode(k.verifying_key().to_bytes()), "r": "pg/room", "q": 5, "hops": 2, "d": ["x"],
+                       "x": "é☃😀\u{7f}\n", "z": {"b": 1, "a": [1, 2.5, null, true]}});
+    let blob = b"blob\x00\xff";
+    assert_eq!(hex::encode(arcade_mesh::canon::signed_bytes(&h, STRIP, blob)), "7b226f223a2265613461366336336532396335323061626566353530376231333265633566393935343737366165626562653762393234323165656136393134343664323263222c2271223a352c2272223a2270672f726f6f6d222c2274223a227274222c2278223a225c75303065395c75323630335c75643833645c75646530305c75303037665c6e222c227a223a7b2261223a5b312c322e352c6e756c6c2c747275655d2c2262223a317d7d626c6f6200ff");
+    arcade_mesh::canon::sign_json(&k, &mut h, STRIP, blob);
+    assert_eq!(h["sig"], "62f2a9c87a2daebb752215645010c71ae2c461882d351a021472b3a583b668bde9af35eea876d79708d1cca99c0af6b90416ed49c70752c7a4276ca3aaf0fc01");
+    assert!(verify(&h, blob));
+    h["hops"] = json!(3);
+    h["d"] = json!(["y", "z"]);
+    assert!(verify(&h, blob));
+    assert!(!verify(&h, b"other"));
+    h["q"] = json!(6);
+    assert!(!verify(&h, blob));
 }
 
 fn next_q(st: &mut St) -> u64 {
@@ -205,7 +212,7 @@ fn who(node: &Node, origin: &str, member: &str, cred: Option<&Value>) -> Value {
 /// The operator plays as their wallet's address, vouched by a cert from its key; with no
 /// wallet to sign with, as a guest.
 fn my_player(node: &Node, st: &mut St) -> (String, Option<Value>) {
-    let me = hex::encode(node.identity.verifying_key().to_bytes());
+    let me = node.id_hex();
     let x = cert_expiry();
     match crate::msgsvc::sender_key(node) {
         Ok((address, _, sk)) => {
@@ -221,15 +228,13 @@ fn my_player(node: &Node, st: &mut St) -> (String, Option<Value>) {
             (address, Some(c))
         }
         Err(_) => {
-            let mut b = [0u8; 4];
-            let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b));
-            (format!("guest-{}", hex::encode(b)), None)
+            (format!("guest-{}", arcade_mesh::random::hex(4)), None)
         }
     }
 }
 
 fn my_id(node: &Node) -> String {
-    hex::encode(node.identity.verifying_key().to_bytes())
+    node.id_hex()
 }
 
 fn short_room(room: &str) -> String {
@@ -657,9 +662,7 @@ pub fn run(node: Arc<Node>) {
 // ---------------- what the app window calls ----------------
 
 fn token() -> String {
-    let mut b = [0u8; 16];
-    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b));
-    hex::encode(b)
+    arcade_mesh::random::hex(16)
 }
 
 /// realtime.join: page (the app's txid), game (default: the page), room.

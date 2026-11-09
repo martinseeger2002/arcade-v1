@@ -20,6 +20,7 @@ use arcade_chain::{Hash256, Tx};
 use arcade_chaindb::undo::Logged;
 use arcade_chaindb::{BlockCtx, ChainDb, Indexer};
 use arcade_store::{KeyBuf, Result, TableDef};
+use arcade_store::key::{be_u32, be_u64};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -253,7 +254,7 @@ pub fn iid_bytes(txid: &Hash256, n: u32) -> [u8; 36] {
 pub fn iid_str(b: &[u8]) -> String {
     let mut h = [0u8; 32];
     h.copy_from_slice(&b[..32]);
-    format!("{}i{}", Hash256(h).to_hex(), u32::from_be_bytes(b[32..36].try_into().unwrap()))
+    format!("{}i{}", Hash256(h).to_hex(), be_u32(&b, 32))
 }
 
 pub fn parse_iid(s: &str) -> Option<[u8; 36]> {
@@ -489,7 +490,7 @@ impl Indexer for OrdIndexer {
         let mut lines = String::new();
         let mut moves = String::new();
         let mut births = 0u32;
-        let mut next = l.get(STATE, &k(c, b"next"))?.map(|v| u64::from_be_bytes(v[..8].try_into().unwrap())).unwrap_or(0);
+        let mut next = l.get(STATE, &k(c, b"next"))?.map(|v| be_u64(&v, 0)).unwrap_or(0);
         for (pos, tx) in ctx.block.txs.iter().enumerate() {
             if tx.is_coinbase() {
                 continue;
@@ -714,8 +715,8 @@ pub fn inscription(db: &ChainDb, p: &ChainParams, id: &str) -> Option<Value> {
         let mut t = [0u8; 32];
         t.copy_from_slice(&at[..32]);
         let txid = Hash256(t);
-        let vout = u32::from_be_bytes(at[32..36].try_into().unwrap());
-        let off = u64::from_be_bytes(at[36..44].try_into().unwrap());
+        let vout = be_u32(&at, 32);
+        let off = be_u64(&at, 36);
         v["at"] = json!(format!("{}:{vout}:{off}", txid.to_hex()));
         let op = arcade_chain::OutPoint { txid, vout };
         if let Ok(Some(coin)) = db.coin(p, &op) {
@@ -784,7 +785,7 @@ pub fn count(db: &ChainDb, c: u16) -> u64 {
         .read(|r| r.get(STATE, &k(c, b"next")))
         .ok()
         .flatten()
-        .map(|v| u64::from_be_bytes(v[..8].try_into().unwrap()))
+        .map(|v| be_u64(&v, 0))
         .unwrap_or(0)
 }
 

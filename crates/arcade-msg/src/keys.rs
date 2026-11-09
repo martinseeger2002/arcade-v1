@@ -25,9 +25,14 @@ pub fn derive(seed: &[u8], path: &[u32]) -> [u8; 32] {
     k
 }
 
-/// "ef63 b457 a79f c4ea": sha256(x25519 public)[:8] in four groups of four hex digits.
+/// "ef63b457a79fc4ea": sha256(x25519 public)[:8] in hex (a group's id).
+pub fn key_id(public: &[u8; 32]) -> String {
+    hex::encode(&Sha256::digest(public)[..8])
+}
+
+/// "ef63 b457 a79f c4ea": key_id in four groups of four hex digits.
 pub fn fingerprint(public: &[u8; 32]) -> String {
-    let h = hex::encode(&Sha256::digest(public)[..8]);
+    let h = key_id(public);
     (0..4).map(|i| &h[i * 4..i * 4 + 4]).collect::<Vec<_>>().join(" ")
 }
 
@@ -73,6 +78,7 @@ mod tests {
         assert_eq!(hex::encode(derive(&a, &[24946, 0, 0])), "101194f123531ce709dafe62ade9b218cb2059437fd8b2eac9dc38c8ef3b1cd0");
         assert_eq!(hex::encode(k.public_bytes()), "b4947c1ff461daea13aebca4da38e441bd07cf755f70e2131a0e74606ace3544");
         assert_eq!(k.fingerprint(), "ef63 b457 a79f c4ea");
+        assert_eq!(fingerprint(&[1; 32]), "72cd 6e84 22c4 07fb");
         assert_eq!(hex::encode(k.login_seed), "3c26a9f3a92d53b240c97c56ab81a42ac3e538fdeccd9d77356375b53bd31e2d");
         let b = MsgKeys::from_seed(&seed("legal winner thank year wave sausage worth useful legal winner thank yellow"));
         assert_eq!(hex::encode(derive(&seed("legal winner thank year wave sausage worth useful legal winner thank yellow"), &[24946, 0, 0])), "2f1d6de7bf8fd27f13c23838bb8683d6d39f2282f928c4a0aa808d069a493a70");

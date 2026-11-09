@@ -39,6 +39,7 @@ mod rpc;
 mod sizes;
 mod udpsvc;
 mod shares;
+mod secretbox;
 
 use node::Node;
 use std::sync::{Arc, Mutex};
@@ -173,7 +174,7 @@ fn main() {
     eprintln!(
         "arcaded: home {}, node {}, chain {}",
         home.display(),
-        hex::encode(node.identity.verifying_key().to_bytes()),
+        node.id_hex(),
         node.params.name
     );
 

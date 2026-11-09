@@ -56,14 +56,17 @@ impl Frame {
     pub fn kind(&self) -> &str {
         self.head.get("t").and_then(Value::as_str).unwrap_or("")
     }
+
+    /// The reply to a ping: {"t":"pong","n"} with the ping's "n" cut to 16 characters
+    /// (a non-string "n" answers ""), as the original arcade answers.
+    pub fn pong(ping: &Frame) -> Frame {
+        let n: String = ping.head["n"].as_str().unwrap_or("").chars().take(16).collect();
+        Frame::new(json!({"t": "pong", "n": n}))
+    }
 }
 
 pub fn blake2b32(data: &[u8], person: &[u8]) -> [u8; 32] {
-    let mut p = [0u8; 16];
-    let n = person.len().min(16);
-    p[..n].copy_from_slice(&person[..n]);
-    let h = blake2b_simd::Params::new().hash_length(32).personal(&p).hash(data);
-    h.as_bytes().try_into().unwrap()
+    crate::udp::blake2b(data, 32, person).try_into().unwrap()
 }
 
 pub struct Keys {
@@ -278,6 +281,13 @@ impl Link {
         Self::handshake(s, net, identity, true, listen)
     }
 
+    /// Dial (see `dial`) and set the read timeout, for a link that asks questions; errors as text.
+    pub fn dial_asking(addr: &str, net: &str, identity: &SigningKey, listen: Option<u16>, timeout: Duration) -> std::result::Result<Link, String> {
+        let mut link = Self::dial(addr, net, identity, listen).map_err(|e| e.to_string())?;
+        link.set_read_timeout(timeout).map_err(|e| e.to_string())?;
+        Ok(link)
+    }
+
     pub fn send(&mut self, f: &Frame) -> Result<()> {
         let p = encode_plain(f);
         if let Some(mut side) = self.side.take() {
@@ -393,6 +403,17 @@ impl Link {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn pong_trims_n() {
+        let p = |n: Value| Frame::pong(&Frame::new(json!({"t": "ping", "n": n})));
+        assert_eq!(p(json!("0123abcd")).head, json!({"t": "pong", "n": "0123abcd"}));
+        assert_eq!(p(json!("0123456789abcdefXYZ")).head, json!({"t": "pong", "n": "0123456789abcdef"}));
+        assert_eq!(p(json!("ääääääääääääääääää")).head["n"].as_str().unwrap().chars().count(), 16);
+        assert_eq!(p(json!({"big": [1, 2, 3]})).head, json!({"t": "pong", "n": ""}));
+        assert_eq!(Frame::pong(&Frame::new(json!({"t": "ping"}))).head, json!({"t": "pong", "n": ""}));
+        assert!(p(json!("x")).blob.is_empty());
+    }
 
     #[test]
     fn two_links_talk() {

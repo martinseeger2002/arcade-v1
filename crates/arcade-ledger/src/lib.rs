@@ -2,6 +2,7 @@
 //! extraction and @tags. See docs/compat/SPEC.md §4.
 
 pub mod address;
+pub mod amount;
 pub mod collections;
 pub mod cards;
 pub mod content;

@@ -14,9 +14,8 @@
 //! addresses count as public (tests on one machine or one LAN).
 
 use crate::node::{LinkInfo, Node};
-use arcade_mesh::link::{canonical, encode_plain, Frame, Link, LinkError, Side};
+use arcade_mesh::link::{encode_plain, Frame, Link, LinkError, Side};
 use arcade_mesh::udp::{self, Cell, Hub, Path};
-use ed25519_dalek::{Signer, Verifier};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
@@ -138,24 +137,19 @@ fn g() -> &'static Mutex<G> {
 }
 
 fn me(node: &Node) -> String {
-    hex::encode(node.identity.verifying_key().to_bytes())
+    node.id_hex()
 }
 
 fn short(id: &str) -> &str {
     &id[..id.len().min(16)]
 }
 
-fn now_s() -> u64 {
-    arcade_app::now()
-}
+use arcade_app::now as now_s;
 
-fn rand_hex(n: usize) -> String {
-    let mut b = vec![0u8; n];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut b);
-    hex::encode(b)
-}
+use arcade_mesh::random::hex as rand_hex;
 
-fn is_hex(s: &str, n: usize) -> bool {
+/// `s` is `n` hex digits (either case).
+pub fn is_hex(s: &str, n: usize) -> bool {
     s.len() == n && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -944,25 +938,20 @@ pub fn on_frame(node: &Node, link: &mut Link, f: &Frame) -> Result<(), LinkError
 
 // ---------------- introductions (case ii) ----------------
 
+/// Signed by "from": the header without sig, hops and t (introduce.py).
+const UI_STRIP: &[&str] = &["sig", "hops", "t"];
+
+#[cfg(test)]
 fn ui_signed(h: &Value) -> Vec<u8> {
-    let mut m = h.as_object().cloned().unwrap_or_default();
-    for k in ["sig", "hops", "t"] {
-        m.remove(k);
-    }
-    canonical(&Value::Object(m))
+    arcade_mesh::canon::signed_bytes(h, UI_STRIP, b"")
 }
 
 pub fn ui_sign(node: &Node, h: &mut Value) {
-    let sig = node.identity.sign(&ui_signed(h));
-    h["sig"] = json!(hex::encode(sig.to_bytes()));
+    arcade_mesh::canon::sign_json(&node.identity, h, UI_STRIP, b"");
 }
 
 pub fn ui_verify(h: &Value) -> bool {
-    let (Some(from), Some(sig)) = (h["from"].as_str(), h["sig"].as_str()) else { return false };
-    let (Ok(k), Ok(s)) = (hex::decode(from), hex::decode(sig)) else { return false };
-    let (Ok(k), Ok(s)) = (<[u8; 32]>::try_from(k), <[u8; 64]>::try_from(s)) else { return false };
-    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&k) else { return false };
-    vk.verify(&ui_signed(h), &ed25519_dalek::Signature::from_bytes(&s)).is_ok()
+    arcade_mesh::canon::verify_json(h, UI_STRIP, "from", b"")
 }
 
 /// Linked to arcade `id`? Our own registry counts too: node.links is keyed by address, and two
@@ -1338,6 +1327,7 @@ pub fn drop_path(peer_prefix: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::Signer;
 
     #[test]
     fn ui_signature_over_canonical_json() {
@@ -1360,6 +1350,18 @@ mod tests {
         assert!(ui_verify(&h));
         h["ts"] = json!(1_700_000_001u64);
         assert!(!ui_verify(&h));
+    }
+
+    /// Captured from the code before signing moved to canon::sign_json: must not change.
+    #[test]
+    fn golden_ui_signature() {
+        let k = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let mut h = json!({"t": "ui", "op": "hi", "from": hex::encode(k.verifying_key().to_bytes()), "hops": 4, "n": "00ff",
+                           "x": "é☃😀\u{7f}\n", "a": [["203.0.113.5", 40000]], "ts": 1_700_000_000u64, "z": {"b": 1, "a": [1, 2.5, null, true]}});
+        assert_eq!(hex::encode(ui_signed(&h)), "7b2261223a5b5b223230332e302e3131332e35222c34303030305d5d2c2266726f6d223a2265613461366336336532396335323061626566353530376231333265633566393935343737366165626562653762393234323165656136393134343664323263222c226e223a2230306666222c226f70223a226869222c227473223a313730303030303030302c2278223a225c75303065395c75323630335c75643833645c75646530305c75303037665c6e222c227a223a7b2261223a5b312c322e352c6e756c6c2c747275655d2c2262223a317d7d");
+        arcade_mesh::canon::sign_json(&k, &mut h, UI_STRIP, b"");
+        assert_eq!(h["sig"], "433379b8b7a8eaa61e978b1f9db6ee9e0b9b53786755d97a615b368d1e9d62777973c821e606e3160c8ad8f69fd43a3d2400c40dea6588c013a32dc5d27c8406");
+        assert!(ui_verify(&h));
     }
 
     #[test]

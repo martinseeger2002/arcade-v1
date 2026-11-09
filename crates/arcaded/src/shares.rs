@@ -54,7 +54,7 @@ pub fn copies() -> usize {
 }
 
 fn me(node: &Node) -> String {
-    hex::encode(node.identity.verifying_key().to_bytes())
+    node.id_hex()
 }
 
 fn score(id: &str, chain: &str, kind: &str, unit: u64) -> u64 {
@@ -514,8 +514,7 @@ pub fn prepare_backfill(node: &Node, p: &'static ChainParams, name: &str, max: u
 
 /// A V1.0 arcade's answer to one question about a chain.
 fn ask(node: &Node, addr: &str, q: Value) -> Result<(Value, Vec<u8>), String> {
-    let mut link = Link::dial(addr, crate::meshsvc::NET, &node.identity, node.mesh_port).map_err(|e| e.to_string())?;
-    link.set_read_timeout(Duration::from_secs(20)).map_err(|e| e.to_string())?;
+    let mut link = Link::dial_asking(addr, crate::meshsvc::NET, &node.identity, node.mesh_port, Duration::from_secs(20))?;
     let mut q = q;
     q["t"] = json!("sh");
     q["op"] = json!("q");
@@ -524,8 +523,7 @@ fn ask(node: &Node, addr: &str, q: Value) -> Result<(Value, Vec<u8>), String> {
     for _ in 0..200 {
         let f = link.recv().map_err(|e| e.to_string())?;
         if f.kind() == "ping" {
-            let n = f.head["n"].clone();
-            let _ = link.send(&Frame::new(json!({"t": "pong", "n": n})));
+            let _ = link.send(&Frame::pong(&f));
         } else if f.kind() == "sh" && f.head["op"] == "a" && f.head["id"] == 1 {
             if let Some(e) = f.head["err"].as_str() {
                 return Err(e.to_string());

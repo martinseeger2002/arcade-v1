@@ -30,7 +30,8 @@ pub struct TxOutSpec {
     pub script: Vec<u8>,
 }
 
-fn push(script: &mut Vec<u8>, data: &[u8]) {
+/// Push `data` onto a script (direct push up to 75 bytes, then OP_PUSHDATA1 / OP_PUSHDATA2).
+pub fn push(script: &mut Vec<u8>, data: &[u8]) {
     match data.len() {
         0..=75 => script.push(data.len() as u8),
         76..=255 => {

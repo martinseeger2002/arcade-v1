@@ -1,27 +1,11 @@
 // Feed tab: public posts on the home chain (the original arcade's feed), with likes, replies,
 // shares, tips, edits and deletes.
 (() => {
-  const $ = (id) => document.getElementById(id);
-  const invoke = window.__TAURI__.core.invoke;
-  async function api(cmd, args = {}) {
-    const r = await invoke("api", { req: { cmd, ...args } });
-    if (!r.ok) throw new Error(r.error || "failed");
-    return r.result;
-  }
-  const h = (tag, attrs = {}, ...kids) => {
-    const e = document.createElement(tag);
-    for (const [k, v] of Object.entries(attrs || {})) {
-      if (v === undefined || v === null || v === false) continue;
-      if (k === "class") e.className = v; else if (k.startsWith("on")) e[k] = v; else e.setAttribute(k, v === true ? "" : v);
-    }
-    for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) e.append(k.nodeType ? k : document.createTextNode(String(k)));
-    return e;
-  };
-  const PEP = (sats) => (sats / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 }) + " PEPtest";
+  const PEP = homeCoins;
   const ago = (hours) => hours < 1 ? `${Math.max(1, Math.round(hours * 60))}m` : hours < 48 ? `${Math.round(hours)}h` : `${Math.round(hours / 24)}d`;
   let order = "popular", channel = "", tag = "", offset = 0, page = 30, attached = null;
 
-  function note(t, bad) { const m = $("fd-msg"); m.textContent = t; m.className = "msg " + (bad ? "bad" : "ok"); }
+  const note = (t, bad) => say("fd-msg", t, bad);
 
   async function act(kind, target, extra = {}) {
     try { const r = await api("feed.act", { kind, target, ...extra }); note(`${kind} sent (fee ${PEP(r.fee)}); it counts once it's in a block.`); setTimeout(draw, 1500); }
@@ -59,7 +43,7 @@
     const rs = h("button", { class: "small primary" }, "Reply");
     rs.onclick = () => rt.value.trim() && act("reply", p.txid, { text: rt.value.trim() });
     replyBox.append(rt, rs);
-    const amt = h("input", { type: "number", min: "0.01", step: "0.01", placeholder: "PEPtest", style: "width:9em" });
+    const amt = h("input", { type: "number", min: "0.01", step: "0.01", placeholder: homeTicker(), style: "width:9em" });
     const ts = h("button", { class: "small primary" }, "Send tip");
     ts.onclick = () => { const v = Math.round(Number(amt.value) * 1e8); if (v > 0) act("tip", p.txid, { amount: v }); };
     tipBox.append(amt, " to ", a.tag ? "@" + a.tag : a.address, " ", ts);

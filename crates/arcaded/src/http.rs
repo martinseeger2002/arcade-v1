@@ -44,9 +44,7 @@ pub fn serve(node: Arc<Node>, o: Opts) {
 
 /// The cookie for /rpc: a fresh secret at each start, readable by this user only.
 pub fn write_cookie(home: &std::path::Path) -> std::io::Result<String> {
-    let mut b = [0u8; 32];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut b);
-    let v = format!("__cookie__:{}", hex::encode(b));
+    let v = format!("__cookie__:{}", arcade_mesh::random::hex(32));
     let p = home.join(".cookie");
     let _ = std::fs::remove_file(&p);
     use std::os::unix::fs::OpenOptionsExt;
@@ -255,7 +253,7 @@ fn handle(node: &Node, mut s: TcpStream, site: Option<&PathBuf>) {
         }
         if r.method == "POST" && path == "/r/send" {
             // The page is the app frame that asked (its Referer: /app/<chain>/<txid>).
-            let page = r.headers.get("referer").and_then(|v| v.as_str()).and_then(|u| u.split('?').next()).and_then(|u| u.rsplit('/').next()).filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())).map(String::from);
+            let page = r.headers.get("referer").and_then(|v| v.as_str()).and_then(|u| u.split('?').next()).and_then(|u| u.rsplit('/').next()).filter(|t| crate::udpsvc::is_hex(t, 64)).map(String::from);
             let Some(page) = page else { return respond(&mut s, "400 Bad Request", "application/json", &cors, br#"{"error":"open this page in the arcade: the request has no page to come from"}"#) };
             let body: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
             let (code, v) = crate::walletsvc::file(node, &page, &body);

@@ -15,12 +15,6 @@
     return;
   }
   const here = frame.split("/").pop();
-  const invoke = window.__TAURI__.core.invoke;
-  async function api(cmd, args = {}) {
-    const r = await invoke("api", { req: { cmd, ...args } });
-    if (!r.ok) throw new Error(r.error || "failed");
-    return r.result;
-  }
   let appState = { state: "open", timeout: null, closesAt: null, inShell: false };
 
   const perms = async () => (id ? await api("apps.perms", { id }) : {});
@@ -48,7 +42,7 @@
     busy = true;
     try { return await fn(); } finally { busy = false; }
   }
-  const pep = (sats) => (sats / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 }) + " PEPtest";
+  const pep = homeCoins;
   let lastSend = 0;
   // Wallet access: what uses the player's key asks first while the switch is off (Yes turns it on).
   async function walletGate(what) {

@@ -11,7 +11,7 @@ const MAPPED: u16 = 0x0001;
 
 /// A Binding request with a fresh transaction id.
 pub fn request() -> ([u8; 12], Vec<u8>) {
-    let tx: [u8; 12] = rand::random();
+    let tx: [u8; 12] = crate::random::bytes();
     let mut b = Vec::with_capacity(20);
     b.extend_from_slice(&BINDING_REQUEST.to_be_bytes());
     b.extend_from_slice(&0u16.to_be_bytes());

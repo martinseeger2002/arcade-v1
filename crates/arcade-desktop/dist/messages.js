@@ -1,21 +1,5 @@
 // Messages tab: private messages on the home chain (compatible with the original arcade).
 (() => {
-  const $ = (id) => document.getElementById(id);
-  const invoke = window.__TAURI__.core.invoke;
-  async function api(cmd, args = {}) {
-    const r = await invoke("api", { req: { cmd, ...args } });
-    if (!r.ok) throw new Error(r.error || "failed");
-    return r.result;
-  }
-  const h = (tag, attrs = {}, ...kids) => {
-    const e = document.createElement(tag);
-    for (const [k, v] of Object.entries(attrs || {})) {
-      if (v === undefined || v === null || v === false) continue;
-      if (k === "class") e.className = v; else if (k.startsWith("on")) e[k] = v; else e.setAttribute(k, v === true ? "" : v);
-    }
-    for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) e.append(k.nodeType ? k : document.createTextNode(String(k)));
-    return e;
-  };
   const when = (t) => {
     if (!t) return "";
     const d = new Date(t * 1000), now = new Date();
@@ -23,11 +7,11 @@
   };
   const nameOf = (w) => (w.name ? w.name : w.tag ? "@" + w.tag : w.address ? w.address.slice(0, 10) + "…" : w.fingerprint || "someone");
   const sub = (w) => [w.tag ? "@" + w.tag : null, w.fingerprint].filter(Boolean).join(" · ");
-  const PEP = (sats) => (sats / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 }) + " PEPtest";
+  const PEP = homeCoins;
 
   let view = "chats", open = null, composing = false, lastUnread = null, notified = new Set();
 
-  function note(text, bad) { const m = $("mx-msg"); m.textContent = text; m.className = "msg " + (bad ? "bad" : "ok"); }
+  const note = (text, bad) => say("mx-msg", text, bad);
 
   async function refreshMe() {
     try {

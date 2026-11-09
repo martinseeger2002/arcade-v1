@@ -830,6 +830,15 @@ impl crate::transport::Transport for Stream {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn blake2b_vectors() {
+        // python3: hashlib.blake2b(b"abc", digest_size=.., person=..)
+        assert_eq!(hex::encode(super::blake2b(b"abc", 32, b"arcm-udp-path")), "b4ea63c72c52708b468270312c3a2e7ac9eb4b25ecc0e350515d331042546106");
+        assert_eq!(hex::encode(super::blake2b(b"abc", 8, b"arcm-udp-cid")), "428f1aebf1fc877f");
+        assert_eq!(hex::encode(crate::link::blake2b32(b"abc", b"arcm-udp-path")), "b4ea63c72c52708b468270312c3a2e7ac9eb4b25ecc0e350515d331042546106");
+        assert_eq!(hex::encode(super::blake2b(b"pg/room", 8, b"")), "1984c9d33727d8ad");
+    }
+
     use super::*;
 
     fn pair(now: Instant) -> (Path, Path, SocketAddr, SocketAddr) {

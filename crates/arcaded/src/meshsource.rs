@@ -23,8 +23,7 @@ impl MeshSource {
 
     /// A V1.0 arcade's blocks of any chain.
     pub fn dial_chain(node: &crate::node::Node, addr: &str, p: &'static arcade_chain::params::ChainParams) -> Result<MeshSource, String> {
-        let mut link = Link::dial(addr, crate::meshsvc::NET, &node.identity, node.mesh_port).map_err(|e| e.to_string())?;
-        link.set_read_timeout(Duration::from_secs(20)).map_err(|e| e.to_string())?;
+        let link = Link::dial_asking(addr, crate::meshsvc::NET, &node.identity, node.mesh_port, Duration::from_secs(20))?;
         Ok(MeshSource { link, addr: addr.into(), net: p.net, format: p.format, next_id: 1 })
     }
 

@@ -45,10 +45,7 @@ pub fn read_answer(link: &mut Link, id: u64) -> Result<Vec<u8>, String> {
     loop {
         let f = link.recv().map_err(|e| e.to_string())?;
         match f.kind() {
-            "ping" => {
-                let n: String = f.head["n"].as_str().unwrap_or("").chars().take(16).collect();
-                link.send(&Frame::new(json!({"t": "pong", "n": n}))).map_err(|e| e.to_string())?;
-            }
+            "ping" => link.send(&Frame::pong(&f)).map_err(|e| e.to_string())?,
             "bk" if f.head["op"] == "a" && f.head["id"] == id => {
                 if let Some(e) = f.head["err"].as_str() {
                     return Err(format!("peer: {e}"));

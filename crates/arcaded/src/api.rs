@@ -57,7 +57,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
                 "tags": {"indexed_to": indexed_to, "count": tag_count, "names_digest": digest},
                 "profiles": index::profile_count(&node.chain, c).unwrap_or(0),
                 "mesh": {"links": node.links.lock().unwrap().len(), "tips": mesh},
-                "node_id": hex::encode(node.identity.verifying_key().to_bytes()),
+                "node_id": node.id_hex(),
                 "wallet": node.app.has_wallet().unwrap_or(false),
             }))
         }
@@ -109,7 +109,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             // Borrowed chains: balances from the borrowed coins.
             if let Some(cp) = arcade_chain::params::by_key(&chain).filter(|cp| crate::borrow::is_borrowed(cp.key)) {
                 for l in v.iter_mut() {
-                    if let Some(sc) = l["address"].as_str().and_then(|a| arcade_ledger::address::decode_base58check(a)).and_then(|(_, h)| <[u8; 20]>::try_from(h).ok()).map(|h| arcade_ledger::address::p2pkh_script(&h)) {
+                    if let Some(sc) = l["address"].as_str().and_then(|a| arcade_ledger::address::script_for_address(cp, a)) {
                         l["balance"] = json!(crate::borrow::balance(node, cp, &sc));
                     }
                 }
@@ -345,9 +345,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             };
             let tag = index::tag_of(&node.chain, c, &address).map_err(|e| e.to_string())?;
             let prof = index::profile(&node.chain, c, &address).map_err(|e| e.to_string())?;
-            let script = arcade_ledger::address::decode_base58check(&address)
-                .and_then(|(v, h)| <[u8; 20]>::try_from(h).ok().map(|h| (v, h)))
-                .map(|(v, h)| if v == p.p2sh_version { [&[0xa9u8, 0x14][..], &h, &[0x87]].concat() } else { arcade_ledger::address::p2pkh_script(&h) });
+            let script = arcade_ledger::address::script_for_address(p, &address);
             let (balance, history) = match &script {
                 Some(sc) => (node.chain.balance_for_script(c, sc).unwrap_or(0), node.chain.history_for_script(c, sc).map(|h| h.len()).unwrap_or(0)),
                 None => (0, 0),
