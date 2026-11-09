@@ -447,6 +447,21 @@ impl WriteTxn<'_> {
         Ok(())
     }
 
+    /// Put rows in ascending key order, each past the table's last key (bulk loads: pages are
+    /// filled and never split). Falls back to an ordinary put for a key that isn't past the end.
+    pub fn append(&self, table: &str, key: &[u8], value: &[u8]) -> Result<()> {
+        check(self.schema, table)?;
+        let t = self.txn.open_table(Some(table))?;
+        match self.txn.put(&t, key, value, WriteFlags::APPEND) {
+            Ok(()) => Ok(()),
+            Err(libmdbx::Error::KeyMismatch) | Err(libmdbx::Error::KeyExist) => {
+                self.txn.put(&t, key, value, WriteFlags::UPSERT)?;
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Insert only if absent. Returns false if the key already existed.
     pub fn insert_new(&self, table: &str, key: &[u8], value: &[u8]) -> Result<bool> {
         check(self.schema, table)?;
@@ -591,6 +606,21 @@ mod tests {
         assert!(s.write(|w| w.insert_new("t.v1.a", b"k", b"1")).unwrap());
         assert!(!s.write(|w| w.insert_new("t.v1.a", b"k", b"2")).unwrap());
         assert_eq!(s.read(|r| r.get("t.v1.a", b"k")).unwrap(), Some(b"1".to_vec()));
+    }
+
+    #[test]
+    fn append_in_order_and_out_of_order() {
+        let (_d, p) = tmp();
+        let s = Store::open(&p, &SCHEMA_V1).unwrap();
+        s.write(|w| {
+            w.append("t.v1.a", b"b", b"1")?;
+            w.append("t.v1.a", b"c", b"2")?;
+            w.append("t.v1.a", b"a", b"3")?; // before the end: an ordinary put
+            w.append("t.v1.a", b"c", b"4") // the last key again: replaced
+        })
+        .unwrap();
+        let all = s.read(|r| r.scan_prefix("t.v1.a", b"")).unwrap();
+        assert_eq!(all, vec![(b"a".to_vec(), b"3".to_vec()), (b"b".to_vec(), b"1".to_vec()), (b"c".to_vec(), b"4".to_vec())]);
     }
 
     #[test]

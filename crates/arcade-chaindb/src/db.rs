@@ -631,6 +631,15 @@ impl ChainDb {
         self.store.read(|r| Ok(r.get(STATE, &ix_key(c, name))?.map(|v| be_u32(&v, 0))))
     }
 
+    /// Set (or with None, forget) how far an indexer has folded in on a chain. Only for an index
+    /// whose rows were written another way: a copy taken in (docs/INDEXBOOT.md §4.2).
+    pub fn set_indexed_to(&self, c: u16, name: &str, h: Option<u32>) -> Result<()> {
+        self.store.write(|w| match h {
+            Some(h) => w.put(STATE, &ix_key(c, name), &h.to_be_bytes()),
+            None => w.del(STATE, &ix_key(c, name)).map(|_| ()),
+        })
+    }
+
     /// Replay up to `max` stored blocks into a lagging indexer. Returns blocks processed
     /// (0 = caught up). Blocks inside the undo window get the index changes appended to
     /// their undo record, so a later reorg undoes them too.

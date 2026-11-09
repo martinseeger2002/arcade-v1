@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/arcade-store", "crates/arcade-chain", "crates/arcade-chaindb", "crates/arcade-mesh", "crates/arcade-ledger", "crates/arcade-wallet", "crates/arcade-msg", "crates/arcade-app", "crates/arcaded", "crates/arcade-cli", "crates/arcade-desktop"]
+members = ["crates/arcade-store", "crates/arcade-chain", "crates/arcade-chaindb", "crates/arcade-mesh", "crates/arcade-ledger", "crates/arcade-wallet", "crates/arcade-msg", "crates/arcade-app", "crates/arcaded", "crates/arcade-cli", "crates/arcade-desktop", "crates/arcade-oldimport"]
 
 [workspace.package]
 version = "0.1.0"
