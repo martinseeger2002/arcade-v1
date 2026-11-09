@@ -145,6 +145,16 @@ pub fn on_ix(peer: &str, head: &Value) {
     }
 }
 
+/// What each arcade said in its lx hi: (node, when, nets), for the mesh overview.
+pub fn heard_all() -> Vec<(String, u64, Value)> {
+    st().heard.iter().map(|(k, h)| (k.clone(), h.at, h.nets.clone())).collect()
+}
+
+/// Every ix tip heard: (node, net, when, tip), for the mesh overview.
+pub fn tips_all() -> Vec<(String, String, u64, Value)> {
+    st().tips.iter().map(|((p, n), (at, t))| (p.clone(), n.clone(), *at, t.clone())).collect()
+}
+
 /// Per link, often: send what is queued for it and keep its holders busy.
 pub fn tick(link: &mut Link) -> Result<(), LinkError> {
     let peer = link.peer_id.clone();

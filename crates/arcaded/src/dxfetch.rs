@@ -162,6 +162,11 @@ pub fn on_frame(node: &Node, link: &mut Link, f: &Frame) -> Result<(), LinkError
     Ok(())
 }
 
+/// Every walker's (or reader's) dx hi: (node, net, when, hi), for the mesh overview.
+pub fn heard_all() -> Vec<(String, String, u64, Value)> {
+    st().heard.iter().map(|((p, n), (at, hi))| (p.clone(), n.clone(), *at, hi.clone())).collect()
+}
+
 pub fn tick(link: &mut Link) -> Result<(), LinkError> {
     let peer = link.peer_id.clone();
     let out = {

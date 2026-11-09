@@ -439,6 +439,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             Ok(json!({"chain": p.key, "known": known, "working": good, "resting": resting, "good": crate::peerbook::good(node, p.net, 50), "next": node.coin_candidates(p).into_iter().take(10).collect::<Vec<_>>()}))
         }
         "chains.list" => Ok(crate::chains::list(node)),
+        "mesh.overview" => Ok(crate::meshview::overview(node)),
         "chains.sizes" => {
             // Measure now (instead of waiting for the six-hourly pass) and show the result.
             let m = crate::sizes::measure(node)?;

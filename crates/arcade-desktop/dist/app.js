@@ -26,41 +26,57 @@ let state = { wallet: false, keys: [], claims: [] };
 
 async function refreshHome() {
   const s = await api("status");
-  const ch = picked();
   state.wallet = s.wallet;
   $("conn").textContent = "connected"; $("conn").className = "pill ok";
-  $("h-title").textContent = ch.name;
-  if (ch.home) {
-    $("h-sync").textContent = s.sync;
-    $("h-tip").textContent = s.tip ? `block ${s.tip.height.toLocaleString()} · ${short(s.tip.hash, 16)}` : "";
-  } else {
-    const st = await api("chains.status", { key: ch.key });
-    $("h-sync").textContent = st.installed || st.borrowed ? st.state : "not installed";
-    const src = (st.stages || []).find((x) => x.name === "Source");
-    $("h-tip").textContent = st.installed || st.borrowed ? `block ${(st.tip || 0).toLocaleString()}${src ? " · " + src.detail : ""}` : "Install it in Chains & Coins";
-  }
-  $("h-mesh").textContent = `${s.mesh.links} arcade${s.mesh.links === 1 ? "" : "s"} linked`;
-  $("h-node").textContent = "node " + short(s.node_id, 16);
-  if (ch.home) {
-    $("h-tags-k").textContent = "Tags";
-    $("h-tags").textContent = `${s.tags.count} tags`;
-    const same = s.mesh.tips.filter((t) => t.names_digest === s.tags.names_digest).length;
-    const told = s.mesh.tips.filter((t) => t.names_digest).length;
-    $("h-match").textContent = told ? `matches ${same} of ${told} arcades` : "no arcade has reported yet";
-  } else {
-    const st = await api("chains.status", { key: ch.key });
-    $("h-tags-k").textContent = "Indexes";
-    $("h-tags").textContent = st.installed ? `${(st.indexes || []).length} on` : st.borrowed ? "none (borrowed)" : "—";
-    $("h-match").textContent = st.installed ? (st.indexes || []).join(", ") || "blocks and addresses only" : st.borrowed ? `your coins only, from ${(st.lenders || []).length} lending arcade${(st.lenders || []).length === 1 ? "" : "s"}` : "";
-  }
-  $("h-wallet").textContent = s.wallet ? "ready" : "not created";
-  if (s.wallet) {
-    state.keys = await api("wallet.keys", { chain: ch.key });
-    const bal = state.keys.reduce((a, k) => a + (k.balance || 0), 0);
-    const tag = state.keys.find((k) => k.tag)?.tag;
-    $("h-bal").textContent = (state.keys.some((k) => k.balance != null) ? coins(bal) + (state.keys.some((k) => k.borrowed) ? " (borrowed)" : "") : "chain not installed") + (tag ? ` · @${tag}` : "");
-  } else { $("h-bal").textContent = ""; }
-  state.claims = await api("tag.list");
+  if (!$("home").classList.contains("on")) return;
+  drawMesh(await api("mesh.overview"));
+}
+
+// Home: every arcade linked or heard lately, who runs it, and what it offers per chain.
+const ago = (t) => { const d = Math.max(0, Date.now() / 1000 - t); return d < 90 ? "just now" : d < 5400 ? `${Math.round(d / 60)} min` : d < 172800 ? `${Math.round(d / 3600)} h` : `${Math.round(d / 86400)} days`; };
+const num = (n) => (n == null ? "?" : Number(n).toLocaleString());
+const gb = (b) => (b ? `${(b / 1e9).toFixed(b < 1e10 ? 1 : 0)} GB` : "");
+function chip(text, kind = "", tip) { return h("span", { class: "chip " + kind, title: tip }, text); }
+function chainChips(c) {
+  const out = [];
+  if (c.lends != null) out.push(chip(`lends its Core · block ${num(c.lends)}`, "on"));
+  if (c.blocks != null) out.push(chip(`serves blocks to ${num(c.blocks)}`));
+  const cc = c.chain_copy;
+  if (cc && cc.ready) out.push(chip(`chain copy ready · block ${num(cc.ready.h)}${cc.ready.bytes ? " · " + gb(cc.ready.bytes) : ""}`, "on"));
+  else if (cc && cc.can) out.push(chip("can make a chain copy", "on"));
+  else if (cc) out.push(chip("no chain copies", "off", cc.why || "not offered"));
+  const o = c.ord;
+  if (o && o.mode === "walk") out.push(chip(`walks ord to ${num(o.walk)}`));
+  else if (o && o.mode === "help") out.push(chip("helps walk ord"));
+  if (o && o.snapshot) out.push(chip(`ord snapshot · block ${num(o.snapshot.h)}${o.snapshot.whole ? "" : " (partial)"}`, "on"));
+  const l = c.ledger;
+  if (l && l.copy) out.push(chip(`ledger copy · block ${num(l.copy.h)}${l.copy.whole ? "" : " (partial)"}`, "on"));
+  const x = c.ledger_check;
+  if (x) out.push(x.same === true ? chip(`ledger matches ours to ${num(x.at)}`, "on") : x.same === false ? chip(`ledger differs from ours at ${num(x.at)}`, "bad") : chip(`ledger at ${num(x.h)}`));
+  return out;
+}
+function drawMesh(ov) {
+  const all = ov.arcades || [];
+  const linked = all.filter((a) => a.linked).length;
+  const lend = new Set(all.flatMap((a) => (a.chains || []).filter((c) => c.lends != null).map((c) => c.key)));
+  const copy = new Set(all.flatMap((a) => (a.chains || []).filter((c) => c.chain_copy && (c.chain_copy.can || c.chain_copy.ready)).map((c) => c.key)));
+  $("h-sum").textContent = `This arcade (node ${short(ov.me.node, 12)}) is linked to ${linked} arcade${linked === 1 ? "" : "s"}` +
+    (all.length > linked ? ` and has heard from ${all.length - linked} more` : "") +
+    `. Cores lent: ${lend.size ? [...lend].map((k) => TICKERS[k] || k).join(", ") : "none"}. Chain copies on offer: ${copy.size ? [...copy].map((k) => TICKERS[k] || k).join(", ") : "none"}.`;
+  $("h-arcades").replaceChildren(...all.map((a) => {
+    const who = a.tag ? "@" + a.tag : "arcade " + short(a.node, 8);
+    const chains = (a.chains || []).filter((c) => chainChips(c).length);
+    return h("div", { class: "arcade" + (a.linked ? "" : " heard") },
+      h("div", { class: "top" },
+        h("span", { class: "who" }, who),
+        a.version ? h("span", { class: "pill" }, a.version) : null,
+        h("span", { class: "pill " + (a.linked ? "ok" : "") }, a.linked ? `linked ${ago(a.since)}` : "heard, not linked")),
+      h("div", { class: "meta" }, `node ${short(a.node, 16)}${a.addr ? " · " + a.addr : ""}`),
+      chains.length
+        ? h("div", { class: "lines" }, ...chains.map((c) => h("div", { class: "line" },
+            coinLogo(c.key, c.name, "span", "logo"), h("span", { class: "cn" }, c.name), h("span", { class: "chips" }, ...chainChips(c)))))
+        : h("div", { class: "meta" }, "offers nothing to other arcades"));
+  }));
 }
 
 async function drawAccounts() {

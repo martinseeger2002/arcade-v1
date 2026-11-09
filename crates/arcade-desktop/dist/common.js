@@ -26,7 +26,7 @@ const h = (tag, attrs = {}, ...kids) => {
 function say(id, text, bad) { const m = $(id); m.textContent = text; m.className = "msg " + (bad ? "bad" : "ok"); }
 
 // What people call each coin (the keys underneath stay as the mesh knows them).
-const TICKERS = { peptest: "PEPtest", pep: "PEP", doge: "DOGE", dgb: "DGB", dgbtest: "DGBtest", kot: "KOT", flop: "FLOP", ltc: "LTC", ltctest: "LTCtest", btc: "BTC", wjk: "WJK" };
+const TICKERS = { peptest: "PEPtest", pep: "PEP", doge: "DOGE", dgb: "DGB", dgbtest: "DGBtest", kot: "KOT", flop: "FLOP", ltc: "LTC", ltctest: "LTCtest", btc: "BTC", wjk: "WJK", bel: "BEL", lky: "LKY" };
 // A chain's colour, behind its letter when it has no icon.
 const COLORS = { peptest: "#2e8b44", pep: "#3f9c55", doge: "#c2a633", dgb: "#0066cc", dgbtest: "#3388dd", kot: "#7a4cc2", flop: "#d0602a", ltc: "#345d9d", ltctest: "#5b7fb8", btc: "#f7931a" };
 // The original Dogecoin Arcade's coin icons (coins/<key>.png); others get a letter.

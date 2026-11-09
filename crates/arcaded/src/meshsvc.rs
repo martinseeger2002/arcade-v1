@@ -363,6 +363,7 @@ fn serve_loop(
                 }
             }
             "wl" => crate::faucet::on_welcome(node, &f.head),
+            "op" if f.head["op"] == "me" => crate::meshview::on_op_me(&link.peer_id, &f.head),
             "lk" => crate::links::on_lk(node, &f.head),
             "addrs" => on_addrs(node, &f.head),
             "pp" => on_coin_peers(node, &f.head),

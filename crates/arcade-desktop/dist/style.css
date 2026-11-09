@@ -336,3 +336,22 @@ button.linkish { border: 0; background: none; padding: 0; font-size: 11px; color
 .brow .bar { height: 4px; background: var(--line); border-radius: 2px; margin-top: 6px; overflow: hidden; }
 .brow .bar i { display: block; height: 100%; background: var(--accent, #3b82f6); }
 @media (max-width: 640px) { .brow { flex-wrap: wrap; } .brow .ba { width: 100%; justify-content: flex-end; } }
+
+/* Home: the arcade mesh */
+.note { color: var(--muted); }
+.arcades { display: flex; flex-direction: column; gap: 10px; }
+.arcade { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.arcade.heard { opacity: .8; border-style: dashed; }
+.arcade .top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.arcade .who { font-weight: 650; font-size: 15px; margin-right: 4px; }
+.arcade .meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.arcade .lines { display: flex; flex-direction: column; gap: 4px; margin-top: 2px; }
+.arcade .line { display: grid; grid-template-columns: 20px 11em 1fr; align-items: start; gap: 8px; }
+.arcade .logo { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 10px; font-weight: 700; color: #fff; flex: none; overflow: hidden; }
+.arcade .logo.img img { width: 100%; height: 100%; }
+.arcade .cn { font-size: 13px; line-height: 20px; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.chip.on { color: var(--accent); border-color: var(--accent); }
+.chip.off { border-style: dashed; }
+.chip.bad { color: var(--bad); border-color: var(--bad); }
