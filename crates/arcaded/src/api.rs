@@ -88,11 +88,19 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             // A borrowed copy answers while the installed one catches up.
             let installed = !crate::borrow::is_borrowed(cp.key) && (cp.chain_no == p.chain_no || node.extra.lock().unwrap().contains_key(cp.key)) && node.chain.addresses_on(cp.chain_no).unwrap_or(false);
             Ok(json!(keys.iter().map(|k| {
-                let script = arcade_wallet::keys::p2pkh_script_for(&arcade_wallet::secp256k1::PublicKey::from_slice(&hex::decode(&k.pubkey).unwrap()).unwrap());
-                json!({"index": k.index, "address": k.address, "tag": if cp.chain_no == p.chain_no { k.tag.clone() } else { None },
-                       "balance": if installed { node.chain.balance_for_script(cp.chain_no, &script).ok() } else { crate::borrow::balance(node, cp, &script) },
-                       "borrowed": !installed && crate::borrow::is_borrowed(cp.key)})
+                let pk = arcade_wallet::secp256k1::PublicKey::from_slice(&hex::decode(&k.pubkey).unwrap()).unwrap();
+                // Every address of the key (DigiByte: dgb1... to receive, its D... still counted).
+                let scripts = crate::coinsend::key_scripts(cp, &pk);
+                let bal = |sc: &[u8]| if installed { node.chain.balance_for_script(cp.chain_no, sc).ok() } else { crate::borrow::balance(node, cp, sc) };
+                let balance = scripts.iter().map(|(_, sc)| bal(sc)).try_fold(0u64, |a, b| b.map(|x| a + x));
+                json!({"index": k.index, "address": scripts[0].0, "legacy": scripts.get(1).map(|x| x.0.clone()),
+                       "tag": if cp.chain_no == p.chain_no { k.tag.clone() } else { None },
+                       "balance": balance, "borrowed": !installed && crate::borrow::is_borrowed(cp.key)})
             }).collect::<Vec<_>>()))
+        }
+        "wallet.send" => {
+            let amount = req["amount"].as_u64().ok_or("amount required (satoshis)")?;
+            crate::coinsend::send(node, s("chain").as_deref(), &s("to").ok_or("to required")?, amount, req["send"] == true)
         }
         "wallet.link" => crate::links::link(node, &s("chain").ok_or("chain required")?, &s("wif").ok_or("wif required")?, &s("tag").ok_or("tag required")?),
         "wallet.unlink" => crate::links::unlink(node, &s("chain").ok_or("chain required")?, &s("address").ok_or("address required")?, &s("tag").ok_or("tag required")?),

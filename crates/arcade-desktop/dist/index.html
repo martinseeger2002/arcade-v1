@@ -74,7 +74,20 @@
     </div>
     <div id="w-keys" hidden>
       <table><thead><tr><th>#</th><th>Address</th><th>Tag</th><th class="num">Balance</th></tr></thead><tbody id="w-rows"></tbody></table>
+      <p class="note" id="w-legacy" hidden></p>
       <div class="row"><button id="w-faucet">Ask the mesh for test coins</button></div>
+      <h2 id="w-send-h">Send</h2>
+      <div class="row">
+        <input id="w-to" placeholder="address" autocomplete="off" style="flex:1;min-width:16em">
+        <input id="w-amt" placeholder="amount" inputmode="decimal" autocomplete="off" style="max-width:9em">
+        <span class="home-ticker" id="w-amt-unit"></span>
+        <button id="w-review">Review</button>
+      </div>
+      <p class="msg" id="w-send-msg"></p>
+      <div id="w-confirm" class="warn" hidden>
+        <div id="w-confirm-text"></div>
+        <div class="row"><button class="primary" id="w-sendnow">Send</button><button id="w-cancel">Cancel</button></div>
+      </div>
       <h2>Linked wallets</h2>
       <p class="note">Attach another wallet on this chain to your @tag. The wallet's key and your @tag's key both sign the link, so other arcades can check it. The key is kept here, encrypted.</p>
       <table><thead><tr><th>Address</th><th>Tag</th><th class="num">Balance</th><th></th></tr></thead><tbody id="w-links"></tbody></table>

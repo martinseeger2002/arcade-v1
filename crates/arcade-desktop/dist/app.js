@@ -138,6 +138,12 @@ async function refreshWallet() {
   drawImports();
   state.keys = await api("wallet.keys", { chain: ch.key });
   rows($("w-rows"), state.keys, (k) => [[String(k.index)], [k.address], [k.tag ? "@" + k.tag : "—"], [k.balance == null ? "not installed" : coins(k.balance), "num"]]);
+  // DigiByte receives at dgb1... (its D... addresses are the same strings as Dogecoin's).
+  const legacy = state.keys.filter((k) => k.legacy).map((k) => k.legacy);
+  $("w-legacy").hidden = !legacy.length;
+  $("w-legacy").textContent = legacy.length ? `Coins sent to ${legacy.join(", ")} (the older D... form of the same key) are counted too. Give people the dgb1... address: D... addresses look the same on Dogecoin.` : "";
+  $("w-send-h").textContent = `Send ${TICKERS[ch.key] || ch.name}`;
+  $("w-amt-unit").textContent = TICKERS[ch.key] || "";
   // Test coins from the mesh are Pepecoin testnet coins.
   $("w-faucet").hidden = !ch.home;
   if (!$("w-ltag").value) {
@@ -265,6 +271,51 @@ $("w-import").addEventListener("click", async () => {
 $("w-faucet").addEventListener("click", async () => {
   try { await api("faucet.ask"); msg($("w-msg"), "Asked the mesh for test coins; any arcade with spare coins can send them.", "ok"); }
   catch (e) { msg($("w-msg"), e.message, "bad"); }
+});
+
+// Send this chain's coin: review first (fee, and a warning when the address could be meant for
+// another chain), then send.
+let pendingSend = null;
+const toSats = (t) => {
+  const m = String(t).trim().match(/^(\d+)(?:\.(\d{1,8}))?$/);
+  if (!m) return null;
+  return Number(m[1]) * 1e8 + Number((m[2] || "").padEnd(8, "0"));
+};
+$("w-review").addEventListener("click", async () => {
+  const ch = picked();
+  const sats = toSats($("w-amt").value);
+  const sm = $("w-send-msg");
+  if (!sats) { msg(sm, "Enter an amount, for example 12.5", "bad"); return; }
+  // A DigiByte D... address is also a Dogecoin address: say so before anything else.
+  const to = $("w-to").value.trim();
+  const dogeLike = ch.key === "dgb" && /^D[1-9A-HJ-NP-Za-km-z]{25,34}$/.test(to);
+  try {
+    const r = await api("wallet.send", { chain: ch.key, to: $("w-to").value.trim(), amount: sats, send: false });
+    pendingSend = { chain: ch.key, to: $("w-to").value.trim(), amount: sats };
+    $("w-confirm-text").replaceChildren(
+      h("div", {}, `Pay ${coins(r.amount, ch.key)} to ${r.to}`),
+      h("div", { class: "s" }, `fee ${coins(r.fee, ch.key)} · ${r.vsize || r.size} bytes · from ${r.from}`),
+      r.warning ? h("p", { class: "msg bad" }, r.warning) : null);
+    $("w-confirm").hidden = false;
+    msg(sm, "");
+  } catch (e) {
+    // "not enough coins: have X, need Y" in satoshis -> in the coin.
+    const m = e.message.match(/have (\d+), need (\d+)/);
+    const text = m ? `Not enough ${TICKERS[ch.key] || "coins"}: you have ${coins(+m[1], ch.key)}, this needs ${coins(+m[2], ch.key)} (the amount and its fee).` : e.message;
+    msg(sm, text + (dogeLike ? " Also: D... addresses look the same on DigiByte and Dogecoin, so make sure whoever you're paying uses DigiByte." : ""), "bad");
+  }
+});
+$("w-cancel").addEventListener("click", () => { pendingSend = null; $("w-confirm").hidden = true; });
+$("w-sendnow").addEventListener("click", async () => {
+  if (!pendingSend) return;
+  const b = $("w-sendnow"); b.disabled = true;
+  try {
+    const r = await api("wallet.send", { ...pendingSend, send: true });
+    $("w-confirm").hidden = true; pendingSend = null; $("w-to").value = ""; $("w-amt").value = "";
+    msg($("w-send-msg"), `Sent: ${r.txid}`, "ok");
+    refreshWallet();
+  } catch (e) { msg($("w-send-msg"), e.message, "bad"); }
+  finally { b.disabled = false; }
 });
 
 // Handle actions
