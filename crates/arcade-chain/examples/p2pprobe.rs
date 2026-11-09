@@ -1,5 +1,6 @@
 //! Can we talk P2P to a chain's nodes?  p2pprobe <chain key> [host:port ...]
-//! With no addresses: the chain's fixed peers plus every address its DNS seeds give.
+//! With no addresses: the chain's fixed peers plus every address its DNS seeds give. That can
+//! be dozens of connections (Bitcoin's seeds return many), so run it by hand, not in a loop.
 use arcade_chain::{p2p::Peer, params::by_key};
 use std::net::ToSocketAddrs;
 use std::time::Duration;

@@ -618,6 +618,13 @@ mod tests {
             for a in p.fixed_peers {
                 let port = a.rsplit(':').next().and_then(|x| x.parse::<u16>().ok());
                 assert_eq!(port, Some(p.p2p_port), "{}: fixed peer {a} isn't on the chain's P2P port", p.name);
+                // A LAN or loopback box must never ship as a fixed peer.
+                let ip: std::net::SocketAddr = a.parse().unwrap_or_else(|_| panic!("{}: fixed peer {a} isn't ip:port", p.name));
+                let private = match ip.ip() {
+                    std::net::IpAddr::V4(v) => v.is_private() || v.is_loopback() || v.is_link_local(),
+                    std::net::IpAddr::V6(v) => v.is_loopback() || (v.segments()[0] & 0xfe00) == 0xfc00 || (v.segments()[0] & 0xffc0) == 0xfe80,
+                };
+                assert!(!private, "{}: fixed peer {a} is a private address", p.name);
             }
         }
     }
