@@ -51,6 +51,7 @@ mod rpc;
 mod sizes;
 mod udpsvc;
 mod v1copy;
+mod vxshare;
 mod shares;
 mod secretbox;
 

@@ -335,10 +335,10 @@ pub fn start_make(node: std::sync::Arc<Node>, key: &str, fam: &str) -> Result<Va
 
 /// The copies held here: per chain and family, its manifest summary.
 pub fn held(node: &Node) -> Value {
-    json!({"held": held_list(node), "making": making().iter().cloned().collect::<Vec<_>>(), "fmt": FMT})
+    json!({"held": held_list(node), "making": making().iter().cloned().collect::<Vec<_>>(), "fetching": crate::vxshare::status(), "fmt": FMT})
 }
 
-fn held_list(node: &Node) -> Vec<Value> {
+pub(crate) fn held_list(node: &Node) -> Vec<Value> {
     let mut out = Vec::new();
     let root = node.home.join("copies");
     let Ok(nets) = std::fs::read_dir(&root) else { return out };
@@ -353,7 +353,8 @@ fn held_list(node: &Node) -> Vec<Value> {
                 }
                 if let Some(m) = manifest(&i.path()) {
                     out.push(json!({"id": name, "net": m["net"], "fam": m["fam"], "cp": m["cp"], "hash": m["hash"],
-                                    "rows": m["rows"], "bytes": m["bytes"], "n": m["pieces"].as_array().map(|a| a.len()), "fmt": m["fmt"]}));
+                                    "rows": m["rows"], "bytes": m["bytes"], "n": m["pieces"].as_array().map(|a| a.len()), "fmt": m["fmt"],
+                                    "made": !i.path().join("fetched").exists()}));
                 }
             }
         }

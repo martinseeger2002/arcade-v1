@@ -302,6 +302,7 @@ fn serve_loop(
         // UDP path: ask, switch over, fall back; proofs and introductions for this link.
         crate::udpsvc::tick(node, link)?;
         crate::coreboot::tick(node, link)?;
+        crate::vxshare::tick(node, link)?;
         #[cfg(feature = "oldimport")]
         crate::lxfetch::tick(link)?;
         #[cfg(feature = "oldimport")]
@@ -375,6 +376,7 @@ fn serve_loop(
             "ud" | "st" | "ui" => crate::udpsvc::on_frame(node, link, &f)?,
             "ka" => {} // TCP keepalive while frames go over UDP
             "cb" => crate::coreboot::on_frame(node, link, &f)?,
+            "vx" => crate::vxshare::on_frame(node, link, &f)?,
             #[cfg(feature = "oldimport")]
             "lx" => crate::lxfetch::on_frame(node, link, &f)?,
             #[cfg(feature = "oldimport")]
