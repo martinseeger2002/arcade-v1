@@ -41,11 +41,8 @@ impl<'a> CoreShareSource<'a> {
         ask(&mut self.link, &self.addr, self.p.net, id, &calls, &mut |_| {})
     }
 
-    fn r<'v>(v: &'v Value) -> Result<&'v Value, String> {
-        if let Some(e) = v.get("e") {
-            return Err(format!("rpc error {e}"));
-        }
-        v.get("r").ok_or_else(|| "no result".to_string())
+    fn r(v: &Value) -> Result<&Value, String> {
+        result(v, "rpc error")
     }
 
     pub fn params(&self) -> &'static ChainParams {
@@ -87,6 +84,14 @@ impl<'a> CoreShareSource<'a> {
         Ok(out)
     }
 
+}
+
+/// One answer of a batch: its "r", or its "e" as an error ("{what} {e}").
+pub fn result<'v>(v: &'v Value, what: &str) -> Result<&'v Value, String> {
+    if let Some(e) = v.get("e") {
+        return Err(format!("{what} {e}"));
+    }
+    v.get("r").ok_or_else(|| "no result".to_string())
 }
 
 /// One coreshare batch on a link: send `calls` ([[method, params], ...]) for `net` as query
@@ -201,5 +206,18 @@ impl BlockSource for CoreShareSource<'_> {
 
     fn describe(&self) -> String {
         format!("arcade {} (its Core node)", self.addr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_results() {
+        assert_eq!(result(&json!({"r": 5}), "x").unwrap(), &json!(5));
+        assert_eq!(result(&json!({"e": [-5, "no block"]}), "rpc error").unwrap_err(), r#"rpc error [-5,"no block"]"#);
+        assert_eq!(result(&json!({"e": [-5, "no block"]}), "lender:").unwrap_err(), r#"lender: [-5,"no block"]"#);
+        assert_eq!(result(&json!({}), "x").unwrap_err(), "no result");
     }
 }

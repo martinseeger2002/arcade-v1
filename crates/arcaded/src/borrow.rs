@@ -401,10 +401,7 @@ fn drain() {
 }
 
 fn r(v: &Value) -> Result<&Value, String> {
-    if let Some(x) = v.get("e") {
-        return Err(format!("lender: {x}"));
-    }
-    v.get("r").ok_or_else(|| "no result".to_string())
+    crate::crsource::result(v, "lender:")
 }
 
 /// The same batch on the best lender that answers (up to three tried).
