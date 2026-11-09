@@ -409,7 +409,7 @@ impl Path {
         while let Some((m, c)) = self.ooo.remove(&self.rx_next) {
             self.partial.extend_from_slice(&c);
             self.rx_next += 1;
-            if self.partial.len() > MAX_FRAME {
+            if self.partial.len() > crate::transport::MAX_INBOUND + CHUNK {
                 self.down = Some("frame too large".into());
                 return;
             }
@@ -800,7 +800,7 @@ impl crate::transport::Transport for Stream {
         let end = Instant::now() + self.timeout;
         loop {
             if let Some(n) = self.whole() {
-                if n > crate::transport::MAX_FRAME {
+                if n > crate::transport::MAX_INBOUND {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
                 }
                 let body = self.buf[4..4 + n].to_vec();

@@ -6,7 +6,8 @@ Status: **approved by Martin 2026-11-09; being built phase by phase (§11).** Dr
 |---|---|
 | 1. Converter and fixtures | **built**: `crates/arcade-oldimport` (library + `arcade-oldimport` tool), tests in `tests/convert.rs`. Checked on real files, see §8.1 results. |
 | 2. lx client (ledger) | **built**: `crates/arcaded/src/lxfetch.rs`, feature `oldimport` (default on). Tested live, see §8.2 results. |
-| 3 to 6 | not started |
+| 3. dx client (ord) | **built**: `crates/arcaded/src/dxfetch.rs`. Tested live, see §8.3 results. |
+| 4 to 6 | not started |
 
 ## Martin's decisions
 
@@ -186,6 +187,11 @@ For Dogecoin ord (180 M inscriptions) this re-check is days of background work. 
    - Finding: V1.0 walks the Pepecoin testnet ledger (66,000 blocks) natively in under 10 s, so for this chain a copy only matters as a cross-check. Copies pay off for ord (§8.3) and for long chains.
    - While a copy is being fetched (at most 30 min from its start) or converted, that chain's own ledger walk waits, so the two don't race.
 3. **Pepecoin mainnet ord** (Strawberry walks it, 100%) over dx, into a fresh home. Compare against the mini PC's own walked ord index (its oracle).
+   - **Results (2026-11-09, GX10, phase 3):** a throwaway V1.0 home with Pepecoin installed (paused, no blocks; the test-only `ARCADE_COPY_UNSTORED=1` skips the stored-blocks rule) said `dx hi` as a "read" arcade and asked the furthest walker for a snapshot (`sq`). Strawberry made one (`9672ed0f…`, walked to 1,286,160, 3.1 GB) and served its 2,953 pieces in about 3 minutes. Then 172 `q moves` questions to the one other walker (473c3d90) matched **all 10,992 chunks**, and the copy converted (18,330,877 inscriptions) with the ord index starting again at block 1,286,159.
+   - Martin's rule needs 2 backers per chunk, and only one non-holding walker was linked, so that check waited, as designed. The run above used the test-only `ARCADE_COPY_MIN_BACKERS=1` to go on.
+   - Chunk words (`dn`) didn't arrive. Old arcades send them on link-up in 500-row frames of ~73 KB, over the mesh's 64 KB limit, so every receiver refuses them. V1.0 now takes inbound frames up to 256 KB; the old arcade's fix was sent to the Arcade fix session. So a chunk's backers come from words **or** from moves answers, which cover every birth and every move.
+   - V1.0's own moves digest isn't the old one: old lines are `B <id> #<number> <loc>`, plus `L`/`U` lines; V1.0 writes `B <id> <loc>`. Chunk hashes match; moves digests of natively walked blocks don't. Copies keep the old digests. To fix before phase 5.
+   - Bug found and fixed while testing: replies (`gb`, `a`) carry no `net`, and were dropped.
 4. **Native `vx` copies** of the same indexes between the GX10 and the mini PC, then the address index (the `B` remapping).
 5. **Dogecoin ord from Strawberry:**
    - Strawberry must `VACUUM INTO` a ~35 GB snapshot; it has 83 GB free today, which is tight.

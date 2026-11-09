@@ -16,8 +16,8 @@ pub fn catch_up(node: &Node) -> Result<u32, String> {
     let running = node.chain.indexers_for(node.params.chain_no);
     for name in INDEXES.iter().filter(|i| running.contains(i)) {
         #[cfg(feature = "oldimport")]
-        if *name == "ledger.v1" && crate::lxfetch::holds(node.params.key) {
-            continue; // a ledger copy is on its way (crate::lxfetch)
+        if crate::lxfetch::walk_waits(node.params.key, name) {
+            continue; // a copy of this index is on its way (crate::lxfetch, crate::dxfetch)
         }
         loop {
             if node.home_mode == "shared" {

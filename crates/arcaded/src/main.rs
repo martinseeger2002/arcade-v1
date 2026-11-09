@@ -30,6 +30,8 @@ mod importsvc;
 mod ledger;
 mod links;
 #[cfg(feature = "oldimport")]
+mod dxfetch;
+#[cfg(feature = "oldimport")]
 mod lxfetch;
 mod meshsource;
 mod miner;
@@ -187,6 +189,9 @@ fn main() {
         // "lx" ledger copies from old arcades: fetching, voting, taking in.
         let n = node.clone();
         std::thread::Builder::new().name("lx copies".into()).spawn(move || lxfetch::run(n)).unwrap();
+        // "dx" ord snapshots from old arcades.
+        let n = node.clone();
+        std::thread::Builder::new().name("dx snapshots".into()).spawn(move || dxfetch::run(n)).unwrap();
     }
     let _ = node.app.event("service", "arcaded started");
     eprintln!(

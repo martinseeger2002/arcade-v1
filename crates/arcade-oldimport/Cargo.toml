@@ -13,6 +13,7 @@ arcade-store = { version = "0.1.0", path = "../arcade-store" }
 hex = "0.4.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1.0.154"
+sha2 = "0.11.1"
 
 [dev-dependencies]
 tempfile = "3.27.0"

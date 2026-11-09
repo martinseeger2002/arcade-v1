@@ -467,14 +467,21 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         }
         // Index copies from old arcades (crate::lxfetch)
         #[cfg(feature = "oldimport")]
-        "chains.index_copy_status" => Ok(crate::lxfetch::status(node, s("key").as_deref())),
+        "chains.index_copy_status" => {
+            let k = s("key");
+            Ok(json!({"ledger": crate::lxfetch::status(node, k.as_deref()), "ord": crate::dxfetch::status(node, k.as_deref())}))
+        }
         #[cfg(feature = "oldimport")]
         "chains.index_copy_start" | "chains.index_copy_cancel" => {
             let key = s("key").ok_or("key required")?;
-            if s("index").as_deref() != Some("ledger") {
-                return Err("only the ledger index can be copied so far (index = ledger)".into());
+            let start = req["cmd"] == "chains.index_copy_start";
+            match s("index").as_deref() {
+                Some("ledger") if start => crate::lxfetch::start(node, &key, s("from")),
+                Some("ledger") => crate::lxfetch::cancel(node, &key),
+                Some("ord") if start => crate::dxfetch::start(node, &key, s("from")),
+                Some("ord") => crate::dxfetch::cancel(node, &key),
+                _ => Err("index = ledger or ord".into()),
             }
-            if req["cmd"] == "chains.index_copy_start" { crate::lxfetch::start(node, &key, s("from")) } else { crate::lxfetch::cancel(node, &key) }
         }
         // Borrowed coins (crate::borrow)
         "borrow.status" => Ok(crate::borrow::status_all(node)),

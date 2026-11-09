@@ -304,6 +304,8 @@ fn serve_loop(
         crate::coreboot::tick(node, link)?;
         #[cfg(feature = "oldimport")]
         crate::lxfetch::tick(link)?;
+        #[cfg(feature = "oldimport")]
+        crate::dxfetch::tick(link)?;
         if last_me.elapsed() > Duration::from_secs(60) {
             link.send(&Frame::new(operator_me(node)))?;
             // The chains we lend, again when they change (a chain finishing its sync, say).
@@ -374,6 +376,8 @@ fn serve_loop(
             "cb" => crate::coreboot::on_frame(node, link, &f)?,
             #[cfg(feature = "oldimport")]
             "lx" => crate::lxfetch::on_frame(node, link, &f)?,
+            #[cfg(feature = "oldimport")]
+            "dx" => crate::dxfetch::on_frame(node, link, &f)?,
             "cr" => {
                 if f.head["op"] == "offer" {
                     note_offer(node, &link.peer_id, addr, "cr", &f.head["nets"]);

@@ -816,3 +816,82 @@ pub fn import_ledger(db: &ChainDb, p: &ChainParams, path: &Path, opts: &Opts, sa
     set_copy_state(db, c, name, &report)?;
     Ok(report)
 }
+
+// ------------------------------------------------------------------------------------------
+// reading an ord snapshot before taking it in (docs/INDEXBOOT.md §5)
+
+/// What an ord snapshot says about itself: its meta and its chunk hashes, rebuilt from its own
+/// block lines (dx: chunk c covers blocks base+100c .. base+100c+99; hash = sha256 of the 100
+/// line hex strings; births = sum of n).
+pub struct OrdSummary {
+    pub rules: i64,
+    pub walk_next: u32,
+    pub next_number: u64,
+    /// (chunk, hash, births) for every complete chunk, in order.
+    pub chunks: Vec<(u32, String, u64)>,
+}
+
+pub fn ord_summary(path: &Path, base: u32) -> Result<OrdSummary> {
+    use sha2::Digest;
+    let conn = open(path)?;
+    let m = |k: &str| meta(&conn, "SELECT v FROM meta WHERE k=?", k);
+    let rules: i64 = m("rules")?.and_then(|v| v.parse().ok()).ok_or("the snapshot names no rules version")?;
+    let walk_next: u32 = m("walk_next")?.and_then(|v| v.parse().ok()).ok_or("the snapshot has no walk_next")?;
+    let next_number: u64 = m("next_number")?.and_then(|v| v.parse().ok()).ok_or("the snapshot has no next_number")?;
+    let mut chunks = Vec::new();
+    let mut st = conn.prepare("SELECT height, line, n FROM block WHERE height >= ? AND height < ? ORDER BY height").map_err(e)?;
+    let mut rows = st.query([base, walk_next]).map_err(e)?;
+    let (mut cur, mut cat, mut births, mut count, mut expect) = (0u32, String::new(), 0u64, 0u32, base);
+    while let Some(r) = rows.next().map_err(e)? {
+        let h: u32 = r.get(0).map_err(e)?;
+        let c = (h - base) / 100;
+        if c != cur || h != expect {
+            // A new chunk, or a gap: start over at this block's chunk.
+            cur = c;
+            cat.clear();
+            births = 0;
+            count = 0;
+            if h != base + 100 * c {
+                expect = base + 100 * (c + 1);
+                continue;
+            }
+        }
+        expect = h + 1;
+        cat.push_str(&r.get::<_, String>(1).map_err(e)?);
+        births += r.get::<_, u64>(2).map_err(e)?;
+        count += 1;
+        if count == 100 {
+            chunks.push((c, hex::encode(sha2::Sha256::digest(cat.as_bytes())), births));
+            cur = c + 1;
+            cat.clear();
+            births = 0;
+            count = 0;
+        }
+    }
+    Ok(OrdSummary { rules, walk_next, next_number, chunks })
+}
+
+/// moves_digest of some chunks of an ord snapshot: sha256 of the 100 blocks' moves hex strings,
+/// None where any block of the chunk has none.
+pub fn ord_moves(path: &Path, base: u32, chunks: &[u32]) -> Result<BTreeMap<u32, Option<String>>> {
+    use sha2::Digest;
+    let conn = open(path)?;
+    let mut st = conn.prepare("SELECT moves FROM block WHERE height >= ? AND height < ? ORDER BY height").map_err(e)?;
+    let mut out = BTreeMap::new();
+    for &c in chunks {
+        let lo = base + 100 * c;
+        let mut rows = st.query([lo, lo + 100]).map_err(e)?;
+        let mut cat = String::new();
+        let mut n = 0;
+        let mut whole = true;
+        while let Some(r) = rows.next().map_err(e)? {
+            match r.get::<_, Option<String>>(0).map_err(e)? {
+                Some(m) => cat.push_str(&m),
+                None => whole = false,
+            }
+            n += 1;
+        }
+        out.insert(c, (whole && n == 100).then(|| hex::encode(sha2::Sha256::digest(cat.as_bytes()))));
+    }
+    Ok(out)
+}

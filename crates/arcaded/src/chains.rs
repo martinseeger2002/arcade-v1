@@ -186,6 +186,17 @@ pub fn start_home(node: &Node) -> Result<(), String> {
     register_shared(node, node.params, &home_indexes(node), &node.share_of(node.params.key))
 }
 
+#[cfg_attr(not(feature = "oldimport"), allow(dead_code))]
+/// Register a chain's indexes again, as configured (after an index was taken out to take a copy in).
+pub fn reregister(node: &Node, p: &'static ChainParams) -> Result<(), String> {
+    let indexes = if p.chain_no == node.params.chain_no {
+        home_indexes(node)
+    } else {
+        node.extra.lock().unwrap().get(p.key).map(|r| r.indexes.clone()).ok_or("the chain is not installed")?
+    };
+    register_shared(node, p, &indexes, &node.share_of(p.key))
+}
+
 /// Start every chain the user installed earlier.
 pub fn start_saved(node: &Arc<Node>) {
     for c in saved(node) {
@@ -807,8 +818,8 @@ fn walk_indexes(node: &Node, run: &ChainRun, max_batches: usize) -> bool {
     names.dedup();
     for name in names {
         #[cfg(feature = "oldimport")]
-        if name == "ledger.v1" && crate::lxfetch::holds(p.key) {
-            note(name, Some("waiting for a ledger copy being fetched".into()));
+        if crate::lxfetch::walk_waits(p.key, name) {
+            note(name, Some("waiting for an index copy being fetched".into()));
             continue;
         }
         let mut problem = None;
