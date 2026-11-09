@@ -50,8 +50,8 @@ cb (coreboot) Core-data copy protocol, read-only from arcade/mesh/coreboot.py + 
 - on_frame does `if node.links.get(link.peer_id) is not link: return`. So only the TCP/WS link in node.links counts. A RelayLink (rl) or anything else is dropped silently.
 - Nothing is required of the asker: no version check, no allowlist, no prior hi. A g just needs a valid snap id, which you learn from hi.
 - Limits are per server:
-  - SERVING_AT_ONCE = 2 g's served concurrently across ALL askers (a semaphore; extra ones wait, they are not refused).
-  - PIECES_PER_MINUTE = 60 per asker peer_id, a sliding 60 s window. Over that you get err "busy". That is ≈ 8 MiB/s per asker per holder.
+  - SERVING_AT_ONCE = 6 on Strawberry since 2026-11-08 (was 2; other old arcades may still run 2) g's served concurrently across ALL askers (a semaphore; extra ones wait, they are not refused).
+  - PIECES_PER_MINUTE = 240 on Strawberry since 2026-11-08 (was 60) per asker peer_id, a sliding 60 s window. Over that you get err "busy". That is ≈ 32 MiB/s (≈ 8 MiB/s at 60) per asker per holder.
   - Manifest requests don't count toward the limit.
 - The old fetcher keeps IN_FLIGHT = 4 pieces per holder and treats a piece as lost after 120 s. It spreads across all holders, torrent-style: holders = linked peers whose hi sn.id == the same id. Every arcade that installed a copy re-serves it (core_copy.seed), with the same id.
 - The old fetcher only uses offers whose gen AND ver equal its own Core's. A server doesn't check that about you, but match ver if you ever want to hand the copy to a Core.

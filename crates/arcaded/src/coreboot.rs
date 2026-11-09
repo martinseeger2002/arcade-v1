@@ -30,7 +30,8 @@ pub const WORTH_BLOCKS: u64 = 20_000;
 pub const PIECE: u64 = 8 << 20;
 const HEARD_FRESH: u64 = 600;
 const ASK_EVERY: Duration = Duration::from_secs(600);
-const IN_FLIGHT: usize = 4;
+/// Matches the old arcade's SERVING_AT_ONCE (6, raised from 2 on 2026-11-08); a "busy" reply pauses that holder.
+const IN_FLIGHT: usize = 6;
 const PIECE_LOST: Duration = Duration::from_secs(120);
 const SILENT: Duration = Duration::from_secs(900);
 const BUSY_PAUSE: Duration = Duration::from_secs(10);
