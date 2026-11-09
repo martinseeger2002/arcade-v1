@@ -93,11 +93,6 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
     )
 }
 
-fn rand_bytes<const N: usize>() -> [u8; N] {
-    let mut b = [0u8; N];
-    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b));
-    b
-}
 
 fn bad(m: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, m.to_string())
@@ -125,7 +120,7 @@ impl Wss {
         let mut s = rustls::StreamOwned::new(conn, tcp);
 
         use base64::Engine as _;
-        let key = base64::engine::general_purpose::STANDARD.encode(rand_bytes::<16>());
+        let key = base64::engine::general_purpose::STANDARD.encode(crate::random::bytes::<16>());
         let req = format!(
             "GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nUser-Agent: arcade/1.0\r\n\r\n"
         );
@@ -160,7 +155,7 @@ impl Wss {
             f.push(0x80 | 127);
             f.extend_from_slice(&(n as u64).to_be_bytes());
         }
-        let mask: [u8; 4] = rand_bytes();
+        let mask: [u8; 4] = crate::random::bytes();
         f.extend_from_slice(&mask);
         f.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
         self.s.write_all(&f)?;

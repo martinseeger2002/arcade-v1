@@ -30,7 +30,7 @@ pub fn script_for(kind: &str, pk: &PublicKey) -> Vec<u8> {
         "p2wpkh" => [&[0x00, 0x14][..], &h].concat(),
         "p2sh-p2wpkh" => {
             let redeem = [&[0x00, 0x14][..], &h].concat();
-            [&[0xa9, 0x14][..], &hash160(&redeem), &[0x87][..]].concat()
+            arcade_ledger::address::p2sh_script(&hash160(&redeem))
         }
         _ => p2pkh_script(&h),
     }

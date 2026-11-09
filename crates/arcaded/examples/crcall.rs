@@ -7,7 +7,7 @@ use std::time::Duration;
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mut seed = [0u8; 32];
-    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut seed));
+    arcade_mesh::random::fill(&mut seed);
     // CRCALL_SEED=<64 hex>: the same borrower identity across calls (arcade_coinscan results
     // are kept per borrower).
     if let Some(s) = std::env::var("CRCALL_SEED").ok().and_then(|s| hex::decode(s).ok()).and_then(|b| <[u8; 32]>::try_from(b).ok()) {
@@ -22,7 +22,7 @@ fn main() {
     loop {
         let f = link.recv().expect("recv");
         if f.kind() == "ping" {
-            link.send(&Frame::new(json!({"t": "pong", "n": f.head["n"]}))).unwrap();
+            link.send(&Frame::pong(&f)).unwrap();
         }
         if f.kind() == "cr" && f.head["op"] == "a" && f.head["id"] == 1 {
             if let Some(e) = f.head["err"].as_str() { println!("error: {e}"); return; }

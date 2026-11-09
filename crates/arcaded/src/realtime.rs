@@ -221,9 +221,7 @@ fn my_player(node: &Node, st: &mut St) -> (String, Option<Value>) {
             (address, Some(c))
         }
         Err(_) => {
-            let mut b = [0u8; 4];
-            let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b));
-            (format!("guest-{}", hex::encode(b)), None)
+            (format!("guest-{}", arcade_mesh::random::hex(4)), None)
         }
     }
 }
@@ -657,9 +655,7 @@ pub fn run(node: Arc<Node>) {
 // ---------------- what the app window calls ----------------
 
 fn token() -> String {
-    let mut b = [0u8; 16];
-    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b));
-    hex::encode(b)
+    arcade_mesh::random::hex(16)
 }
 
 /// realtime.join: page (the app's txid), game (default: the page), room.

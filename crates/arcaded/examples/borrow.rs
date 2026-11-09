@@ -13,7 +13,7 @@ fn ask(link: &mut Link, id: u64, calls: Value) -> Vec<Value> {
     let mut buf = Vec::new();
     loop {
         let f = link.recv().unwrap();
-        if f.kind() == "ping" { link.send(&Frame::new(json!({"t":"pong","n":f.head["n"]}))).unwrap(); continue; }
+        if f.kind() == "ping" { link.send(&Frame::pong(&f)).unwrap(); continue; }
         if f.kind() == "cr" && f.head["op"] == "a" && f.head["id"] == id {
             assert!(f.head["err"].is_null(), "error {}", f.head["err"]);
             buf.extend_from_slice(&f.blob);

@@ -524,8 +524,7 @@ fn ask(node: &Node, addr: &str, q: Value) -> Result<(Value, Vec<u8>), String> {
     for _ in 0..200 {
         let f = link.recv().map_err(|e| e.to_string())?;
         if f.kind() == "ping" {
-            let n = f.head["n"].clone();
-            let _ = link.send(&Frame::new(json!({"t": "pong", "n": n})));
+            let _ = link.send(&Frame::pong(&f));
         } else if f.kind() == "sh" && f.head["op"] == "a" && f.head["id"] == 1 {
             if let Some(e) = f.head["err"].as_str() {
                 return Err(e.to_string());

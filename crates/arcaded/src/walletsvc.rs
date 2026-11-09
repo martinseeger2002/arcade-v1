@@ -145,8 +145,7 @@ pub fn wallet(node: &Node) -> Value {
     let mut spendable = 0u64;
     let mut sums: std::collections::BTreeMap<u32, u64> = Default::default();
     for a in &addrs {
-        if let Ok(h) = arcade_ledger::address::decode_base58check(a).ok_or(()).and_then(|(_, h)| <[u8; 20]>::try_from(h).map_err(|_| ())) {
-            let script = arcade_ledger::address::p2pkh_script(&h);
+        if let Some(script) = arcade_ledger::address::p2pkh_script_for_address(p, a) {
             spendable += crate::claims::spendable(node, &script).iter().map(|u| u.value).sum::<u64>();
         }
         for (pid, u) in holdings(node, a) {
@@ -331,7 +330,7 @@ fn resolve_to(node: &Node, to: &str) -> Result<String, String> {
         return arcade_ledger::index::tag_row(&node.chain, c(node), &t.to_lowercase()).map_err(|e| e.to_string())?.map(|r| r.address).ok_or_else(|| format!("nobody holds @{t}"));
     }
     match arcade_ledger::address::decode_base58check(to) {
-        Some((v, h)) if h.len() == 20 && v == node.params.p2pkh_version => Ok(to.to_string()),
+        Some(_) if arcade_ledger::address::p2pkh_hash_of(node.params, to).is_some() => Ok(to.to_string()),
         Some(_) => Err("that is an address on another chain".into()),
         None => Err("not an address: give an address or an @tag".into()),
     }
@@ -432,8 +431,7 @@ pub fn file(node: &Node, page: &str, body: &Value) -> (u16, Value) {
 fn build(node: &Node, r: &Value, send: bool) -> Result<(String, u64, Vec<Value>), String> {
     let p = node.params;
     let to = r["to"].as_str().unwrap_or("");
-    let to_h: [u8; 20] = arcade_ledger::address::decode_base58check(to).and_then(|(_, h)| h.try_into().ok()).ok_or("bad address")?;
-    let to_script = arcade_ledger::address::p2pkh_script(&to_h);
+    let to_script = arcade_ledger::address::p2pkh_script_for_address(p, to).ok_or("bad address")?;
     let units = r["units"].as_u64().unwrap_or(0);
     // Which of our addresses pays (and holds what moves).
     let from = match r["kind"].as_str().unwrap_or("") {
@@ -452,8 +450,8 @@ fn build(node: &Node, r: &Value, send: bool) -> Result<(String, u64, Vec<Value>)
         },
     };
     let sk = key_for(node, &from)?;
-    let from_h: [u8; 20] = arcade_ledger::address::decode_base58check(&from).and_then(|(_, h)| h.try_into().ok()).ok_or("bad address")?;
-    let coins = crate::claims::spendable(node, &arcade_ledger::address::p2pkh_script(&from_h));
+    let from_script = arcade_ledger::address::p2pkh_script_for_address(p, &from).ok_or("bad address")?;
+    let coins = crate::claims::spendable(node, &from_script);
     let now = arcade_app::now() as u32;
     let tx = match r["kind"].as_str().unwrap_or("") {
         "coins" => arcade_wallet::tx::build_send(p, &to_script, units, &sk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST, now),

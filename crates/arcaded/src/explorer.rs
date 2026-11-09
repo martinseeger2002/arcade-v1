@@ -569,15 +569,7 @@ fn tx(x: &Ctx, id: &str) -> R {
 }
 
 fn script_for(x: &Ctx, a: &str) -> Option<Vec<u8>> {
-    let (v, h) = address::decode_base58check(a)?;
-    let h: [u8; 20] = h.try_into().ok()?;
-    if v == x.p.p2pkh_version {
-        Some(address::p2pkh_script(&h))
-    } else if v == x.p.p2sh_version {
-        Some([&[0xa9u8, 0x14][..], &h, &[0x87]].concat())
-    } else {
-        None
-    }
+    address::script_for_address(x.p, a)
 }
 
 fn addr(x: &Ctx, a: &str) -> R {

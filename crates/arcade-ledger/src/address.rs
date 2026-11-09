@@ -50,6 +50,44 @@ pub fn p2pkh_script(h: &[u8; 20]) -> Vec<u8> {
     s
 }
 
+/// scriptPubKey for a P2SH script hash.
+pub fn p2sh_script(h: &[u8; 20]) -> Vec<u8> {
+    let mut s = vec![0xa9, 0x14];
+    s.extend_from_slice(h);
+    s.push(0x87);
+    s
+}
+
+/// scriptPubKey for an address of chain `p`: P2PKH with its pubkeyhash version, P2SH with its
+/// scripthash version. None for another chain's version byte or a payload that is not 20 bytes.
+/// For lookups (balances, history, explorer) and for paying to an address.
+pub fn script_for_address(p: &ChainParams, a: &str) -> Option<Vec<u8>> {
+    let (v, h) = decode_base58check(a)?;
+    let h: [u8; 20] = h.try_into().ok()?;
+    if v == p.p2pkh_version {
+        Some(p2pkh_script(&h))
+    } else if v == p.p2sh_version {
+        Some(p2sh_script(&h))
+    } else {
+        None
+    }
+}
+
+/// hash160 of a P2PKH address of chain `p`; None for P2SH, another chain's version byte or a
+/// bad payload. For the wallet's own spend paths, which sign for P2PKH keys only.
+pub fn p2pkh_hash_of(p: &ChainParams, a: &str) -> Option<[u8; 20]> {
+    let (v, h) = decode_base58check(a)?;
+    if v != p.p2pkh_version {
+        return None;
+    }
+    h.try_into().ok()
+}
+
+/// scriptPubKey for a P2PKH address of chain `p` (see p2pkh_hash_of).
+pub fn p2pkh_script_for_address(p: &ChainParams, a: &str) -> Option<Vec<u8>> {
+    p2pkh_hash_of(p, a).map(|h| p2pkh_script(&h))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +106,31 @@ mod tests {
         assert_eq!(address_of(&p2sh, &DIGIBYTE_MAIN).unwrap(), "ShcQU9qUQsgHYwHz6YC6CrokJ99oyQCgQw");
         assert_eq!(address_of(&p2sh, &LITECOIN_MAIN).unwrap(), "MUDZfjxjBXetvJUrn5rwuEGX7aoYmW1q62");
         assert_eq!(decode_base58check("DRTVyZzxyvPNZdh8HhCaCipnXVegVJPaY1").unwrap(), (30, h.to_vec()));
+    }
+
+    #[test]
+    fn address_to_script() {
+        use arcade_chain::params::PEPECOIN_TEST;
+        let h: [u8; 20] = Sha256::digest(b"conformance hash160")[..20].try_into().unwrap();
+        let dgb_pkh = "DRTVyZzxyvPNZdh8HhCaCipnXVegVJPaY1";
+        let dgb_sh = "ShcQU9qUQsgHYwHz6YC6CrokJ99oyQCgQw";
+        let ltc_pkh = "LfYMhXN9mAj9HSCgjFCJvyiwraHfLShFTN";
+        let p2sh = [&[0xa9u8, 0x14][..], &h, &[0x87]].concat();
+        assert_eq!(p2sh_script(&h), p2sh);
+        assert_eq!(script_for_address(&DIGIBYTE_MAIN, dgb_pkh), Some(p2pkh_script(&h)));
+        assert_eq!(script_for_address(&DIGIBYTE_MAIN, dgb_sh), Some(p2sh));
+        // Another chain's version byte is not an address of this chain.
+        assert_eq!(script_for_address(&DIGIBYTE_MAIN, ltc_pkh), None);
+        assert_eq!(script_for_address(&LITECOIN_MAIN, dgb_pkh), None);
+        assert_eq!(script_for_address(&PEPECOIN_TEST, dgb_pkh), None);
+        assert_eq!(script_for_address(&DIGIBYTE_MAIN, "not an address"), None);
+        // Spend paths: P2PKH of this chain only.
+        assert_eq!(p2pkh_script_for_address(&DIGIBYTE_MAIN, dgb_pkh), Some(p2pkh_script(&h)));
+        assert_eq!(p2pkh_hash_of(&DIGIBYTE_MAIN, dgb_pkh), Some(h));
+        assert_eq!(p2pkh_script_for_address(&DIGIBYTE_MAIN, dgb_sh), None);
+        assert_eq!(p2pkh_script_for_address(&DIGIBYTE_MAIN, ltc_pkh), None);
+        // 20-byte payloads only.
+        let long = base58check(DIGIBYTE_MAIN.p2pkh_version, &[7u8; 21]);
+        assert_eq!(script_for_address(&DIGIBYTE_MAIN, &long), None);
     }
 }

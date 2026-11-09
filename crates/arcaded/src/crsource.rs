@@ -9,10 +9,8 @@ use arcade_chain::{Block, Hash256};
 use arcade_chaindb::sync::BlockSource;
 use arcade_chaindb::ChainDb;
 use arcade_mesh::link::{Frame, Link};
-use flate2::read::ZlibDecoder;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::Read;
 use std::time::Duration;
 
 pub struct CoreShareSource<'a> {
@@ -30,9 +28,7 @@ impl<'a> CoreShareSource<'a> {
     pub fn dial(node: &'a crate::node::Node, addr: &str, p: &'static ChainParams) -> Result<Self, String> {
         // A throwaway identity: existing arcades keep one link per node id, and ours is
         // already linked to them, so a second link under our id would be set aside.
-        let mut seed = [0u8; 32];
-        let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut seed));
-        let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let key = ed25519_dalek::SigningKey::from_bytes(&arcade_mesh::random::bytes());
         let mut link = Link::dial(addr, crate::meshsvc::NET, &key, None).map_err(|e| e.to_string())?;
         link.set_read_timeout(Duration::from_secs(30)).map_err(|e| e.to_string())?;
         let batch = 200;
@@ -117,17 +113,14 @@ pub fn ask(link: &mut Link, addr: &str, net: &str, id: u64, calls: &Value, other
         }
         let f = link.recv().map_err(|e| e.to_string())?;
         match f.kind() {
-            "ping" => {
-                let n = f.head["n"].clone();
-                link.send(&Frame::new(json!({"t": "pong", "n": n}))).map_err(|e| e.to_string())?;
-            }
+            "ping" => link.send(&Frame::pong(&f)).map_err(|e| e.to_string())?,
             "cr" if f.head["op"] == "a" && f.head["id"] == id => {
                 if let Some(err) = f.head["err"].as_str() {
                     return Err(format!("arcade {addr}: {err}"));
                 }
                 z = f.head["z"] == 1 || f.head["z"] == true;
                 buf.extend_from_slice(&f.blob);
-                if buf.len() > 256 << 20 {
+                if buf.len() > crate::coreshare::MAX_ANSWER {
                     return Err("answer too large".into());
                 }
                 if f.head["end"] == true {
@@ -138,10 +131,11 @@ pub fn ask(link: &mut Link, addr: &str, net: &str, id: u64, calls: &Value, other
         }
     }
     let body = if z {
-        let mut out = Vec::new();
-        match ZlibDecoder::new(&buf[..]).read_to_end(&mut out) {
-            Ok(_) => out,
-            Err(_) => buf, // answered without compression
+        use crate::coreshare::{inflate_max, InflateError, MAX_ANSWER};
+        match inflate_max(&buf, MAX_ANSWER) {
+            Ok(out) => out,
+            Err(InflateError::TooLarge) => return Err("answer too large".into()),
+            Err(InflateError::Bad(_)) => buf, // answered without compression
         }
     } else {
         buf

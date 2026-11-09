@@ -11,7 +11,7 @@ fn call(link: &mut Link, net: &str, calls: Value) -> Vec<Value> {
     let mut buf = Vec::new();
     loop {
         let f = link.recv().unwrap();
-        if f.kind() == "ping" { let n = f.head["n"].clone(); link.send(&Frame::new(json!({"t": "pong", "n": n}))).unwrap(); continue; }
+        if f.kind() == "ping" { link.send(&Frame::pong(&f)).unwrap(); continue; }
         if f.kind() == "cr" && f.head["op"] == "a" { buf.extend_from_slice(&f.blob); if f.head["end"] == true { break; } }
     }
     serde_json::from_slice(&buf).unwrap()

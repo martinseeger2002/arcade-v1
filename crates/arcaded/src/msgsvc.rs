@@ -526,8 +526,7 @@ pub fn send_payloads(node: &Node, payloads: &[Vec<u8>]) -> Result<(Vec<String>, 
 
 /// As send_payloads, with extra outputs on the first transaction (a tip's payment).
 fn coins_text(p: &arcade_chain::params::ChainParams, sats: u64) -> String {
-    let v = format!("{:.8}", sats as f64 / 1e8);
-    format!("{} {} coins", v.trim_end_matches('0').trim_end_matches('.'), p.name)
+    format!("{} {} coins", arcade_ledger::amount::trimmed8(sats), p.name)
 }
 
 pub fn send_payloads_with(node: &Node, payloads: &[Vec<u8>], mut extra: Vec<arcade_wallet::tx::TxOutSpec>) -> Result<(Vec<String>, u64), String> {
@@ -642,8 +641,8 @@ pub fn announce_if_needed(node: &Node) -> Result<Option<String>, String> {
             return Ok(None);
         }
     }
-    let (_, h160) = arcade_ledger::address::decode_base58check(&address).ok_or("bad address")?;
-    let a = arcade_msg::public::Announce { key: k.public_bytes(), hash160: Some(h160.try_into().map_err(|_| "bad address")?), name: tag.clone(), tag: Some(tag.clone()), ..Default::default() };
+    let h160 = arcade_ledger::address::p2pkh_hash_of(node.params, &address).ok_or("bad address")?;
+    let a = arcade_msg::public::Announce { key: k.public_bytes(), hash160: Some(h160), name: tag.clone(), tag: Some(tag.clone()), ..Default::default() };
     let (txids, fee) = send_payloads(node, &[a.encode()])?;
     node.app.store.write(|w| w.put(arcade_app::META, flag.as_bytes(), &arcade_app::now().to_be_bytes())).map_err(|e| e.to_string())?;
     let _ = node.app.event("messages", &format!("published your messaging key for @{tag} (fee {fee})"));
@@ -686,7 +685,7 @@ pub fn node_send(node: &Node, page: &str, to: &str, body: &Value) -> Result<Valu
     sent.insert(0, json!({"to": hex::encode(rk), "txid": txids[0], "created": arcade_app::now()}));
     sent.truncate(500);
     node.app.store.write(|w| w.put(arcade_app::META, format!("nodetalk:{page}").as_bytes(), json!(sent).to_string().as_bytes())).map_err(|e| e.to_string())?;
-    Ok(json!({"txid": txids[0], "to": hex::encode(rk), "fromaddress": from, "size": plain.len(), "fee": format!("{:.8}", fee as f64 / 1e8), "total": format!("{:.8}", fee as f64 / 1e8)}))
+    Ok(json!({"txid": txids[0], "to": hex::encode(rk), "fromaddress": from, "size": plain.len(), "fee": arcade_ledger::amount::fixed8(fee), "total": arcade_ledger::amount::fixed8(fee)}))
 }
 
 pub fn node_sent(node: &Node, page: &str) -> Value {

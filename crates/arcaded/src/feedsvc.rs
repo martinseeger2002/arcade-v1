@@ -292,7 +292,8 @@ pub fn act(node: &Node, kind: &str, target: &str, text: &str, amount: u64) -> Re
         let author = m::post(&node.chain, cc, target).and_then(|p| p["from"].as_str().map(String::from))
             .or_else(|| m::rows(&node.chain, m::ACT, cc).ok()?.into_iter().find(|a| a["txid"] == target).and_then(|a| a["from"].as_str().map(String::from)))
             .ok_or("that post isn't in a block yet; tip it once it is")?;
-        let script = arcade_ledger::address::decode_base58check(&author).and_then(|(_, h)| <[u8; 20]>::try_from(h).ok()).map(|h| arcade_ledger::address::p2pkh_script(&h)).ok_or("bad author address")?;
+        // A tip is a wallet spend: P2PKH of the home chain only.
+        let script = arcade_ledger::address::p2pkh_script_for_address(node.params, &author).ok_or("bad author address")?;
         extra.push(arcade_wallet::tx::TxOutSpec { value: amount, script });
     }
     let fa = FeedAct { act, target: target.to_string(), text: text.to_string() };

@@ -322,10 +322,7 @@ fn serve_loop(
             Err(e) => return Err(e),
         };
         match f.kind() {
-            "ping" => {
-                let n: String = f.head["n"].as_str().unwrap_or("").chars().take(16).collect();
-                link.send(&Frame::new(json!({"t": "pong", "n": n})))?;
-            }
+            "ping" => link.send(&Frame::pong(&f))?,
             "ix" if f.head["op"] == "tip" => {
                 if let Some(t) = f.head["nets"].get(node.params.net) {
                     node.mesh_tips.lock().unwrap().insert(

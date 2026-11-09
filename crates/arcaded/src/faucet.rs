@@ -113,15 +113,9 @@ pub fn pay_asks(node: &Node) {
     };
     for ask in open.into_iter().take(DAILY_CAP - paid_today.len()) {
         let (Some(asker), Some(addr)) = (ask["a"].as_str(), ask["addr"].as_str()) else { continue };
-        let Some((ver, h)) = arcade_ledger::address::decode_base58check(addr) else { continue };
-        if ver != p.p2pkh_version || h.len() != 20 {
-            continue;
-        }
-        let to = arcade_ledger::address::p2pkh_script(&h.try_into().unwrap());
+        let Some(to) = arcade_ledger::address::p2pkh_script_for_address(p, addr) else { continue };
         let Ok((k, sk)) = node.app.tag_key(p, 0) else { return };
-        let script = arcade_ledger::address::p2pkh_script(
-            &arcade_ledger::address::decode_base58check(&k.address).unwrap().1.try_into().unwrap(),
-        );
+        let script = arcade_ledger::address::p2pkh_script_for_address(p, &k.address).expect("own address");
         let coins = crate::claims::spendable(node, &script);
         let tx = match arcade_wallet::tx::build_send(p, &to, AMOUNT, &sk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST, now as u32) {
             Ok(t) => t,

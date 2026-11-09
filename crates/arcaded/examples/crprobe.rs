@@ -34,8 +34,7 @@ fn main() {
             Ok(f) => {
                 let k = f.kind().to_string();
                 if k == "ping" {
-                    let n = f.head["n"].clone();
-                    let _ = link.send(&Frame::new(json!({"t": "pong", "n": n})));
+                    let _ = link.send(&Frame::pong(&f));
                     continue;
                 }
                 let head = f.head.to_string();

@@ -91,9 +91,7 @@ pub fn run(node: Arc<Node>) {
         let _ = node.app.event("mine", "create a wallet first");
         return;
     };
-    let pay = arcade_ledger::address::p2pkh_script(
-        &arcade_ledger::address::decode_base58check(&key.address).unwrap().1.try_into().unwrap(),
-    );
+    let pay = arcade_ledger::address::p2pkh_script_for_address(p, &key.address).expect("own address");
     *node.miner.started.lock().unwrap() = Some(Instant::now());
     let _ = node.app.event("mine", &format!("mining to {} with {threads} threads", key.address));
     let mut extranonce: u64 = arcade_app::now() << 16;

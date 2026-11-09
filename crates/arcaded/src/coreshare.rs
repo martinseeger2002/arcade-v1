@@ -17,6 +17,8 @@ use std::io::{Read, Write};
 pub const CHUNK: usize = 48 * 1024;
 pub const MAX_CALLS: usize = 500;
 pub const MAX_ASKED: usize = 8 << 20;
+/// The most an answer to our own batch may hold, compressed or inflated.
+pub const MAX_ANSWER: usize = 256 << 20;
 
 pub fn offer(node: &Node) -> Option<Frame> {
     let tip = node.chain.tip(node.params.chain_no).ok()??;
@@ -31,13 +33,29 @@ pub struct Requests {
     parts: HashMap<u64, Vec<u8>>,
 }
 
-fn inflate(b: &[u8]) -> Result<Vec<u8>, String> {
+#[derive(Debug, PartialEq)]
+pub enum InflateError {
+    /// More than the cap once inflated.
+    TooLarge,
+    /// Not a zlib stream.
+    Bad(String),
+}
+
+/// zlib-inflate at most `max` bytes.
+pub fn inflate_max(b: &[u8], max: usize) -> Result<Vec<u8>, InflateError> {
     let mut out = Vec::new();
-    ZlibDecoder::new(b).take(MAX_ASKED as u64 + 1).read_to_end(&mut out).map_err(|e| e.to_string())?;
-    if out.len() > MAX_ASKED {
-        return Err("request too large".into());
+    ZlibDecoder::new(b).take(max as u64 + 1).read_to_end(&mut out).map_err(|e| InflateError::Bad(e.to_string()))?;
+    if out.len() > max {
+        return Err(InflateError::TooLarge);
     }
     Ok(out)
+}
+
+fn inflate(b: &[u8]) -> Result<Vec<u8>, String> {
+    inflate_max(b, MAX_ASKED).map_err(|e| match e {
+        InflateError::TooLarge => "request too large".into(),
+        InflateError::Bad(e) => e,
+    })
 }
 
 fn deflate(b: &[u8]) -> Vec<u8> {
@@ -114,5 +132,25 @@ fn send(link: &mut Link, id: u64, res: Result<Vec<u8>, String>, z: bool) -> Resu
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inflate_is_capped() {
+        let body = vec![b'a'; 10_000];
+        let z = deflate(&body);
+        assert_eq!(inflate_max(&z, 10_000).unwrap(), body);
+        assert_eq!(inflate_max(&z, 9_999), Err(InflateError::TooLarge));
+        assert!(matches!(inflate_max(b"[1,2,3]", 10_000), Err(InflateError::Bad(_))));
+        // A small bomb: just over 8 MB of zeros in a few KB, over the request cap.
+        let bomb = deflate(&vec![0u8; MAX_ASKED + 1]);
+        assert!(bomb.len() < 64 * 1024);
+        assert_eq!(inflate(&bomb), Err("request too large".to_string()));
+        assert_eq!(inflate_max(&bomb, MAX_ANSWER).unwrap().len(), MAX_ASKED + 1);
+        assert_eq!(inflate(&deflate(b"[]")).unwrap(), b"[]");
     }
 }

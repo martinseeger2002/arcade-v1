@@ -98,15 +98,7 @@ pub struct Watched {
 }
 
 fn script_of(p: &ChainParams, a: &str) -> Option<Vec<u8>> {
-    let (v, h) = arcade_ledger::address::decode_base58check(a)?;
-    let h: [u8; 20] = h.try_into().ok()?;
-    if v == p.p2pkh_version {
-        Some(arcade_ledger::address::p2pkh_script(&h))
-    } else if v == p.p2sh_version {
-        Some([&[0xa9u8, 0x14][..], &h, &[0x87]].concat())
-    } else {
-        None
-    }
+    arcade_ledger::address::script_for_address(p, a)
 }
 
 /// Every script this wallet watches on a chain: home-wallet tag keys, and keys imported via
@@ -384,8 +376,7 @@ fn drain() {
             match link.ready(Duration::from_millis(1)) {
                 Ok(true) => match link.recv() {
                     Ok(f) if f.kind() == "ping" => {
-                        let n = f.head["n"].clone();
-                        if link.send(&Frame::new(json!({"t": "pong", "n": n}))).is_err() {
+                        if link.send(&Frame::pong(&f)).is_err() {
                             dead = true;
                             break;
                         }
