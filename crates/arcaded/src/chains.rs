@@ -753,9 +753,10 @@ fn mesh_first(node: &Arc<Node>, run: &ChainRun, syncer: &Syncer) {
             },
         };
         let how = if kind == "bk" { "blocks" } else { "Core node" };
-        // Only a real catch-up is a bootstrap; near the tip this is just following the chain
+        // Only a real catch-up (2,000+ behind) is a bootstrap; nearer, this is just following the chain
         // through another arcade (the coin's P2P network doesn't answer, or is behind).
-        let far = their > ours() + arcade_chaindb::sync::DEFER_BEHIND as u64;
+        // Same line as the "every source at once" catch-up above.
+        let far = their > ours() + 2000;
         let doing = if far { "bootstrapping from" } else { "following via" };
         if far {
             let _ = node.app.event("chains", &format!("bootstrapping {} from arcade {short} at {addr} ({how}, its tip {their})", p.name));
