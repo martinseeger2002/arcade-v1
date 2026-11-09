@@ -245,9 +245,11 @@ dependencies = [
  "libc",
  "pbkdf2",
  "rand_core 0.6.4",
+ "secp256k1",
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "tempfile",
  "ureq",
  "x25519-dalek",
 ]

@@ -498,6 +498,37 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
         json!({"name": "Blocks", "detail": "stored once, from the mesh or P2P", "pct": pct(tip, peer.max(1)), "at": tip, "of": peer}),
         json!({"name": "Coins", "detail": "every unspent coin", "pct": pct(tip, peer.max(1)), "at": tip, "of": peer}),
     ];
+    // A Core-data copy (crate::coreboot): its fetch and import, or the trust note.
+    let copy = if home { Value::Null } else { crate::coreboot::chain_status(node, key) };
+    if let Some(j) = copy.get("job").filter(|j| !j.is_null()) {
+        let (bytes, done) = (j["bytes"].as_u64().unwrap_or(0), j["bytes_done"].as_u64().unwrap_or(0));
+        let phase = j["phase"].as_str().unwrap_or("");
+        let fetched = matches!(phase, "import" | "coins") || (bytes > 0 && done >= bytes);
+        let pct_copy = if fetched { 100.0 } else if bytes == 0 { 0.0 } else { done as f64 * 100.0 / bytes as f64 };
+        let detail = if phase == "manifest" {
+            format!("asking for the copy's list of pieces · from arcade {}", crate::coreboot::short(j["maker"].as_str().unwrap_or("")))
+        } else if phase == "failed" {
+            format!("failed: {}", j["detail"].as_str().unwrap_or(""))
+        } else {
+            format!("{} of {} pieces · {:.2} of {:.2} GB · {} MB/s · {} holder{} · made by arcade {} at block {}{}",
+                j["pieces_done"], j["pieces"], done as f64 / 1e9, bytes as f64 / 1e9, j["mb_s"], j["holders"], if j["holders"] == 1 { "" } else { "s" },
+                crate::coreboot::short(j["maker"].as_str().unwrap_or("")), j["height"], if j["what"] == "all" { " · blocks too" } else { " · coin set" })
+        };
+        stages.insert(1, json!({"name": "Copy", "detail": detail, "pct": pct_copy, "at": null}));
+        let idetail = match phase {
+            "import" | "coins" => j["detail"].as_str().unwrap_or("").to_string(),
+            _ => format!("waiting for the copy · meanwhile: {}", j["prep"].as_str().unwrap_or("")),
+        };
+        stages.insert(2, json!({"name": "Import", "detail": idetail, "pct": if phase == "coins" { 50.0 } else { 0.0 }, "at": null}));
+    }
+    if let Some(t) = copy.get("trusted").filter(|t| !t.is_null()) {
+        let v = crate::cbimport::verify_note(key);
+        let d = format!("trusted coin set from arcade {} at block {}{}", crate::coreboot::short(t["maker"].as_str().unwrap_or("")), t["height"],
+            if v.is_empty() { " · not re-checked yet".to_string() } else { format!(" · {v}") });
+        if let Some(st) = stages.iter_mut().find(|s| s["name"] == "Coins") {
+            st["detail"] = json!(d);
+        }
+    }
     let (mode, indexes): (String, Vec<String>) = match &run {
         Some(r) => (r.mode.clone(), r.indexes.clone()),
         None => (node.home_mode.clone(), home_indexes(node)),
@@ -589,7 +620,7 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
         None => node.sync_state.lock().unwrap().clone(),
     };
     Ok(json!({"key": key, "name": p.name, "installed": true, "home": home, "mode": mode, "indexes": indexes,
-              "state": state, "overall": overall, "stages": stages, "tip": tip}))
+              "state": state, "overall": overall, "stages": stages, "tip": tip, "copy": copy}))
 }
 
 pub fn list(node: &Node) -> Value {
@@ -620,6 +651,10 @@ fn mesh_first(node: &Arc<Node>, run: &ChainRun, syncer: &Syncer) {
         return;
     }
     let set = |s: String| *run.state.lock().unwrap() = s;
+    // Bootstrapping from a copy instead (crate::coreboot).
+    if crate::coreboot::held(p.key) {
+        return;
+    }
     let ours = || node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height as u64).unwrap_or(0);
     let fresh = ours() == 0;
     let wait_max = Duration::from_secs(if fresh { 90 } else { 20 });
@@ -670,7 +705,7 @@ fn mesh_first(node: &Arc<Node>, run: &ChainRun, syncer: &Syncer) {
         // Retry the parallel download after a hiccup (a source vanishing, a slow stretch);
         // only after three quick failures in a row fall back to one source at a time.
         let mut quick_fails = 0;
-        while !run.stop.load(Ordering::Relaxed) && ours() + 2000 < top && quick_fails < 3 {
+        while !run.stop.load(Ordering::Relaxed) && !crate::coreboot::held(p.key) && ours() + 2000 < top && quick_fails < 3 {
             let t = std::time::Instant::now();
             match crate::psync::run(node, p, syncer, top as u32, &progress, &run.stop) {
                 Ok(n) => {
@@ -708,7 +743,7 @@ fn mesh_first(node: &Arc<Node>, run: &ChainRun, syncer: &Syncer) {
             continue;
         }
         loop {
-            if run.stop.load(Ordering::Relaxed) || run.paused.load(Ordering::Relaxed) {
+            if run.stop.load(Ordering::Relaxed) || run.paused.load(Ordering::Relaxed) || crate::coreboot::held(p.key) {
                 return;
             }
             set(format!("bootstrapping from arcade {short} ({how}): block {} of {their}", ours()));
@@ -749,6 +784,10 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
             std::thread::sleep(Duration::from_secs(2));
             continue;
         }
+        // A copy is being taken in: stand still until it is (crate::coreboot).
+        if crate::coreboot::park(p.key, &run.stop, &set) {
+            continue;
+        }
         // Still far behind what an arcade on the mesh offers: go back to the mesh first
         // (another arcade may answer where the last one stopped), P2P only after.
         {
@@ -775,7 +814,7 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
             continue;
         }
         loop {
-            if run.stop.load(Ordering::Relaxed) || run.paused.load(Ordering::Relaxed) {
+            if run.stop.load(Ordering::Relaxed) || run.paused.load(Ordering::Relaxed) || crate::coreboot::held(p.key) {
                 continue 'outer;
             }
             let h = match syncer.sync_headers_once(&mut peer) {
@@ -816,7 +855,7 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
                     std::thread::sleep(Duration::from_millis(30));
                     more
                 } {
-                    if run.stop.load(Ordering::Relaxed) {
+                    if run.stop.load(Ordering::Relaxed) || crate::coreboot::held(p.key) {
                         continue 'outer;
                     }
                 }

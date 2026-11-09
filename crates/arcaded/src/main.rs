@@ -17,7 +17,11 @@ mod commands;
 mod chainsvc;
 mod chains;
 mod claims;
+mod cbimport;
+mod corecoins;
+mod coreboot;
 mod coreshare;
+mod leveldb;
 mod crsource;
 mod explorer;
 mod faucet;
@@ -169,6 +173,11 @@ fn main() {
     {
         let n = node.clone();
         std::thread::Builder::new().name("sizes".into()).spawn(move || sizes::run(n)).unwrap();
+    }
+    {
+        // "cb" Core-data copies: asking, fetching, taking in, re-checking.
+        let n = node.clone();
+        std::thread::Builder::new().name("coreboot".into()).spawn(move || coreboot::run(n)).unwrap();
     }
     let _ = node.app.event("service", "arcaded started");
     eprintln!(

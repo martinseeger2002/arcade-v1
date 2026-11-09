@@ -180,6 +180,48 @@
     try { showProgress(await api("chains.status", { key })); } catch (e) { msg(e.message, true); }
   }
 
+  // A Core-data copy (chains.copy_*): offered far behind, fetched only when the operator picks it.
+  const gb = (b) => `${(Number(b || 0) / 1e9).toFixed(b >= 1e10 ? 0 : 1)} GB`;
+  function copyBox(st) {
+    let box = document.getElementById("c-copy");
+    if (!box) { box = document.createElement("div"); box.id = "c-copy"; box.className = "addix"; $("c-stages").before(box); }
+    const cp = st.copy || {};
+    const parts = [];
+    const btn = (text, cls, fn) => { const b = document.createElement("button"); b.textContent = text; if (cls) b.className = cls; b.onclick = async () => { b.disabled = true; try { await fn(); refresh(); } catch (e) { b.disabled = false; msg(e.message, true); } }; return b; };
+    const maker = (m) => `arcade ${(m || "").slice(0, 8)}`;
+    if (cp.job) {
+      const row = document.createElement("div"); row.className = "addrow";
+      const t = document.createElement("div"); t.innerHTML = "<b></b><small></small>";
+      t.querySelector("b").textContent = cp.job.phase === "failed" ? "Bootstrap from a copy failed" : `Bootstrapping from a copy made by ${maker(cp.job.maker)} at block ${Number(cp.job.height).toLocaleString()}`;
+      t.querySelector("small").textContent = cp.job.phase === "failed" ? cp.job.detail : `${cp.job.pieces_done} of ${cp.job.pieces} pieces · ${gb(cp.job.bytes_done)} of ${gb(cp.job.bytes)} · ${cp.job.mb_s} MB/s · ${cp.job.holders} holder(s)${cp.job.prep ? " · " + cp.job.prep : ""}`;
+      row.append(t);
+      if (cp.job.phase !== "coins") row.append(btn(cp.job.phase === "failed" ? "Dismiss" : "Cancel and sync it myself", "small", () => api("chains.copy_cancel", { key: st.key })));
+      parts.push(row);
+    } else if (cp.offer && cp.worth && !cp.declined) {
+      const row = document.createElement("div"); row.className = "addrow";
+      const t = document.createElement("div"); t.innerHTML = "<b></b><small></small><label class=\"small\"><input type=\"checkbox\"> fetch its blocks too (instead of from the network)</label>";
+      t.querySelector("b").textContent = `Bootstrap from a copy (≈ ${gb(cp.offer.bytes)} in all, from ${maker(cp.offer.maker)})`;
+      t.querySelector("small").textContent = `${(cp.behind || 0).toLocaleString()} blocks behind. A Core node's coin set at block ${Number(cp.offer.height).toLocaleString()}, offered by ${cp.offer.holders} linked arcade(s): only its coin set is fetched (the blocks this arcade lacks come from the network and are stored without replaying them). The tip is checked against this arcade's own headers; the coin set is trusted from its maker until it is re-checked from the blocks.`;
+      const all = t.querySelector("input");
+      const go = document.createElement("div"); go.className = "row";
+      go.append(btn("Bootstrap from a copy", "primary", () => api("chains.copy_start", { key: st.key, what: all.checked ? "all" : "coins" })),
+        btn("Sync it myself instead", "", () => api("chains.copy_cancel", { key: st.key })));
+      row.append(t, go);
+      parts.push(row);
+    }
+    if (cp.trusted) {
+      const n = document.createElement("p"); n.className = "small";
+      n.textContent = `Trusted coin set: taken from a copy made by ${maker(cp.trusted.maker)} at block ${Number(cp.trusted.height).toLocaleString()}; it is being re-checked from the blocks.`;
+      parts.push(n);
+    } else if (cp.verified && cp.verified.replaced) {
+      const n = document.createElement("p"); n.className = "small";
+      n.textContent = `The copy's coin set from ${maker(cp.verified.maker)} did not match the blocks; this arcade's own replaced it at block ${Number(cp.verified.height).toLocaleString()}.`;
+      parts.push(n);
+    }
+    box.replaceChildren(...parts);
+    box.hidden = parts.length === 0;
+  }
+
   function showProgress(st) {
     $("c-progress").hidden = false;
     $("c-title").textContent = `${st.name} · ${st.mode} · ${st.state}`;
@@ -189,7 +231,7 @@
       li.className = (p >= 100 ? "done" : p > 0 ? "run" : "wait") + (s.current ? " now" : "") + (s.info ? " info" : "");
       li.innerHTML = `<div class="sh"><span class="sn"></span><span class="sd"></span></div><div class="bar"><i></i></div>`;
       li.querySelector(".sn").textContent = s.name;
-      const rate = s.rate == null ? "measuring…" : `${s.rate >= 10 ? Math.round(s.rate).toLocaleString() : s.rate.toFixed(1)} blocks/s`;
+      const rate = s.at == null && s.rate == null ? "" : s.rate == null ? "measuring…" : `${s.rate >= 10 ? Math.round(s.rate).toLocaleString() : s.rate.toFixed(1)} blocks/s`;
       li.querySelector(".sd").textContent = s.info ? s.detail : p >= 100 ? `done · ${rate} · ${s.detail}` : `${p.toFixed(1)}% · ${rate}${s.at ? ` · ${s.at.toLocaleString()} of ${(s.of ?? 0).toLocaleString()}` : ""} · ${s.detail}`;
       if (s.current) li.querySelector(".sn").textContent = `${s.name} (now)`;
       li.querySelector(".bar > i").style.width = p + "%";
@@ -202,6 +244,7 @@
       }
       return li;
     }));
+    copyBox(st);
     // Indexes the chain doesn't have yet: a clear list at the top of the panel (opt-in, one at a time).
     let add = document.getElementById("c-addix");
     if (!add) { add = document.createElement("div"); add.id = "c-addix"; add.className = "addix"; $("c-stages").before(add); }

@@ -3,6 +3,7 @@
 //! as the block. See docs/PLAN.md §4-5.
 
 pub mod addrbuild;
+pub mod coreimport;
 pub mod db;
 pub mod indexer;
 pub mod schema;
@@ -14,3 +15,5 @@ pub use indexer::{BlockCtx, Indexer, Prevout};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod coreimport_tests;
