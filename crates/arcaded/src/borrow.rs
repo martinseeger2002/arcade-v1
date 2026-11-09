@@ -325,9 +325,7 @@ fn call(node: &Node, addr: &str, p: &ChainParams, calls: Value) -> Result<Vec<Va
     let t0 = Instant::now();
     let r = (|| {
         if c.link.is_none() {
-            let mut link = Link::dial(addr, crate::meshsvc::NET, &borrower_key(node), None).map_err(e)?;
-            link.set_read_timeout(Duration::from_secs(30)).map_err(e)?;
-            c.link = Some(link);
+            c.link = Some(Link::dial_asking(addr, crate::meshsvc::NET, &borrower_key(node), None, Duration::from_secs(30))?);
             c.subbed.clear();
         }
         // Mempool pushes for every net we borrow from this lender.

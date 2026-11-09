@@ -285,6 +285,13 @@ impl Link {
         Self::handshake(s, net, identity, true, listen)
     }
 
+    /// Dial (see `dial`) and set the read timeout, for a link that asks questions; errors as text.
+    pub fn dial_asking(addr: &str, net: &str, identity: &SigningKey, listen: Option<u16>, timeout: Duration) -> std::result::Result<Link, String> {
+        let mut link = Self::dial(addr, net, identity, listen).map_err(|e| e.to_string())?;
+        link.set_read_timeout(timeout).map_err(|e| e.to_string())?;
+        Ok(link)
+    }
+
     pub fn send(&mut self, f: &Frame) -> Result<()> {
         let p = encode_plain(f);
         if let Some(mut side) = self.side.take() {

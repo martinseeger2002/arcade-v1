@@ -29,8 +29,7 @@ impl<'a> CoreShareSource<'a> {
         // A throwaway identity: existing arcades keep one link per node id, and ours is
         // already linked to them, so a second link under our id would be set aside.
         let key = ed25519_dalek::SigningKey::from_bytes(&arcade_mesh::random::bytes());
-        let mut link = Link::dial(addr, crate::meshsvc::NET, &key, None).map_err(|e| e.to_string())?;
-        link.set_read_timeout(Duration::from_secs(30)).map_err(|e| e.to_string())?;
+        let link = Link::dial_asking(addr, crate::meshsvc::NET, &key, None, Duration::from_secs(30))?;
         let batch = 200;
         Ok(CoreShareSource { link, addr: addr.into(), db: &node.chain, p, next_id: 1, cache: HashMap::new(), batch })
     }

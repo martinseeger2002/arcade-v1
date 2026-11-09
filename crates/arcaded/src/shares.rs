@@ -514,8 +514,7 @@ pub fn prepare_backfill(node: &Node, p: &'static ChainParams, name: &str, max: u
 
 /// A V1.0 arcade's answer to one question about a chain.
 fn ask(node: &Node, addr: &str, q: Value) -> Result<(Value, Vec<u8>), String> {
-    let mut link = Link::dial(addr, crate::meshsvc::NET, &node.identity, node.mesh_port).map_err(|e| e.to_string())?;
-    link.set_read_timeout(Duration::from_secs(20)).map_err(|e| e.to_string())?;
+    let mut link = Link::dial_asking(addr, crate::meshsvc::NET, &node.identity, node.mesh_port, Duration::from_secs(20))?;
     let mut q = q;
     q["t"] = json!("sh");
     q["op"] = json!("q");
