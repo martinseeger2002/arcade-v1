@@ -67,7 +67,7 @@ struct State {
 
 /// Bytes one job should carry: one source must finish it well within the connector's wait,
 /// whether blocks are 300 bytes or 1 MB (250 small blocks, or ~30 full Doginals-era ones).
-const JOB_BYTES: usize = 12 << 20;
+const JOB_BYTES: usize = 48 << 20;
 
 /// Raw block bytes a storing round takes at most.
 const ROUND_BYTES: usize = 200 << 20;
