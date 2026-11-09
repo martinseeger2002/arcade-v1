@@ -34,6 +34,10 @@ fn mesh_bootstrap(node: &Node, syncer: &Syncer) {
             continue;
         }
         loop {
+            // A copy is being taken in (docs/V1SHARE.md): leave the chain to it.
+            if crate::coreboot::held(p.key) {
+                return;
+            }
             let h = syncer.sync_headers_once(&mut src);
             let b = syncer.sync_blocks(&mut src, 5000, 250);
             match (h, b) {
@@ -77,6 +81,11 @@ pub fn run(node: Arc<Node>) {
             continue;
         }
         loop {
+            // A copy is being taken in (docs/V1SHARE.md): stand still until it is.
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            if crate::coreboot::park(p.key, &stop, &|s| set_state(&node, s)) {
+                continue;
+            }
             // Headers, then blocks, then queued transactions, then the tag index.
             let mut new = 0;
             match syncer.sync_headers_once(&mut peer) {
@@ -119,6 +128,11 @@ pub fn run(node: Arc<Node>) {
             let best = node.chain.best_header(p.chain_no).ok().flatten().and_then(|h| node.chain.header(p.chain_no, &h).ok().flatten());
             let (th, bh) = (tip.map(|t| t.height).unwrap_or(0), best.map(|b| b.height).unwrap_or(0));
             set_state(&node, if th >= bh { format!("synced at {th}") } else { format!("syncing {th} / {bh}") });
+            // At the tip: a checkpoint copy of every part of the home chain (docs/V1SHARE.md §3).
+            if new > 0 && th >= bh {
+                let ix: Vec<String> = ["ledger", "profiles", "messages", "ord", "tokens", "names", "maps"].iter().map(|s| s.to_string()).collect();
+                crate::v1copy::checkpoint(&node, p, th, crate::v1copy::families_of(&node.home_mode, &ix));
+            }
             if node.mesh_bootstrap && th + 100 < bh {
                 mesh_bootstrap(&node, &syncer);
             }

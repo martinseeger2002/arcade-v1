@@ -158,7 +158,7 @@ pub fn wait_parked(key: &str, node: &Node, max: Duration) -> bool {
     let t = Instant::now();
     while t.elapsed() < max {
         // No follower (not installed or stopped) counts as parked.
-        if st().parked.contains(key) || !node.extra.lock().unwrap().contains_key(key) {
+        if st().parked.contains(key) || (key != node.params.key && !node.extra.lock().unwrap().contains_key(key)) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(200));

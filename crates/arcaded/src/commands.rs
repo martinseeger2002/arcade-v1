@@ -182,6 +182,15 @@ cmds! {
     "chains.index_copy_status" Public "key?" "Index copies (docs/INDEXBOOT.md): what old arcades offer per chain, the fetch, its votes, and whether an index here came from a copy.";
     "chains.index_copy_start" Admin "key, index, from?" "Fetch an index copy now from the best offer (index = ledger or ord; from = one arcade's node id): it is taken in only if 2 or more other arcades agree with it.";
     "chains.index_copy_cancel" Admin "key, index" "Stop fetching an index copy (its pieces are deleted).";
+    // V1.0 copies (docs/V1SHARE.md)
+    "share.held" Public "" "V1.0 copies of chain parts held here (blocks, coins, ord, tokens, names, maps, ledger, profiles, messages): id, height, rows, size; and those being made.";
+    "share.offers" Public "key" "V1.0 copies other arcades hold for a chain, per part: id, height, how many made it themselves and how many hold it.";
+    "share.fetch" Admin "key, fam, id?" "Fetch a part's copy from every arcade holding it at once: the newest one 2 or more arcades made themselves (or the id given). Pieces are checked against the manifest; the copy is then held and served here too.";
+    "share.install" Admin "key" "Install an added chain (or the home chain) from V1.0 copies: its blocks and coins made by 2 or more arcades at the same checkpoint, fetched from every holder and taken in as they come (no replay); the coins are trusted until re-checked.";
+    "share.install_cancel" Admin "key" "Stop installing a chain from copies.";
+    "share.cancel" Admin "key, fam" "Stop fetching a copy (its pieces are deleted).";
+    "share.auto" Admin "key, on" "Make copies of every part of a chain at each checkpoint (about a day of its blocks) while at the tip; off by default (copies take disk).";
+    "share.make" Admin "key, fam" "Make a V1.0 copy of one part of an installed chain now, from one frozen view of the database (in the background; see share.held).";
     // Borrowed coins
     "borrow.status" Read "" "Borrowed coins: the switches, and per chain its lenders, tip, floor, tip mismatch and your balance.";
     "borrow.set" Admin "on, chain?" "Turn borrowing on or off: for every coin (no chain) or for one chain (off removes its borrowed data).";
