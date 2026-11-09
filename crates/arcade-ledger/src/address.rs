@@ -61,19 +61,72 @@ pub fn p2sh_script(h: &[u8; 20]) -> Vec<u8> {
     s
 }
 
+/// The scripthash version a chain still reads from before it had its own (DigiByte and
+/// Litecoin "3...", Litecoin testnet "2..."); None where there is none.
+pub fn legacy_p2sh_version(p: &ChainParams) -> Option<u8> {
+    match p.key {
+        "dgb" | "ltc" => Some(5),
+        "ltctest" => Some(196),
+        _ => None,
+    }
+}
+
 /// scriptPubKey for an address of chain `p`: P2PKH with its pubkeyhash version, P2SH with its
-/// scripthash version. None for another chain's version byte or a payload that is not 20 bytes.
+/// scripthash version (or its legacy one), and on chains with a bech32 prefix SegWit v0
+/// (P2WPKH, P2WSH) and v1 (P2TR) addresses. None for another chain's address or a bad one.
 /// For lookups (balances, history, explorer) and for paying to an address.
 pub fn script_for_address(p: &ChainParams, a: &str) -> Option<Vec<u8>> {
+    if let Some(hrp) = p.bech32_hrp {
+        if a.len() > hrp.len() + 1 && a[..hrp.len() + 1].eq_ignore_ascii_case(&format!("{hrp}1")) {
+            let (ver, prog) = bech32::decode_segwit(hrp, a)?;
+            return Some(segwit_script(ver, &prog));
+        }
+    }
     let (v, h) = decode_base58check(a)?;
     let h: [u8; 20] = h.try_into().ok()?;
     if v == p.p2pkh_version {
         Some(p2pkh_script(&h))
-    } else if v == p.p2sh_version {
+    } else if v == p.p2sh_version || Some(v) == legacy_p2sh_version(p) {
         Some(p2sh_script(&h))
     } else {
         None
     }
+}
+
+/// scriptPubKey of a SegWit output: OP_n <program>.
+pub fn segwit_script(version: u8, program: &[u8]) -> Vec<u8> {
+    let mut s = vec![if version == 0 { 0 } else { 0x50 + version }, program.len() as u8];
+    s.extend_from_slice(program);
+    s
+}
+
+/// P2WPKH scriptPubKey of a key hash.
+pub fn p2wpkh_script(h: &[u8; 20]) -> Vec<u8> {
+    segwit_script(0, h)
+}
+
+/// (witness version, program) of a SegWit output script.
+pub fn segwit_of(script: &[u8]) -> Option<(u8, &[u8])> {
+    let (&op, rest) = script.split_first()?;
+    let ver = match op {
+        0 => 0,
+        0x51..=0x60 => op - 0x50,
+        _ => return None,
+    };
+    let (&n, prog) = rest.split_first()?;
+    (n as usize == prog.len() && (2..=40).contains(&prog.len())).then_some((ver, prog))
+}
+
+/// The address a wallet shows for an output: address_of, and on chains with a bech32 prefix
+/// SegWit outputs as bech32 (v0) or bech32m (v1+). (address_of itself stays as the indexes
+/// use it.)
+pub fn wallet_address_of(script: &[u8], p: &ChainParams) -> Option<String> {
+    if let Some(a) = address_of(script, p) {
+        return Some(a);
+    }
+    let hrp = p.bech32_hrp?;
+    let (ver, prog) = segwit_of(script)?;
+    Some(bech32::encode_segwit(hrp, ver, prog))
 }
 
 /// hash160 of a P2PKH address of chain `p`; None for P2SH, another chain's version byte or a
@@ -126,6 +179,67 @@ pub mod bech32 {
         out
     }
 
+    const BECH32M: u32 = 0x2bc830a3;
+
+    fn hrp_expand(hrp: &str) -> Vec<u8> {
+        let mut v: Vec<u8> = hrp.bytes().map(|c| c >> 5).collect();
+        v.push(0);
+        v.extend(hrp.bytes().map(|c| c & 31));
+        v
+    }
+
+    /// A SegWit address of any version: bech32 for v0, bech32m (BIP350) for v1 and up.
+    pub fn encode_segwit(hrp: &str, version: u8, program: &[u8]) -> String {
+        let mut data = vec![version];
+        data.extend(to5(program));
+        let mut v = hrp_expand(hrp);
+        v.extend(&data);
+        v.extend([0u8; 6]);
+        let m = polymod(&v) ^ if version == 0 { 1 } else { BECH32M };
+        let mut s = format!("{hrp}1");
+        for d in data.iter().copied().chain((0..6).map(|i| ((m >> (5 * (5 - i))) & 31) as u8)) {
+            s.push(CHARSET[d as usize] as char);
+        }
+        s
+    }
+
+    /// (witness version, program) of a SegWit address with human-readable part `hrp`
+    /// (BIP173/BIP350: one case, the right checksum for the version, valid program sizes).
+    pub fn decode_segwit(hrp: &str, addr: &str) -> Option<(u8, Vec<u8>)> {
+        if addr.len() > 90 || (addr.bytes().any(|c| c.is_ascii_lowercase()) && addr.bytes().any(|c| c.is_ascii_uppercase())) {
+            return None;
+        }
+        let a = addr.to_ascii_lowercase();
+        let pos = a.rfind('1')?;
+        if &a[..pos] != hrp || a.len() < pos + 7 {
+            return None;
+        }
+        let data: Vec<u8> = a[pos + 1..].bytes().map(|c| CHARSET.iter().position(|x| *x == c).map(|i| i as u8)).collect::<Option<_>>()?;
+        let mut v = hrp_expand(hrp);
+        v.extend(&data);
+        let check = polymod(&v);
+        let (&ver, rest) = data[..data.len() - 6].split_first()?;
+        if ver > 16 || check != if ver == 0 { 1 } else { BECH32M } {
+            return None;
+        }
+        let (mut acc, mut bits, mut prog) = (0u32, 0u32, Vec::new());
+        for &d in rest {
+            acc = (acc << 5) | d as u32;
+            bits += 5;
+            if bits >= 8 {
+                bits -= 8;
+                prog.push(((acc >> bits) & 0xff) as u8);
+            }
+        }
+        if bits >= 5 || (acc & ((1 << bits) - 1)) != 0 {
+            return None;
+        }
+        if !(2..=40).contains(&prog.len()) || (ver == 0 && prog.len() != 20 && prog.len() != 32) {
+            return None;
+        }
+        Some((ver, prog))
+    }
+
     pub fn segwit_v0(hrp: &str, program: &[u8]) -> String {
         let mut data = vec![0u8];
         data.extend(to5(program));
@@ -140,6 +254,22 @@ pub mod bech32 {
             s.push(CHARSET[d as usize] as char);
         }
         s
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn bip350_vectors() {
+        // BIP173/BIP350 valid addresses and their programs.
+        let (v, p) = decode_segwit("bc", "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4").unwrap();
+        assert_eq!((v, hex::encode(&p)), (0, "751e76e8199196d454941c45d1b3a323f1433bd6".to_string()));
+        let tr = "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0";
+        let (v, p) = decode_segwit("bc", tr).unwrap();
+        assert_eq!((v, hex::encode(&p)), (1, "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".to_string()));
+        assert_eq!(encode_segwit("bc", 1, &p), tr);
+        // A v1 program with a bech32 (not bech32m) checksum, a mixed-case one, another hrp: refused.
+        assert!(decode_segwit("bc", "bc1pw508d6qejxtdg4y5r3zarvary0c5xw7kw508d6qejxtdg4y5r3zarvary0c5xw7k7grplx").is_none());
+        assert!(decode_segwit("bc", "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3T4").is_none());
+        assert!(decode_segwit("tb", "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").is_none());
     }
 
     #[cfg(test)]
@@ -200,6 +330,16 @@ mod tests {
         assert_eq!(p2pkh_hash_of(&DIGIBYTE_MAIN, dgb_pkh), Some(h));
         assert_eq!(p2pkh_script_for_address(&DIGIBYTE_MAIN, dgb_sh), None);
         assert_eq!(p2pkh_script_for_address(&DIGIBYTE_MAIN, ltc_pkh), None);
+        // SegWit on chains with a bech32 prefix: v0 key hash, v1 taproot, the legacy "3..." P2SH.
+        let wpkh = bech32::segwit_v0("dgb", &h);
+        assert!(wpkh.starts_with("dgb1q"));
+        assert_eq!(script_for_address(&DIGIBYTE_MAIN, &wpkh), Some(p2wpkh_script(&h)));
+        assert_eq!(wallet_address_of(&p2wpkh_script(&h), &DIGIBYTE_MAIN).as_deref(), Some(wpkh.as_str()));
+        let tr = bech32::encode_segwit("dgb", 1, &[9u8; 32]);
+        assert_eq!(script_for_address(&DIGIBYTE_MAIN, &tr), Some(segwit_script(1, &[9u8; 32])));
+        assert_eq!(script_for_address(&DIGIBYTE_MAIN, &base58check(5, &h)), Some(p2sh_script(&h)));
+        assert_eq!(script_for_address(&LITECOIN_MAIN, &wpkh), None); // another chain's prefix
+        assert_eq!(script_for_address(&PEPECOIN_TEST, &base58check(5, &h)), None);
         // 20-byte payloads only.
         let long = base58check(DIGIBYTE_MAIN.p2pkh_version, &[7u8; 21]);
         assert_eq!(script_for_address(&DIGIBYTE_MAIN, &long), None);

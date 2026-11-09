@@ -74,6 +74,7 @@ cmds! {
     "wallet.create" Local "phrase?" "Create a wallet (or restore one from 12 words). Returns the new words once.";
     "wallet.phrase" Local "" "The wallet's 12 words.";
     "wallet.keys" Read "chain?" "Your addresses on a chain, their @tags and balances.";
+    "wallet.send" Local "chain?, to, amount, send?" "Pay amount (satoshis) on a chain (home, installed or borrowed) from this wallet, signed here; send: true broadcasts, otherwise it's only built and shown with its fee (and a warning when the address could be meant for another chain).";
     "wallet.link" Wallet "chain, wif, tag" "Link another wallet to your @tag (signed by both keys).";
     "wallet.unlink" Wallet "chain, address, tag" "Remove a linked wallet.";
     "wallet.links" Read "chain" "Your linked wallets on a chain.";

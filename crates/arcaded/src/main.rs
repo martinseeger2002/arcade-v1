@@ -13,6 +13,7 @@ mod apikeys;
 mod borrow;
 mod appsvc;
 mod walletsvc;
+mod coinsend;
 mod commands;
 mod chainsvc;
 mod chains;

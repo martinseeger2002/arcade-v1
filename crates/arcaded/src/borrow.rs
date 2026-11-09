@@ -115,8 +115,19 @@ pub fn watched(node: &Node, p: &ChainParams) -> Vec<Watched> {
         }
     }
     for k in keys {
-        if let Some(s) = script_for_address(p, &k.address) {
-            add(&mut out, Watched { address: k.address.clone(), script: s, key: KeySrc::Tag(k.index) });
+        let pk = hex::decode(&k.pubkey).ok().and_then(|b| arcade_wallet::secp256k1::PublicKey::from_slice(&b).ok());
+        match pk {
+            // Every address of the key: on DigiByte its dgb1... address first, then D...
+            Some(pk) => {
+                for (a, s) in crate::coinsend::key_scripts(p, &pk) {
+                    add(&mut out, Watched { address: a, script: s, key: KeySrc::Tag(k.index) });
+                }
+            }
+            None => {
+                if let Some(s) = script_for_address(p, &k.address) {
+                    add(&mut out, Watched { address: k.address.clone(), script: s, key: KeySrc::Tag(k.index) });
+                }
+            }
         }
     }
     // Imported wallets (any kind: legacy, P2SH-SegWit, native SegWit) of the account in use.
@@ -1159,10 +1170,10 @@ pub fn coins(node: &Node, key: &str) -> R {
 // ---------------- sending ----------------
 
 fn fee_rate(node: &Node, p: &ChainParams) -> u64 {
-    let doge_like = matches!(p.key, "peptest" | "pep" | "doge" | "flop" | "wjk" | "kot");
-    let fallback = if doge_like { crate::claims::FEE_PER_KB } else { 20_000 };
+    let fp = crate::coinsend::fee_policy(p);
+    let fallback = fp.fallback_per_kb.max(fp.floor_per_kb);
     match call_any(node, p, json!([["estimatesmartfee", [6]]])) {
-        Ok((_, a)) => r(&a[0]).ok().and_then(|v| v["feerate"].as_f64()).filter(|f| *f > 0.0).map(|f| (f * 1e8) as u64).map(|s| s.clamp(1_000, crate::claims::FEE_PER_KB.max(fallback))).unwrap_or(fallback),
+        Ok((_, a)) => r(&a[0]).ok().and_then(|v| v["feerate"].as_f64()).filter(|f| *f > 0.0).map(|f| (f * 1e8) as u64).map(|s| s.clamp(fp.floor_per_kb, crate::claims::FEE_PER_KB.max(fallback))).unwrap_or(fallback),
         Err(_) => fallback,
     }
 }
@@ -1176,17 +1187,28 @@ pub fn send(node: &Node, key: &str, to: &str, amount: u64, from: Option<&str>, b
         return Err(format!("{} is not borrowed here (installed chains send from the Wallet tab)", p.name));
     }
     let to_script = script_for_address(p, to).ok_or_else(|| format!("{to} is not a {} address", p.name))?;
-    // Only standard (P2PKH) addresses can be signed for here; SegWit imports can't spend yet.
-    let p2pkh = |sc: &[u8]| sc.len() == 25 && sc[0] == 0x76 && sc[1] == 0xa9;
-    let w: Vec<Watched> = watched(node, p).into_iter().filter(|x| p2pkh(&x.script)).collect();
+    // Key-hash coins can be signed for here: P2PKH, and P2WPKH (BIP143) on SegWit chains. Other
+    // kinds (P2SH-wrapped SegWit imports) can't spend yet.
+    let keyhash = |sc: &[u8]| (sc.len() == 25 && sc[0] == 0x76 && sc[1] == 0xa9) || (sc.len() == 22 && sc[0] == 0 && sc[1] == 20);
+    let w: Vec<Watched> = watched(node, p).into_iter().filter(|x| keyhash(&x.script)).collect();
     let pick = match from {
-        Some(f) => w.iter().find(|x| x.address == f).cloned().ok_or("that address is not this wallet's, or is SegWit (sending from SegWit isn't supported yet)")?,
+        Some(f) => w.iter().find(|x| x.address == f).cloned().ok_or("that address is not this wallet's, or is a kind that can't be spent here yet")?,
         None => w.iter().filter(|x| !matches!(x.key, KeySrc::None)).max_by_key(|x| spendable(node, p, &x.script).iter().map(|u| u.value).sum::<u64>()).cloned().ok_or("this wallet has no address on that chain")?,
     };
     let sk = key_of(node, p, &pick.key).ok_or("no key for that address here")?;
-    let coins = spendable(node, p, &pick.script);
-    let dust = if matches!(p.key, "btc" | "ltc" | "ltctest" | "dgb" | "dgbtest") { 1_000 } else { crate::claims::DUST };
-    let tx = arcade_wallet::tx::build_send(p, &to_script, amount, &sk, &coins, fee_rate(node, p), dust, arcade_app::now() as u32).map_err(e)?;
+    // Every key-hash address of the same key spends together; change goes to its receiving one.
+    let pk = arcade_wallet::secp256k1::PublicKey::from_secret_key(arcade_wallet::secp256k1::SECP256K1, &sk);
+    let mine = crate::coinsend::key_scripts(p, &pk);
+    let mut coins = Vec::new();
+    for (_, sc) in mine.iter().filter(|(_, sc)| w.iter().any(|x| &x.script == sc)) {
+        coins.extend(spendable(node, p, sc));
+    }
+    if !mine.iter().any(|(_, sc)| *sc == pick.script) {
+        coins.extend(spendable(node, p, &pick.script));
+    }
+    let change = if mine.iter().any(|(_, sc)| *sc == pick.script) { mine[0].1.clone() } else { pick.script.clone() };
+    let fp = crate::coinsend::fee_policy(p);
+    let tx = arcade_wallet::tx::build_send_keyhash(p, &to_script, amount, &sk, &coins, &change, fee_rate(node, p), fp.dust, arcade_app::now() as u32)?;
     let ins: u64 = tx.inputs.iter().filter_map(|i| coins.iter().find(|c| c.outpoint == i.prevout).map(|c| c.value)).sum();
     let fee = ins.saturating_sub(tx.outputs.iter().map(|o| o.value).sum());
     let mut out = json!({"txid": tx.txid.to_hex(), "from": pick.address, "to": to, "amount": amount, "fee": fee, "size": tx.raw.len(), "sent": false});
