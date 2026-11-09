@@ -310,15 +310,14 @@ fn bring_mailbox(node: &Node, host: &str, login: &ed25519_dalek::SigningKey, mk:
 }
 
 /// base64(nonce24 || secretbox) under blake2b-256(messaging secret || "arcade-mailbox/1").
+fn mailbox_key(msg_secret: &[u8; 32]) -> [u8; 32] {
+    arcade_mesh::udp::blake2b(&[&msg_secret[..], b"arcade-mailbox/1"].concat(), 32, b"").try_into().unwrap()
+}
+
 fn open_mailbox(msg_secret: &[u8; 32], b64: &str) -> Result<Vec<u8>, String> {
     use base64::Engine as _;
-    use blake2::digest::{Update, VariableOutput};
     use crypto_secretbox::aead::{Aead, KeyInit};
-    let mut h = blake2::Blake2bVar::new(32).unwrap();
-    h.update(msg_secret);
-    h.update(b"arcade-mailbox/1");
-    let mut key = [0u8; 32];
-    h.finalize_variable(&mut key).unwrap();
+    let key = mailbox_key(msg_secret);
     let raw = base64::engine::general_purpose::STANDARD.decode(b64.trim()).map_err(|_| "bad mailbox")?;
     if raw.len() < 24 + 16 {
         return Err("bad mailbox".into());
@@ -330,6 +329,12 @@ fn open_mailbox(msg_secret: &[u8; 32], b64: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mailbox_key_is_unchanged() {
+        // python3: hashlib.blake2b(bytes([3]*32) + b"arcade-mailbox/1", digest_size=32)
+        assert_eq!(hex::encode(mailbox_key(&[3; 32])), "6445b8bb38000b3ad8173cc095097f495494d6799aa6194355a33b57c5e5d9e0");
+    }
 
     #[test]
     fn opens_what_webcrypto_seals() {

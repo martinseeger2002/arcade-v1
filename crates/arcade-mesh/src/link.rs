@@ -66,11 +66,7 @@ impl Frame {
 }
 
 pub fn blake2b32(data: &[u8], person: &[u8]) -> [u8; 32] {
-    let mut p = [0u8; 16];
-    let n = person.len().min(16);
-    p[..n].copy_from_slice(&person[..n]);
-    let h = blake2b_simd::Params::new().hash_length(32).personal(&p).hash(data);
-    h.as_bytes().try_into().unwrap()
+    crate::udp::blake2b(data, 32, person).try_into().unwrap()
 }
 
 pub struct Keys {

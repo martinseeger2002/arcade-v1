@@ -44,12 +44,14 @@ fn now_us() -> u64 {
 
 /// blake2b(room, digest_size=8).hexdigest()
 pub fn room_id(room: &str) -> String {
-    use blake2::digest::{Update, VariableOutput};
-    let mut h = blake2::Blake2bVar::new(8).unwrap();
-    h.update(room.as_bytes());
-    let mut out = [0u8; 8];
-    h.finalize_variable(&mut out).unwrap();
-    hex::encode(out)
+    hex::encode(arcade_mesh::udp::blake2b(room.as_bytes(), 8, b""))
+}
+
+#[cfg(test)]
+#[test]
+fn room_id_is_unchanged() {
+    // python3: hashlib.blake2b(b"pg/room", digest_size=8).hexdigest()
+    assert_eq!(room_id("pg/room"), "1984c9d33727d8ad");
 }
 
 fn is_guest(m: &str) -> bool {
