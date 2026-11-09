@@ -534,6 +534,11 @@ fn stored_header(node: &Node, p: &ChainParams, h: u32) -> Option<(Hash256, Heade
     Some((Hash256(v[..32].try_into().unwrap()), Header::parse(v[32..112].try_into().unwrap())))
 }
 
+/// The height of a borrowed coin's block (None when it isn't one of ours, or isn't mined yet).
+pub fn coin_height(node: &Node, p: &ChainParams, op: &OutPoint) -> Option<u32> {
+    coin(node, p, op).and_then(|c| c["h"].as_u64()).map(|h| h as u32)
+}
+
 fn coin(node: &Node, p: &ChainParams, op: &OutPoint) -> Option<Value> {
     get_json(node, &k_c(p.key, op))
 }

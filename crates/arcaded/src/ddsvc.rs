@@ -127,7 +127,8 @@ fn load(node: &Node, p: &'static ChainParams) -> Result<Wallet, String> {
                 },
             };
             if cents > 0 {
-                held.push((u, cents, 0));
+                let h = crate::borrow::coin_height(node, p, &op).unwrap_or(0);
+                held.push((u, cents, h));
             }
         }
     } else {
