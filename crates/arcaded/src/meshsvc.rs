@@ -301,6 +301,7 @@ fn serve_loop(
         }
         // UDP path: ask, switch over, fall back; proofs and introductions for this link.
         crate::udpsvc::tick(node, link)?;
+        crate::coreboot::tick(node, link)?;
         if last_me.elapsed() > Duration::from_secs(60) {
             link.send(&Frame::new(operator_me(node)))?;
             // The chains we lend, again when they change (a chain finishing its sync, say).
@@ -364,6 +365,7 @@ fn serve_loop(
             "pub" | "sub" => crate::realtime::on_frame(node, peer, &f),
             "ud" | "st" | "ui" => crate::udpsvc::on_frame(node, link, &f)?,
             "ka" => {} // TCP keepalive while frames go over UDP
+            "cb" => crate::coreboot::on_frame(node, link, &f)?,
             "cr" => {
                 if f.head["op"] == "offer" {
                     note_offer(node, &link.peer_id, addr, "cr", &f.head["nets"]);

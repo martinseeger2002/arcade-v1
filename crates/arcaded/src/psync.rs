@@ -484,7 +484,8 @@ pub fn run(node: &Node, p: &'static ChainParams, syncer: &Syncer, top: u32, on_p
         std::thread::sleep(Duration::from_secs(3));
         on_progress(format!("block {} of {top} · {} · starting", node.chain.tip(c).ok().flatten().map(|t| t.height).unwrap_or(0), pool.summary()));
         let res: Result<(), String> = loop {
-            if stop.load(Ordering::Relaxed) {
+            // A copy is being taken in (crate::coreboot): stand still.
+            if stop.load(Ordering::Relaxed) || crate::coreboot::held(p.key) {
                 break Ok(());
             }
             let ours = node.chain.tip(c).ok().flatten().map(|t| t.height).unwrap_or(0);

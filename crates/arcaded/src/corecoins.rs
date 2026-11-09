@@ -229,14 +229,13 @@ const OBF_KEY: &[u8] = b"\x0e\x00obfuscate_key";
 
 impl Chainstate {
     pub fn open(dir: &std::path::Path) -> Result<Chainstate> {
-        // Look for the obfuscation key and 'B' first (one pass over the small keys is not
-        // possible without seeking, so a first reader finds them: both sort after the coins
-        // ('B' < 'C' < 'c' though; read until both are seen or the coins start).
+        // A first reader finds the obfuscation key and 'B' (keys sort 0x0e.. < 'B' < 'C' < 'c',
+        // so both come before any coin) and the layout (the first coin key); a second reader
+        // then walks the coins.
         let mut first = leveldb::Db::open(dir)?;
         let mut key = Vec::new();
         let mut best_raw = None;
         let mut layout = None;
-        // Keys: 'B' (0x42) < 'C' (0x43) < 'c' (0x63) < 0x0e? No: 0x0e sorts first of all.
         while let Some((k, v)) = first.next_kv()? {
             if k == OBF_KEY {
                 // A serialized vector: compact size + bytes.

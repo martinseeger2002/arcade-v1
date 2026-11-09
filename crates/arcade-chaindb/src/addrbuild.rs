@@ -28,6 +28,9 @@ pub const OFF: &str = "addr_off";
 /// STATE: height u32 BE up to which address rows are to be built from the stored blocks
 /// (the index was turned on for a chain already stored).
 pub const BACKFILL: &str = "addr_backfill";
+/// STATE: height u32 BE from which the BACKFILL build starts (absent = 1). Set when a
+/// copy's coin set was taken in above blocks whose address rows exist already (coreimport).
+pub const BACKFILL_FROM: &str = "addr_backfill_from";
 /// The address tables (what the Addresses index owns).
 pub const TABLES: [&str; 4] = [SCRIPT_HIST, BY_SCRIPT, SPENDS, ADDR_LOG];
 /// Log row kinds.
@@ -104,6 +107,7 @@ impl ChainDb {
             w.put(STATE, &k_state(c, OFF), b"1")?;
             w.del(STATE, &k_state(c, PENDING))?;
             w.del(STATE, &k_state(c, BACKFILL))?;
+            w.del(STATE, &k_state(c, BACKFILL_FROM))?;
             Ok(())
         })
     }
@@ -141,6 +145,7 @@ impl ChainDb {
             let tip = w.get(STATE, &k_state(c, "tip"))?.map(|v| be_u32(&v, 32)).unwrap_or(0);
             if tip > 0 {
                 w.put(STATE, &k_state(c, BACKFILL), &tip.to_be_bytes())?;
+                w.del(STATE, &k_state(c, BACKFILL_FROM))?;
                 w.put(STATE, &k_state(c, PENDING), b"1")?;
             }
             Ok(())
@@ -158,10 +163,11 @@ impl ChainDb {
         self.flush_coins(c)?;
         let upto = self.tip(c)?.map(|t| t.height).unwrap_or(0);
         let backfill = self.store.read(|r| r.get(STATE, &k_state(c, BACKFILL)))?.map(|v| be_u32(&v, 0));
+        let from = self.store.read(|r| r.get(STATE, &k_state(c, BACKFILL_FROM)))?.map(|v| be_u32(&v, 0)).unwrap_or(1).max(1);
         std::fs::create_dir_all(tmp).map_err(io)?;
         let mut runs: Vec<(u8, PathBuf)> = Vec::new();
         if let Some(bf) = backfill {
-            if !self.backfill_runs(params, bf, tmp, stop, note, &mut runs)? {
+            if !self.backfill_runs(params, from, bf, tmp, stop, note, &mut runs)? {
                 for (_, p) in &runs {
                     let _ = std::fs::remove_file(p);
                 }
@@ -186,7 +192,10 @@ impl ChainDb {
             }
             note("building addresses: step 6 of 6, clearing the log".into());
             if backfill.is_some() {
-                self.store.write(|w| w.del(STATE, &k_state(c, BACKFILL)).map(|_| ()))?;
+                self.store.write(|w| {
+                    w.del(STATE, &k_state(c, BACKFILL))?;
+                    w.del(STATE, &k_state(c, BACKFILL_FROM)).map(|_| ())
+                })?;
             }
             self.clear_log(c, upto, stop)
         })();
@@ -199,7 +208,7 @@ impl ChainDb {
     /// Step 1 for a chain stored before the index was on: every row of heights 1..=upto
     /// from the stored blocks (several threads), as sorted run files; address coins from the
     /// coins still unspent.
-    fn backfill_runs(&self, params: &ChainParams, upto: u32, tmp: &Path, stop: &AtomicBool, note: Note, runs: &mut Vec<(u8, PathBuf)>) -> Result<bool> {
+    fn backfill_runs(&self, params: &ChainParams, from_h: u32, upto: u32, tmp: &Path, stop: &AtomicBool, note: Note, runs: &mut Vec<(u8, PathBuf)>) -> Result<bool> {
         use std::sync::Mutex;
         let c = params.chain_no;
         struct Acc {
@@ -223,7 +232,7 @@ impl ChainDb {
             }
             Ok(())
         };
-        let next_h = std::sync::atomic::AtomicU32::new(1);
+        let next_h = std::sync::atomic::AtomicU32::new(from_h);
         let failed: Mutex<Option<arcade_store::StoreError>> = Mutex::new(None);
         const SPAN: u32 = 500;
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 8);
@@ -322,7 +331,8 @@ impl ChainDb {
                 let mut out = Vec::new();
                 for (k, v) in &rows {
                     let height = u32::from_le_bytes(v[8..12].try_into().unwrap());
-                    if height > upto {
+                    // Coins older than from_h have their address rows already.
+                    if height > upto || height < from_h {
                         continue;
                     }
                     let (b, p, vout) = (be_u32(k, 2), be_u32(k, 6), be_u32(k, 10));

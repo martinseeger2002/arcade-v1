@@ -25,6 +25,9 @@ const HELP: &str = "arcade — Arcade V1.0
   arcade chain status <key>                 staged progress (headers, blocks, coins, indexes)
   arcade chain offers                       which arcades on the mesh offer which chains
   arcade chain sizes                        measure this arcade's chains now; sizes other arcades report
+  arcade chain copy status [key]             Core-data copies (cb) offered, fetches in progress, trusted/verified coin sets
+  arcade chain copy start <key> [coins|all]  bootstrap from the best copy (coins: coin set only, the default)
+  arcade chain copy cancel|verify <key>      stop a fetch (sync it myself) | re-check a copied coin set now
   arcade chain pause|resume|remove <key>
   arcade chain index add|remove <key> <index>
   arcade ledger [height]         ledger fingerprints vs. other arcades; a block's digest rows
@@ -256,6 +259,12 @@ fn main() {
         ["chain", "pause", k] => json!({"cmd": "chains.pause", "key": k}),
         ["chain", "resume", k] => json!({"cmd": "chains.resume", "key": k}),
         ["chain", "remove", k] => json!({"cmd": "chains.remove", "key": k}),
+        ["chain", "copy", "status"] => json!({"cmd": "chains.copy_status"}),
+        ["chain", "copy", "status", k] => json!({"cmd": "chains.copy_status", "key": k}),
+        ["chain", "copy", "start", k] => json!({"cmd": "chains.copy_start", "key": k}),
+        ["chain", "copy", "start", k, w] => json!({"cmd": "chains.copy_start", "key": k, "what": w}),
+        ["chain", "copy", "cancel", k] => json!({"cmd": "chains.copy_cancel", "key": k}),
+        ["chain", "copy", "verify", k] => json!({"cmd": "chains.copy_verify", "key": k}),
         ["chain", "index", "add", k, ix] => json!({"cmd": "chains.index_add", "key": k, "index": ix}),
         ["chain", "index", "remove", k, ix] => json!({"cmd": "chains.index_remove", "key": k, "index": ix}),
         ["chain", "add", k, rest @ ..] => {

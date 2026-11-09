@@ -447,6 +447,16 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "chains.index_add" => crate::chains::add_index(&node.self_arc(), &s("key").ok_or("key required")?, &s("index").ok_or("index required")?),
         "chains.index_remove" => crate::chains::remove_index(&node.self_arc(), &s("key").ok_or("key required")?, &s("index").ok_or("index required")?),
         "chains.remove" => crate::chains::remove(&node.self_arc(), &s("key").ok_or("key required")?),
+        // Core-data copies (crate::coreboot)
+        "chains.copy_status" => Ok(crate::coreboot::status(node, s("key").as_deref())),
+        "chains.copy_start" => crate::coreboot::start(&node.self_arc(), &s("key").ok_or("key required")?, &s("what").unwrap_or_else(|| "coins".into())),
+        "chains.copy_cancel" => crate::coreboot::cancel(node, &s("key").ok_or("key required")?),
+        "chains.copy_verify" => {
+            let key = s("key").ok_or("key required")?;
+            let p = arcade_chain::params::by_key(&key).ok_or("unknown chain")?;
+            let started = crate::cbimport::start_verify(node.self_arc(), p.key.to_string());
+            Ok(serde_json::json!({"started": started, "note": crate::cbimport::verify_note(p.key)}))
+        }
         // Borrowed coins (crate::borrow)
         "borrow.status" => Ok(crate::borrow::status_all(node)),
         "borrow.set" => {
