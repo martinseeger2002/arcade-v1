@@ -750,7 +750,13 @@ pub fn body_of(p: &ChainParams, meta: &Value, get_tx: &dyn Fn(&Hash256) -> Optio
     let d = dialect(p);
     let mut body = Vec::new();
     let mut left = 0u64;
-    for (i, t) in meta["txs"].as_array().cloned().unwrap_or_default().iter().enumerate() {
+    let txs = meta["txs"].as_array().cloned().unwrap_or_default();
+    // A record copied from an old arcade knows only its first piece's txid until the
+    // background pass finds the others (docs/INDEXBOOT.md §3.1).
+    if (txs.len() as u64) < meta["pieces"].as_u64().unwrap_or(1) {
+        return Err("this inscription's later pieces are not located yet (copied index)".into());
+    }
+    for (i, t) in txs.iter().enumerate() {
         let h = Hash256::from_hex(t.as_str().unwrap_or("")).map_err(|e| e.to_string())?;
         let tx = get_tx(&h).ok_or("piece transaction not available")?;
         let s = &tx.inputs.first().ok_or("no inputs")?.script_sig;

@@ -1,6 +1,11 @@
 # Index bootstrap and sharing — PLAN (not built)
 
-Status: **plan for Martin's approval.** Nothing here is built yet. Drafted 2026-11-09 on the GX10.
+Status: **approved by Martin 2026-11-09; being built phase by phase (§11).** Drafted 2026-11-09 on the GX10.
+
+| Phase | State |
+|---|---|
+| 1. Converter and fixtures | **built**: `crates/arcade-oldimport` (library + `arcade-oldimport` tool), tests in `tests/convert.rs`. Checked on real files, see §8.1 results. |
+| 2 to 6 | not started |
 
 ## Martin's decisions
 
@@ -69,7 +74,7 @@ The pieces are written to `<home>/import/<net>-<id>/`. When all are in and their
 | `insc.ct` → `ctypes.ctype` | `ct` (the string) |
 | `insc.proto, size, pieces` | `proto, size, pieces` |
 | `insc.burned, delegate, parent, reinscribed` | `burned?, delegate?, parent?, re?` |
-| *(none)* | **`txs`** (the txid of each piece). Old arcades don't store it. Single-piece: `txs = [genesis]`. Multi-piece: filled by a background pass that follows the spend chain from the genesis tx through our stored blocks (`SPENDS`). Until then the content of those inscriptions comes from the old arcade's `dx q` or is "not ready". |
+| *(none)* | **`txs`** (the txid of each piece). Old arcades don't store it. Single-piece: `txs = [genesis]`. Multi-piece: the converter writes `txs = [genesis]` too (shorter than `pieces`, so `ord::body_of` answers "not located yet" instead of a wrong body); the rest are filled by a background pass that follows the spend chain from the genesis tx through our stored blocks (`SPENDS`). Until then the content of those inscriptions comes from the old arcade's `dx q` or is "not ready". |
 | `at.rid→(tx,vout,off,height)` | `ord.v1.at C\|iid → txid\|vout\|off`, and `ord.v1.loc C\|txid\|vout\|off\|iid` |
 | `pending.txid, ctype, left, body, size, pieces, height, origin` | `ord.v1.pending` JSON `{ct, left, size, pieces, origin, txs}`, `pending_body` (body split per piece is old-format dependent; see §8.1), `pending_txs` from the spend chain |
 | `block.height, line, n, moves` | `ord.v1.block C\|height → line sha256 \| moves sha256 \| n` |
@@ -144,7 +149,7 @@ Copied rows have no undo record below the copy height. A reorg reaching at or be
 
   A native copy is used when ≥ 2 V1.0 arcades other than the maker announce the same digest at the copy's `cp`.
 - **Portability:**
-  - Native rows must not depend on local block numbers. `core.v2.by_script` and `spends` are keyed by our internal block number `B`, so the export writes `height|position` instead and the import maps back through our `HEIGHT` table. Every other family is keyed by txids, heights and names, and copies as is.
+  - Native rows must not depend on local block numbers. `core.v2.by_script` and `spends` are keyed by our internal block number `B`, so the export writes `height|position` instead and the import maps back through our `HEIGHT` table. `script_hist` is keyed by height and needs no remapping. Every other family is keyed by txids, heights and names, and copies as is.
   - Chain numbers (`C`) are fixed per chain in `params`, so keys carry over.
 
 ## 6. Background re-check ("verified")
@@ -170,6 +175,11 @@ For Dogecoin ord (180 M inscriptions) this re-check is days of background work. 
    - a small `ord-test.sqlite` and `test-ledger.sqlite` from the old arcade on the GX10 (read-only copies), converted;
    - our recomputed block lines, chunk hashes and `d/s/n` must equal the old file's;
    - unit tests for every column in §3, byte orders included.
+   - **Results (2026-11-09, GX10, phase 1):**
+     - Ledger: a copy of the old arcade's `test-ledger.sqlite` (66,382 blocks, 41,056 arcade transactions) converts in 1.6 s. Our `d` (to checkpoint 1,562,500), `s` and `n` equal both the old code's own `ledger_snapshot.describe()` on the file and V1.0's live, natively walked ledger index at block 1,562,514.
+     - ord: a copy of the old arcade's complete Pepecoin `ord-main.sqlite` (18,330,877 inscriptions, blocks 186,920 to 1,286,097) converts in 2 min 10 s, into 9.4 GB of mdbx. All **35,515** chunk hashes that 5 other arcades had reported to the old arcade (its `seen` table) equal our chunk hashes recomputed from the converted block lines. 116,952 inscriptions are multi-piece (`txs` to fill); maps are to derive.
+     - Rows are written in key order (sorted runs on disk, then a merge with mdbx `append`). Writing in the old files' row order instead took 14 min 41 s, ~1 TB of SSD writes and 19 GB of half-full pages; sorted, it's ~19 GB of writes. For Dogecoin (10x) expect ~25 min, ~95 GB of tables, and the same again in temporary run files during the conversion (§10).
+     - Still to do for §8.1: compare converted ord records with a natively walked V1.0 ord index (the mini PC's Pepecoin one).
 2. **Pepecoin testnet ledger over lx** from an old arcade, into a fresh V1.0 home. Our `d/s/n` at the copy height must equal both the manifest and the V1.0 index we already have. The re-check runs to `verified`.
 3. **Pepecoin mainnet ord** (Strawberry walks it, 100%) over dx, into a fresh home. Compare against the mini PC's own walked ord index (its oracle).
 4. **Native `vx` copies** of the same indexes between the GX10 and the mini PC, then the address index (the `B` remapping).
@@ -193,8 +203,8 @@ For Dogecoin ord (180 M inscriptions) this re-check is days of background work. 
 | | Dogecoin ord (today) |
 |---|---|
 | Download (pieces) | ~35 GB (deleted after conversion) |
-| Our tables | estimate 40 to 60 GB |
-| Peak during import | pieces + tables ≈ 100 GB; refused under 2.5× the manifest size free |
+| Our tables | ~95 GB (measured: 9.4 GB for Pepecoin's 18.3 M inscriptions) |
+| Peak during import | pieces (~35 GB) + sorted runs (~95 GB, removed as they merge) + tables (~95 GB) ≈ 225 GB |
 | Verify shadow | up to the tables' size again, while re-checking |
 
 ## 11. Phases (each one a PR)

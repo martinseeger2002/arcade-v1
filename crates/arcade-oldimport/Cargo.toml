@@ -1,0 +1,18 @@
+[package]
+name = "arcade-oldimport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Converts an old arcade's ord or ledger snapshot (SQLite) once into V1.0's tables (docs/INDEXBOOT.md §3)"
+
+[dependencies]
+arcade-chain = { version = "0.1.0", path = "../arcade-chain" }
+arcade-chaindb = { version = "0.1.0", path = "../arcade-chaindb" }
+arcade-ledger = { version = "0.1.0", path = "../arcade-ledger" }
+arcade-store = { version = "0.1.0", path = "../arcade-store" }
+hex = "0.4.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+tempfile = "3.27.0"
