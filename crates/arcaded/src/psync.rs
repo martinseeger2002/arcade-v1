@@ -33,6 +33,11 @@ const AHEAD: u32 = 100_000;
 const READY_BYTES: usize = 384 << 20;
 /// An idle source also fetches the oldest job still in flight once it is this old.
 const STEAL_AFTER: Duration = Duration::from_millis(1500);
+/// The job the connector waits on, still not delivered this long after its last copy went
+/// out: one more source fetches it too (first copy wins), up to MAX_COPIES. Two slow or stuck
+/// sources used to hold every later block back for many minutes (Dogecoin, 130 MB jobs).
+const RECOPY_AFTER: Duration = Duration::from_secs(45);
+const MAX_COPIES: u8 = 4;
 
 struct Job {
     start: u32,
@@ -58,7 +63,8 @@ struct State {
     /// P2P workers among them.
     p2p: usize,
     /// Jobs being fetched: start -> (hashes, since, already doubled).
-    inflight: BTreeMap<u32, (Vec<Hash256>, Instant, bool)>,
+    /// start -> (hashes, first sent, (copies out, last copy sent))
+    inflight: BTreeMap<u32, (Vec<Hash256>, Instant, (u8, Instant))>,
     /// Recent average block size (bytes; 0 = not known yet), to size jobs by bytes.
     avg_block: usize,
     /// P2P peers (by IP) found too slow: the recruiter rests them.
@@ -103,7 +109,7 @@ impl Pool {
         }
         let mut v: Vec<(&String, &u64)> = st.stats.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));
-        let head = st.inflight.iter().find(|(s, _)| **s >= st.want).map(|(s, (_, since, d))| format!(" · next job +{} for {:.1}s{}", s - st.want, since.elapsed().as_secs_f32(), if *d { " (2 copies)" } else { "" })).unwrap_or_default();
+        let head = st.inflight.iter().find(|(s, _)| **s >= st.want).map(|(s, (_, since, d))| format!(" · next job +{} for {:.1}s{}", s - st.want, since.elapsed().as_secs_f32(), if d.0 > 1 { format!(" ({} copies)", d.0) } else { String::new() })).unwrap_or_default();
         format!("{} sources ({} P2P) [queue {} · fetching {} · done {} · {} MB ready · hashes to {}{head}]: {}", st.workers, st.p2p, st.queue.len(), st.inflight.len(), st.ready.len(), st.ready_bytes >> 20, st.next, v.iter().take(6).map(|(k, n)| format!("{k} {}%", **n * 100 / total)).collect::<Vec<_>>().join(" · "))
     }
 }
@@ -152,7 +158,7 @@ impl Prefetched<'_> {
             if std::env::var_os("ARCADE_SYNC_TIMES").is_some() && self.last_diag.elapsed() > Duration::from_secs(30) {
                 self.last_diag = Instant::now();
                 let first_ready = st.ready.keys().next().copied();
-                let fl = st.inflight.get(&want).map(|(h, since, d)| format!("{} blocks for {:.0}s{}", h.len(), since.elapsed().as_secs_f64(), if *d { " (2 copies)" } else { "" }));
+                let fl = st.inflight.get(&want).map(|(h, since, d)| format!("{} blocks for {:.0}s{}", h.len(), since.elapsed().as_secs_f64(), if d.0 > 1 { format!(" ({} copies)", d.0) } else { String::new() }));
                 let queued = st.queue.iter().any(|j| j.start == want);
                 eprintln!(
                     "  psync waiting for {want}: in flight {} · queued {queued} · ready {} jobs from {:?} ({} MB) · queue {} (front {:?}) · workers {} (p2p {})",
@@ -168,9 +174,11 @@ impl Prefetched<'_> {
                 return Err(format!("no source delivered block {want} in time"));
             }
             // The next job in line is slow: let another source fetch it too (first copy wins).
-            if let Some((hashes, since, doubled)) = st.inflight.get_mut(&want) {
-                if !*doubled && since.elapsed() > Duration::from_secs(5) {
-                    *doubled = true;
+            // Still not here long after the last copy: one more, up to MAX_COPIES.
+            if let Some((hashes, since, copies)) = st.inflight.get_mut(&want) {
+                let again = if copies.0 == 1 { since.elapsed() > Duration::from_secs(5) } else { copies.1.elapsed() > RECOPY_AFTER };
+                if again && copies.0 < MAX_COPIES {
+                    *copies = (copies.0 + 1, Instant::now());
                     let hashes = hashes.clone();
                     st.queue.push_front(Job { start: want, hashes, tries: 0 });
                     self.pool.cv.notify_all();
@@ -232,8 +240,8 @@ fn worker(pool: &Pool, name: String, mut src: Box<dyn BlockSource + Send + '_>) 
                 // First help with the oldest jobs still in flight: the connector waits on them
                 // while later ones pile up done (first copy wins).
                 let want = st.want;
-                let steal = st.inflight.iter_mut().filter(|(s, _)| **s >= want).take(2).find(|(_, (_, since, doubled))| !*doubled && since.elapsed() > STEAL_AFTER).map(|(s, (h, _, d))| {
-                    *d = true;
+                let steal = st.inflight.iter_mut().filter(|(s, _)| **s >= want).take(2).find(|(_, (_, since, copies))| copies.0 == 1 && since.elapsed() > STEAL_AFTER).map(|(s, (h, _, d))| {
+                    *d = (2, Instant::now());
                     Job { start: *s, hashes: h.clone(), tries: 0 }
                 });
                 if let Some(j) = steal {
@@ -252,7 +260,7 @@ fn worker(pool: &Pool, name: String, mut src: Box<dyn BlockSource + Send + '_>) 
                         let rest = j.hashes.split_off(len);
                         st.queue.push_front(Job { start: j.start + len as u32, hashes: rest, tries: 0 });
                     }
-                    st.inflight.entry(j.start).or_insert((j.hashes.clone(), Instant::now(), false));
+                    st.inflight.entry(j.start).or_insert((j.hashes.clone(), Instant::now(), (1, Instant::now())));
                     break j;
                 }
                 if st.want > pool.top {
