@@ -119,6 +119,11 @@ fn st() -> std::sync::MutexGuard<'static, State> {
 // ---------------- holding a chain still ----------------
 
 /// Whether a chain's follower must stand still (an import or a re-check's last step).
+/// What each arcade said in its cb hi: (node, when, nets), for the mesh overview.
+pub fn heard_all() -> Vec<(String, u64, Value)> {
+    st().heard.iter().map(|(k, h)| (k.clone(), h.at, h.nets.clone())).collect()
+}
+
 pub fn held(key: &str) -> bool {
     st().held.contains(key)
 }

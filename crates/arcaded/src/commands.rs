@@ -161,6 +161,7 @@ cmds! {
     "explorer.search" Public "chain?, q" "Search: block, tx, address, @tag, inscription, token, name.";
     // Chains
     "chains.peers" Read "key" "A chain's P2P address book: nodes known, working in the last day, resting after failures; the working ones and the next to try.";
+    "mesh.overview" Public "" "The arcade mesh at a glance: every arcade linked or heard lately, its operator, and per chain what it lends, the chain copies it can make (and why not), the index copies it offers, how far it walks ord, and whether its ledger fingerprint matches ours.";
     "chains.list" Public "" "Every chain V1.0 knows, installed or not, with sizes reported by arcades.";
     "chains.status" Public "key" "One chain's staged progress.";
     "chains.offers" Public "" "Chains other arcades offer over the mesh.";
