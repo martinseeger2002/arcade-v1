@@ -12,6 +12,7 @@ use arcade_chain::Tx;
 use arcade_chaindb::undo::Logged;
 use arcade_chaindb::{BlockCtx, Indexer};
 use arcade_store::{KeyBuf, Result, StoreError, TableDef};
+use arcade_store::key::{be_u32, be_u64};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -127,7 +128,7 @@ fn decode_leg(raw: &[u8], at: usize) -> std::result::Result<(Leg, usize), String
         }
         2 => {
             let b = raw.get(at + 1..at + 13).ok_or("truncated swap")?;
-            Ok((Leg { kind, txid: String::new(), pid: u32::from_be_bytes(b[..4].try_into().unwrap()), amount: u64::from_be_bytes(b[4..].try_into().unwrap()) }, at + 13))
+            Ok((Leg { kind, txid: String::new(), pid: be_u32(&b, 0), amount: u64::from_be_bytes(b[4..].try_into().unwrap()) }, at + 13))
         }
         3 => {
             let b = raw.get(at + 1..at + 9).ok_or("truncated swap")?;
@@ -191,7 +192,7 @@ impl Engine<'_, '_, '_> {
     }
     fn balance(&self, addr: &str, pid: u32) -> Result<[u64; 4]> {
         Ok(match self.l.get(BALANCE, &self.bal_key(addr, pid))? {
-            Some(v) => [0, 1, 2, 3].map(|i| u64::from_be_bytes(v[i * 8..i * 8 + 8].try_into().unwrap())),
+            Some(v) => [0, 1, 2, 3].map(|i| be_u64(&v, i * 8)),
             None => [0; 4],
         })
     }
@@ -245,7 +246,7 @@ impl Engine<'_, '_, '_> {
         self.jput(INSCRIPTION, &k(self.c).bytes(txid.as_bytes()).done(), v)
     }
     fn meta_u64(&self, name: &str) -> Result<Option<u64>> {
-        Ok(self.l.get(META, &k(self.c).bytes(name.as_bytes()).done())?.map(|v| u64::from_be_bytes(v[..8].try_into().unwrap())))
+        Ok(self.l.get(META, &k(self.c).bytes(name.as_bytes()).done())?.map(|v| be_u64(&v, 0)))
     }
     fn meta_set(&self, name: &str, v: u64) -> Result<()> {
         self.l.put(META, &k(self.c).bytes(name.as_bytes()).done(), &v.to_be_bytes())
@@ -296,8 +297,8 @@ impl Engine<'_, '_, '_> {
                 let pre = k(self.c).bytes(s.as_bytes()).u8(0).done();
                 let mut moved = Vec::new();
                 for (key, v) in self.l.scan(BALANCE, &pre)? {
-                    let pid = u32::from_be_bytes(key[key.len() - 4..].try_into().unwrap());
-                    let bal = u64::from_be_bytes(v[..8].try_into().unwrap());
+                    let pid = be_u32(&key, key.len() - 4);
+                    let bal = be_u64(&v, 0);
                     if bal > 0 && self.property(pid)?.map(|p| p["ecosystem"] == *eco).unwrap_or(false) {
                         moved.push((pid, bal));
                     }
@@ -744,7 +745,7 @@ impl Engine<'_, '_, '_> {
         }
         // number = MAX(number) + 1 over the whole table (as the existing arcade), from 0.
         let number = match self.l.w.last_with_prefix(BY_NUMBER, &k(self.c).done())? {
-            Some((key, _)) => u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap()) + 1,
+            Some((key, _)) => be_u64(&key, key.len() - 8) + 1,
             None => 0,
         };
         let itx = first["txid"].as_str().unwrap().to_string();
@@ -1192,7 +1193,7 @@ pub fn manifest(raw: &[u8]) -> std::result::Result<Manifest, &'static str> {
     if raw.len() < 39 {
         return Err("truncated manifest");
     }
-    let total = u32::from_be_bytes(raw[..4].try_into().unwrap());
+    let total = be_u32(&raw, 0);
     let digest: [u8; 32] = raw[4..36].try_into().unwrap();
     let cl = raw[36] as usize;
     let at = 37 + cl;
@@ -1356,7 +1357,7 @@ pub fn block_records(db: &arcade_chaindb::ChainDb, c: u16, h: u32) -> Result<Vec
         None => Vec::new(),
     };
     for (key, _) in db.store.read(|r| r.scan_prefix(PROPERTY_BY_BLOCK, &k(c).u32(h).done()))? {
-        let pid = u32::from_be_bytes(key[key.len() - 4..].try_into().unwrap());
+        let pid = be_u32(&key, key.len() - 4);
         if let Some(v) = db.store.read(|r| r.get(PROPERTY, &k(c).u32(pid).done()))? {
             let p: Value = serde_json::from_slice(&v).unwrap_or_default();
             let s = |f: &str| p[f].as_str().unwrap_or("").to_string();
@@ -1383,10 +1384,10 @@ pub fn range_digest(db: &arcade_chaindb::ChainDb, c: u16, lo: u32, hi: u32) -> R
     hs.update(format!("{lo}-{hi}\n").as_bytes());
     let mut heights: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     for (key, _) in db.store.read(|r| r.scan_prefix(ROWS, &k(c).done()))? {
-        heights.insert(u32::from_be_bytes(key[2..6].try_into().unwrap()));
+        heights.insert(be_u32(&key, 2));
     }
     for (key, _) in db.store.read(|r| r.scan_prefix(PROPERTY_BY_BLOCK, &k(c).done()))? {
-        heights.insert(u32::from_be_bytes(key[2..6].try_into().unwrap()));
+        heights.insert(be_u32(&key, 2));
     }
     for h in heights.range(lo..=hi) {
         if let Some(d) = block_digest(db, c, *h)? {
@@ -1405,12 +1406,12 @@ pub fn checkpoint(indexed: u32, floor: u32) -> Option<u32> {
 pub fn consensus_hash(db: &arcade_chaindb::ChainDb, c: u16) -> Result<String> {
     let mut hs = Sha256::new();
     for (key, v) in db.store.read(|r| r.scan_prefix(BALANCE, &k(c).done()))? {
-        let b: Vec<u64> = (0..4).map(|i| u64::from_be_bytes(v[i * 8..i * 8 + 8].try_into().unwrap())).collect();
+        let b: Vec<u64> = (0..4).map(|i| be_u64(&v, i * 8)).collect();
         if b.iter().all(|x| *x == 0) {
             continue;
         }
         let addr = String::from_utf8_lossy(&key[2..key.len() - 5]);
-        let pid = u32::from_be_bytes(key[key.len() - 4..].try_into().unwrap());
+        let pid = be_u32(&key, key.len() - 4);
         hs.update(format!("{addr}|{pid}|{}|{}|{}|{}", b[0], b[1], b[2], b[3]).as_bytes());
     }
     for (_, v) in db.store.read(|r| r.scan_prefix(BOOK, &k(c).done()))? {

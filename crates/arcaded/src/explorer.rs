@@ -18,6 +18,7 @@ use arcade_chain::params::{by_key, ChainParams};
 use arcade_chain::{Block, Hash256, OutPoint, Tx};
 use arcade_ledger::{address, maps, names, ord, tokens};
 use arcade_store::KeyBuf;
+use arcade_store::key::be_u64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
@@ -182,10 +183,7 @@ pub fn handle(node: &Node, cmd: &str, req: &Value) -> R {
             x.need("names")?;
             let pre = KeyBuf::new().u16(x.c()).u8(0).done();
             let rows = scan_after(&x, names::WIN, pre.clone(), s("after"), n(50, 200) as usize);
-            Ok(json!({"counts": names::counts(&x.node.chain, x.c()), "items": rows.iter().map(|(k, v)| {
-                let id = ord::iid_str(&v[8..]);
-                json!({"name": String::from_utf8_lossy(&k[pre.len()..]), "number": u64::from_be_bytes(v[..8].try_into().unwrap()), "id": id})
-            }).collect::<Vec<_>>()}))
+            Ok(json!({"counts": names::counts(&x.node.chain, x.c()), "items": rows.iter().map(|(k, v)| name_row(pre.len(), k, v)).collect::<Vec<_>>()}))
         }
         "explorer.name" => {
             x.need("names")?;
@@ -202,12 +200,7 @@ pub fn handle(node: &Node, cmd: &str, req: &Value) -> R {
         "explorer.maps" => {
             x.need("maps")?;
             let rows = scan_after(&x, maps::MAP, KeyBuf::new().u16(x.c()).done(), s("after"), n(50, 200) as usize);
-            Ok(json!({"items": rows.iter().map(|(k, v)| {
-                let l = k[2] as usize;
-                let ns = String::from_utf8_lossy(&k[3..3 + l]);
-                let blk = u64::from_be_bytes(k[3 + l..11 + l].try_into().unwrap());
-                json!({"claim": format!("{blk}.{ns}"), "number": u64::from_be_bytes(v[..8].try_into().unwrap()), "id": ord::iid_str(&v[8..])})
-            }).collect::<Vec<_>>()}))
+            Ok(json!({"items": rows.iter().map(|(k, v)| map_row(k, v)).collect::<Vec<_>>()}))
         }
         "explorer.map" => {
             x.need("maps")?;
@@ -252,7 +245,7 @@ use arcade_ledger::engine as led;
 
 fn ledger_count(x: &Ctx) -> u64 {
     x.node.chain.store.read(|r| r.last_with_prefix(led::BY_NUMBER, &x.c().to_be_bytes())).ok().flatten()
-        .map(|(k, _)| u64::from_be_bytes(k[2..10].try_into().unwrap()) + 1).unwrap_or(0)
+        .map(|(k, _)| be_u64(&k, 2) + 1).unwrap_or(0)
 }
 
 /// Arcade token amounts: divisible tokens (type 2) have 8 decimals.
@@ -451,19 +444,25 @@ fn summary(x: &Ctx) -> R {
     if x.has("names") {
         let pre = KeyBuf::new().u16(c).u8(0).done();
         v["names"] = json!(names::counts(&x.node.chain, c));
-        v["name_rows"] = json!(scan_after(x, names::WIN, pre.clone(), None, 6).iter().map(|(k, b)| json!({
-            "name": String::from_utf8_lossy(&k[pre.len()..]), "number": u64::from_be_bytes(b[..8].try_into().unwrap()), "id": ord::iid_str(&b[8..])})).collect::<Vec<_>>());
+        v["name_rows"] = json!(scan_after(x, names::WIN, pre.clone(), None, 6).iter().map(|(k, b)| name_row(pre.len(), k, b)).collect::<Vec<_>>());
     }
     if x.has("maps") {
         let rows = scan_after(x, maps::MAP, KeyBuf::new().u16(c).done(), None, 6);
         v["maps"] = json!(x.node.chain.store.count(maps::MAP).unwrap_or(0));
-        v["map_rows"] = json!(rows.iter().map(|(k, b)| {
-            let l = k[2] as usize;
-            json!({"claim": format!("{}.{}", u64::from_be_bytes(k[3 + l..11 + l].try_into().unwrap()), String::from_utf8_lossy(&k[3..3 + l])),
-                   "number": u64::from_be_bytes(b[..8].try_into().unwrap()), "id": ord::iid_str(&b[8..])})
-        }).collect::<Vec<_>>());
+        v["map_rows"] = json!(rows.iter().map(|(k, b)| map_row(k, b)).collect::<Vec<_>>());
     }
     Ok(v)
+}
+
+/// A names::WIN row (key: prefix of `pre_len` bytes, then the name; value: number, id).
+fn name_row(pre_len: usize, k: &[u8], v: &[u8]) -> Value {
+    json!({"name": String::from_utf8_lossy(&k[pre_len..]), "number": be_u64(v, 0), "id": ord::iid_str(&v[8..])})
+}
+
+/// A maps::MAP row (key: C, namespace length, namespace, block u64; value: number, id).
+fn map_row(k: &[u8], v: &[u8]) -> Value {
+    let l = k[2] as usize;
+    json!({"claim": format!("{}.{}", be_u64(k, 3 + l), String::from_utf8_lossy(&k[3..3 + l])), "number": be_u64(v, 0), "id": ord::iid_str(&v[8..])})
 }
 
 /// A block: stored here, or (Shared storage) fetched from an arcade holding it and checked
@@ -741,7 +740,7 @@ fn search(x: &Ctx, q: &str) -> R {
         let pre = KeyBuf::new().u16(c).u8(0).bytes(w.as_bytes()).done();
         for (k, v) in x.node.chain.store.read(|r| r.scan_prefix_limit(names::WIN, &pre, 25)).unwrap_or_default() {
             let name = String::from_utf8_lossy(&k[3..]).into_owned();
-            items.push(json!({"kind": "name", "id": name, "label": name, "what": format!("name · inscription #{}", u64::from_be_bytes(v[..8].try_into().unwrap()))}));
+            items.push(json!({"kind": "name", "id": name, "label": name, "what": format!("name · inscription #{}", be_u64(&v, 0))}));
         }
     }
     if x.has("tokens") {
