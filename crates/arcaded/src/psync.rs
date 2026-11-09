@@ -65,6 +65,9 @@ struct State {
 /// whether blocks are 300 bytes or 1 MB (250 small blocks, or ~30 full Doginals-era ones).
 const JOB_BYTES: usize = 24 << 20;
 
+/// Raw block bytes a storing round takes at most.
+const ROUND_BYTES: usize = 200 << 20;
+
 /// Blocks per job for the recent block size (a small first job measures it).
 fn job_len(avg_block: usize) -> u32 {
     if avg_block == 0 {
@@ -113,6 +116,10 @@ pub struct Prefetched<'p> {
 }
 
 impl Prefetched<'_> {
+    fn cached_bytes(&self) -> usize {
+        self.cache.values().map(|r| r.len()).sum()
+    }
+
     /// Whether the next job in height order is already finished.
     fn ready_next(&self) -> bool {
         let st = self.pool.s.lock().unwrap();
@@ -176,8 +183,9 @@ impl BlockSource for Prefetched<'_> {
             self.pull(Duration::from_secs(420))?;
         }
         // Then every job already finished in order, so a round stores a big batch even when
-        // jobs are small (one job a round made many tiny commits).
-        while self.heads.len() < 2000 && self.ready_next() {
+        // jobs are small (one job a round made many tiny commits), up to ROUND_BYTES of blocks:
+        // full blocks are ~750 KB, and a round's blocks are held raw and parsed twice over.
+        while self.heads.len() < 2000 && self.cached_bytes() < ROUND_BYTES && self.ready_next() {
             self.pull(Duration::from_secs(1))?;
         }
         // Everything pulled so far, in order (the syncer takes up to 2,000 per round).
@@ -228,10 +236,17 @@ fn worker(pool: &Pool, name: String, mut src: Box<dyn BlockSource + Send + '_>) 
                     break j;
                 }
                 if ahead_ok {
-                    let j = st.queue.pop_front().unwrap();
+                    let mut j = st.queue.pop_front().unwrap();
                     // A doubled job that another source already delivered: skip it.
                     if j.start < st.want || st.ready.contains_key(&j.start) {
                         continue;
+                    }
+                    // Jobs are cut ahead of time; blocks may have grown since: take a job's
+                    // worth for today's block size and put the rest back at the front.
+                    let len = job_len(st.avg_block) as usize;
+                    if j.hashes.len() > len && !st.inflight.contains_key(&j.start) {
+                        let rest = j.hashes.split_off(len);
+                        st.queue.push_front(Job { start: j.start + len as u32, hashes: rest, tries: 0 });
                     }
                     st.inflight.entry(j.start).or_insert((j.hashes.clone(), Instant::now(), false));
                     break j;
