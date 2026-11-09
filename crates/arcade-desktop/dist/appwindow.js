@@ -15,12 +15,6 @@
     return;
   }
   const here = frame.split("/").pop();
-  const invoke = window.__TAURI__.core.invoke;
-  async function api(cmd, args = {}) {
-    const r = await invoke("api", { req: { cmd, ...args } });
-    if (!r.ok) throw new Error(r.error || "failed");
-    return r.result;
-  }
   let appState = { state: "open", timeout: null, closesAt: null, inShell: false };
 
   const perms = async () => (id ? await api("apps.perms", { id }) : {});

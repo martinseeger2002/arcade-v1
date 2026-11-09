@@ -1,25 +1,8 @@
 // Explorer tab + the chain selector in the header. Everything is read from this arcade's own
 // chain.mdbx through arcaded's explorer.* API: no outside service.
 (() => {
-  const $ = (id) => document.getElementById(id);
-  const invoke = window.__TAURI__.core.invoke;
-  const api = async (cmd, args = {}) => {
-    const r = await invoke("api", { req: { cmd, ...args } });
-    if (!r.ok) throw new Error(r.error || "failed");
-    return r.result;
-  };
-  const COLORS = { peptest: "#2e8b44", pep: "#3f9c55", doge: "#c2a633", dgb: "#0066cc", dgbtest: "#3388dd", kot: "#7a4cc2", flop: "#d0602a", ltc: "#345d9d", ltctest: "#5b7fb8", btc: "#f7931a" };
-  // What people call each coin (the keys underneath stay as the mesh knows them).
-  const TICKERS = { peptest: "PEPtest", pep: "PEP", doge: "DOGE", dgb: "DGB", dgbtest: "DGBtest", kot: "KOT", flop: "FLOP", ltc: "LTC", ltctest: "LTCtest", btc: "BTC", wjk: "WJK" };
-  const COIN_ICONS = ["peptest", "pep", "doge", "dgb", "dgbtest", "kot", "flop", "ltc", "ltctest", "btc", "wjk"];
-  const ICON_FILE = (k) => `coins/${k}.${k === "btc" ? "svg" : "png"}`;
   // A chain's coin: the original arcade's icon, or a letter on the chain's colour.
-  function coinEl(c) {
-    const e = document.createElement("span"); e.className = "coin";
-    if (COIN_ICONS.includes(c.key)) { const i = document.createElement("img"); i.src = ICON_FILE(c.key); i.alt = ""; e.append(i); e.classList.add("img"); }
-    else { e.style.background = COLORS[c.key] || "#777"; e.textContent = c.name[0]; }
-    return e;
-  }
+  const coinEl = (c) => coinLogo(c.key, c.name, "span", "coin");
   const SECTIONS = [
     ["home", "Overview"], ["blocks", "Blocks"], ["mempool", "Mempool"], ["inscriptions", "Inscriptions", "ord"],
     ["tokens", "Tokens", "tokens"], ["names", "Names", "names"], ["maps", "Maps", "maps"], ["ledger", "Arcade ledger", "ledger"],
@@ -32,18 +15,9 @@
   let chains = [], chain = null, sum = null, page = "home", arg = null, seq = 0;
 
   // ---------- helpers ----------
-  const h = (tag, attrs = {}, ...kids) => {
-    const e = document.createElement(tag);
-    for (const [k, v] of Object.entries(attrs || {})) {
-      if (v === undefined || v === null || v === false) continue;
-      if (k === "class") e.className = v; else if (k.startsWith("on")) e[k] = v; else e.setAttribute(k, v === true ? "" : v);
-    }
-    for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) e.append(k.nodeType ? k : document.createTextNode(String(k)));
-    return e;
-  };
   const fmt = (n) => (n ?? 0).toLocaleString("en-US");
   const short = (s, a = 10, b = 8) => (s && s.length > a + b + 1 ? s.slice(0, a) + "…" + s.slice(-b) : s || "");
-  const coins = (sats) => (sats / 1e8).toLocaleString("en-US", { maximumFractionDigits: 8 }) + " " + (sum?.unit || "");
+  const coins = (sats) => coinNum(sats, "en-US") + " " + (sum?.unit || "");
   const ago = (t) => {
     if (!t) return "";
     const s = Math.max(0, Math.floor(Date.now() / 1000 - t));

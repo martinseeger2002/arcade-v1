@@ -1,17 +1,9 @@
-// Arcade V1.0 desktop: everything goes through arcaded's local API (one JSON request each).
-const $ = (id) => document.getElementById(id);
-const invoke = window.__TAURI__.core.invoke;
-
-async function api(cmd, args = {}) {
-  const r = await invoke("api", { req: { cmd, ...args } });
-  if (!r.ok) throw new Error(r.error || "failed");
-  return r.result;
-}
+// Arcade V1.0 desktop: everything goes through arcaded's local API (one JSON request each);
+// $, api, h and the coin helpers are in common.js.
 
 // The chain picked at the top (explorer.js owns the picker); every tab follows it.
-const TICKER = { peptest: "PEPtest", pep: "PEP", doge: "DOGE", dgb: "DGB", dgbtest: "DGBtest", kot: "KOT", flop: "FLOP", ltc: "LTC", ltctest: "LTCtest", btc: "BTC", wjk: "WJK" };
 const picked = () => (window.arcadeChain && window.arcadeChain()) || { key: HOME.key, name: HOME.name, home: true };
-const coins = (sats, key) => (sats / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 }) + " " + (TICKER[key || picked().key] || "");
+const coins = (sats, key) => coinNum(sats) + " " + (TICKERS[key || picked().key] || "");
 window.addEventListener("arcade:chain", () => refresh());
 const short = (s, n = 12) => (s && s.length > n ? s.slice(0, n) + "…" : s || "");
 function msg(el, text, kind = "") { el.textContent = text; el.className = "msg " + kind; }

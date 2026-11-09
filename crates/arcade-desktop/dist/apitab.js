@@ -1,12 +1,5 @@
 // API tab: where sidecar apps and websites reach this arcade, and the website API keys.
 (() => {
-  const $ = (id) => document.getElementById(id);
-  const invoke = window.__TAURI__.core.invoke;
-  async function api(cmd, args = {}) {
-    const r = await invoke("api", { req: { cmd, ...args } });
-    if (!r.ok) throw new Error(r.error || "failed");
-    return r.result;
-  }
   const PERMS = [
     ["read", "Read private data", "your messages, groups, contacts, wallet addresses, activity"],
     ["message", "Messages", "send messages, groups, contacts and mutes"],
@@ -15,7 +8,7 @@
     ["wallet", "Wallet", "claim @tags, ask the faucet, link wallets"],
     ["admin", "Run the arcade", "chains, indexes, mining"],
   ];
-  function msg(t, bad) { const m = $("ap-msg"); m.textContent = t; m.className = "msg " + (bad ? "bad" : "ok"); }
+  const msg = (t, bad) => say("ap-msg", t, bad);
   $("ap-perms").replaceChildren(...PERMS.map(([k, t, d]) => {
     const l = document.createElement("label");
     l.innerHTML = `<input type="checkbox" value="${k}"><span><b></b><br><small class="s"></small></span>`;

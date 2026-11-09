@@ -1,28 +1,12 @@
 // Apps tab: the apps installed on this arcade, and the App Store of published app cards
 // (the original arcade's game cards). Each app opens in its own window, sandboxed.
 (() => {
-  const $ = (id) => document.getElementById(id);
-  const invoke = window.__TAURI__.core.invoke;
-  async function api(cmd, args = {}) {
-    const r = await invoke("api", { req: { cmd, ...args } });
-    if (!r.ok) throw new Error(r.error || "failed");
-    return r.result;
-  }
-  const h = (tag, attrs = {}, ...kids) => {
-    const e = document.createElement(tag);
-    for (const [k, v] of Object.entries(attrs || {})) {
-      if (v === undefined || v === null || v === false) continue;
-      if (k === "class") e.className = v; else if (k.startsWith("on")) e[k] = v; else e.setAttribute(k, v === true ? "" : v);
-    }
-    for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) e.append(k.nodeType ? k : document.createTextNode(String(k)));
-    return e;
-  };
   const PEP = homeCoins;
   const ago = (t) => { if (!t) return "waiting"; const s = Date.now() / 1000 - t; return s < 3600 ? `${Math.max(1, Math.round(s / 60))}m ago` : s < 172800 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`; };
   const PERMS = [["wallet", "Wallet access"], ["contacts", "Contacts"], ["groups", "Group chats"], ["media", "Camera & microphone"], ["pictures", "Pictures in the app"], ["notify", "Notifications"]];
   let view = "mine", sort = "popular", query = "", base = "http://127.0.0.1:8420", detail = null;
 
-  function note(t, bad) { const m = $("ap2-msg"); m.textContent = t; m.className = "msg " + (bad ? "bad" : "ok"); }
+  const note = (t, bad) => say("ap2-msg", t, bad);
 
   async function open(a) {
     try {
