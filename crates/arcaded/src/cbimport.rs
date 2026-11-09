@@ -41,8 +41,10 @@ pub fn prepare(node: Arc<Node>, key: String) {
         }
         let p = params(&key);
         let h = sn["h"].as_u64().ok_or("copy without height")? as u32;
-        headers_to(&node, p, h, &cancel, &|s| crate::coreboot::set_prep(&key, &s))?;
+        // An "all" copy carries every header (with its proof) in its blk files: they are
+        // checked from there once the pieces are in (take_in), so nothing is fetched here.
         if what == "coins" {
+            headers_to(&node, p, h, &cancel, &|s| crate::coreboot::set_prep(&key, &s))?;
             let tip = node.chain.tip(p.chain_no).map_err(|e| e.to_string())?.map(|t| t.height).ok_or("no genesis yet")?;
             if tip < h {
                 let path = node.chain.header_path(p.chain_no, tip + 1, h).map_err(|e| e.to_string())?;
@@ -132,7 +134,12 @@ fn headers_to(node: &Node, p: &'static ChainParams, h: u32, cancel: &AtomicBool,
     if best_height(node, c) >= h {
         Ok(())
     } else {
-        Err(format!("could not get our own headers up to the copy's height {h} (have {})", best_height(node, c)))
+        Err(format!(
+            "could not get our own headers up to the copy's height {h} (have {}). Without P2P peers, arcades send headers only with whole blocks; \
+             the full copy (blocks too) carries them: arcade chain copy start {} all",
+            best_height(node, c),
+            p.key
+        ))
     }
 }
 
@@ -205,6 +212,98 @@ fn fetch_blocks(node: &Node, p: &'static ChainParams, path: &[Hash256], cancel: 
         Ok(())
     } else {
         Err(format!("{left} blocks up to the copy's tip could not be fetched"))
+    }
+}
+
+/// Headers (with their AuxPoW) read from a copy's blk files, along the chain that ends at the
+/// copy's tip: a local header source, checked by the same code as any other.
+pub struct FileSource {
+    files: Vec<std::path::PathBuf>,
+    /// The copy's chain, genesis side first (only blocks found in the files).
+    main: Vec<(Hash256, usize, u64, u32)>,
+    pos: HashMap<Hash256, usize>,
+    fmt: arcade_chain::format::Format,
+}
+
+impl FileSource {
+    pub fn open(dir: &Path, p: &ChainParams, tip: Hash256) -> Result<FileSource, String> {
+        use std::io::{Read, Seek, SeekFrom};
+        if p.format.block_sig {
+            return Err(format!("{}: headers from block files are not read for this chain", p.name));
+        }
+        let (files, map) = index_blk_files(dir, p)?;
+        // Walk back from the tip by each header's parent.
+        let mut main = Vec::new();
+        let mut at = tip;
+        let mut handles: HashMap<usize, std::fs::File> = HashMap::new();
+        while let Some(&(fi, off, n)) = map.get(&at) {
+            main.push((at, fi, off, n));
+            let f = match handles.entry(fi) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => e.insert(std::fs::File::open(&files[fi]).map_err(|e| e.to_string())?),
+            };
+            let mut h80 = [0u8; 80];
+            f.seek(SeekFrom::Start(off)).map_err(|e| e.to_string())?;
+            f.read_exact(&mut h80).map_err(|e| e.to_string())?;
+            at = arcade_chain::Header::parse(&h80).prev;
+        }
+        if main.is_empty() {
+            return Err(format!("the copy's block files lack its tip {tip}"));
+        }
+        main.reverse();
+        let pos = main.iter().enumerate().map(|(i, x)| (x.0, i)).collect();
+        Ok(FileSource { files, main, pos, fmt: p.format.clone() })
+    }
+}
+
+impl BlockSource for FileSource {
+    fn get_headers(&mut self, locator: &[Hash256]) -> Result<Vec<arcade_chain::p2p::HeaderEntry>, String> {
+        use std::io::{Read, Seek, SeekFrom};
+        // After the first locator entry on the copy's chain; from its start if none is (its
+        // first block's parent is then what we must already have).
+        let from = locator.iter().find_map(|h| self.pos.get(h).map(|i| i + 1)).unwrap_or(0);
+        let mut out = Vec::new();
+        for &(_, fi, off, n) in self.main.iter().skip(from).take(2000) {
+            let mut f = std::fs::File::open(&self.files[fi]).map_err(|e| e.to_string())?;
+            let mut raw = vec![0u8; n as usize];
+            f.seek(SeekFrom::Start(off)).map_err(|e| e.to_string())?;
+            f.read_exact(&mut raw).map_err(|e| e.to_string())?;
+            // A block starts as a headers entry does: header [+ AuxPoW] + tx count.
+            let mut one = vec![1u8];
+            one.extend_from_slice(&raw);
+            out.extend(arcade_chain::p2p::parse_headers(&one, &self.fmt).map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+    fn get_blocks(&mut self, _hashes: &[Hash256]) -> Result<Vec<Vec<u8>>, String> {
+        Err("headers only".into())
+    }
+    fn describe(&self) -> String {
+        "the copy's block files".into()
+    }
+}
+
+/// Our own headers up to `h` from one source, until it has no more.
+fn headers_from(node: &Node, p: &'static ChainParams, src: &mut dyn BlockSource, h: u32, cancel: &AtomicBool, note: &dyn Fn(String)) -> Result<(), String> {
+    let c = p.chain_no;
+    let syncer = Syncer::new(&node.chain, p);
+    if node.chain.tip(c).ok().flatten().is_none() {
+        let _ = syncer.ensure_genesis(src);
+    }
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        let at = best_height(node, c);
+        if at >= h {
+            return Ok(());
+        }
+        note(format!("headers {at} of {h} (checked by proof of work) from {}", src.describe()));
+        match syncer.sync_headers_once(src) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {}
+            Err(e) => return Err(format!("headers from {}: {e}", src.describe())),
+        }
     }
 }
 
@@ -344,6 +443,15 @@ fn take_in(node: &Node, key: &str) -> Result<String, String> {
     if !crate::coreboot::wait_parked(key, node, Duration::from_secs(1800)) {
         return Err("the chain's sync did not stop".into());
     }
+    let data = dir.join("data");
+    if what == "all" && best_height(node, c) < h {
+        set("import", "headers from the copy's block files".into());
+        let mut src = FileSource::open(&data.join("blocks"), p, hash)?;
+        headers_from(node, p, &mut src, h, &cancel, &|s| set("import", s))?;
+        if best_height(node, c) < h {
+            headers_to(node, p, h, &cancel, &|s| set("import", s))?;
+        }
+    }
     let tip = node.chain.tip(c).map_err(|e| e.to_string())?.ok_or("no genesis yet")?;
     if tip.height >= h {
         return Ok(format!("{}: already at {} (past the copy's {h}); copy not needed", p.name, tip.height));
@@ -356,7 +464,6 @@ fn take_in(node: &Node, key: &str) -> Result<String, String> {
     if node.chain.header(c, &path[0]).map_err(|e| e.to_string())?.map(|r| r.header.prev) != Some(tip.hash) {
         return Err("our tip is not on our best header chain (a reorg?); try again later".into());
     }
-    let data = dir.join("data");
     if what == "all" {
         set("import", "blocks from the copy's files".into());
         blocks_from_files(&node.chain, p, &data.join("blocks"), &path, &cancel, &|s| set("import", s))?;
