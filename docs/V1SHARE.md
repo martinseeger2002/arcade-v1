@@ -24,7 +24,7 @@ Every V1.0 arcade that shares a chain makes its copies **at the same heights** (
 That gives three things at once:
 1. **Swarm:** a new install fetches pieces from **every** arcade holding that id, 6 at a time from each. Ten V1.0 arcades → about ten times the speed of one.
 2. **Trust for free:** the same id announced by 2 or more arcades that each **made** it from their own rows is the "2 or more agree" check, with no separate digest to compute or ask for.
-3. **Re-seeding:** an arcade that took a copy in keeps its pieces and serves them under the same id until its own next checkpoint copy replaces them.
+3. **Re-seeding:** an arcade that took a copy in can keep its pieces and serve them under the same id until its own next checkpoint copy replaces them (optional: by default pieces are deleted once imported, §5.0).
 
 What makes a copy identical everywhere:
 - **Checkpoint heights:** multiples of a per-chain interval `K`, about one a day (§3).
@@ -82,6 +82,17 @@ Manifest (canonical JSON, id = sha256 of it):
 5. Then any index copies the operator chose (addresses, ord, ledger, messages), the same way.
 
 Each step is resumable and can be cancelled. A failed check refuses that id, and its makers are named in the events.
+
+### 5.0 Import speed: the receiver's disk and CPU are the limit
+
+Martin (2026-11-09): fetching from several arcades at once brings data faster than it can be processed, so the import is what to make fast:
+1. **No replay.** Rows go straight into the tables. Blocks are checked only against our headers (merkle root); scripts and coin lookups are left to the background check (§6).
+2. **Write in key order.** Rows come sorted, so they are written with `WriteTxn::append` (pages filled, never split), in large write transactions. That is the cheapest way to write mdbx, as the old-arcade ord import showed.
+3. **Every core works.** Inflating and checking pieces (zlib, sha256) runs on all cores in parallel; one writer feeds mdbx in order.
+4. **Import while fetching.** Pieces are taken in, in order, as they arrive; nothing waits for the whole copy.
+5. **Back-pressure.** The fetcher keeps only a window of pieces ahead of the writer (about 512 MB), so a fast swarm never fills the disk with pieces waiting their turn.
+6. **Written once.** By default a piece is deleted once it is in the tables (no second copy on disk, and the disk only writes the data once). The arcade serves its own identical copy from its next checkpoint (§3). Keeping the pieces to re-seed at once is an option for machines with room.
+7. **Measured:** the import's own rate (MB/s of rows written) shows in status next to the download rate, so it's clear which one is the limit.
 
 ### 5.1 Only the parts you pick
 
