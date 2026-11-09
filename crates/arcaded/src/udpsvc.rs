@@ -1011,6 +1011,10 @@ fn intro_path(node: &Node, peer: &str, n: &str, eph: &x25519_dalek::StaticSecret
 }
 
 fn on_ui(node: &Node, from_link: &str, h: &Value) {
+    // Every introduction frame that reaches us, before any check (they arrive rarely).
+    if h["to"].as_str() == Some(me(node).as_str()) {
+        eprintln!("ui {} from {} via {} (ts {}, hops {})", h["op"], h["from"].as_str().map(short).unwrap_or_default(), short(from_link), h["ts"], h["hops"]);
+    }
     let (Some(op), Some(to), Some(from), Some(n)) = (h["op"].as_str(), h["to"].as_str(), h["from"].as_str(), h["n"].as_str()) else { return };
     if !(op == "hi" || op == "yes") || !is_hex(to, 64) || !is_hex(from, 64) || !is_hex(n, 16) || !h["x"].as_str().is_some_and(|x| is_hex(x, 64)) {
         return;
