@@ -23,9 +23,16 @@ pub const UPDATE: &str = "\u{0}arcade-group-v1/1\n";
 /// Body field naming the members a line adds (V1.0; the invite went to them alone).
 pub const ADDED_KEY: &str = "v1_added";
 
+#[cfg(test)]
+#[test]
+fn gid_is_unchanged() {
+    // sha256(bytes([1]*32)).hexdigest()[:16]: group ids are user-visible, must not change.
+    assert_eq!(gid(&[1; 32]), "72cd6e8422c407fb");
+    assert_eq!(gid(&core::array::from_fn(|i| i as u8)), "630dcd2966c43366");
+}
+
 fn gid(public: &[u8; 32]) -> String {
-    use sha2::Digest;
-    hex::encode(&sha2::Sha256::digest(public)[..8])
+    arcade_msg::keys::key_id(public)
 }
 
 /// Every group we hold (newest key of each lineage marked "current").

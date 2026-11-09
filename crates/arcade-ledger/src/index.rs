@@ -13,7 +13,6 @@ use arcade_chaindb::undo::Logged;
 use arcade_chaindb::{BlockCtx, Indexer};
 use arcade_store::{KeyBuf, Result, TableDef};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 pub const TAG: &str = "ledger.v1.tag";
 pub const TAG_BY_ADDRESS: &str = "ledger.v1.tag_by_address";
@@ -233,10 +232,7 @@ pub fn parse_announcement(payload: &[u8]) -> Option<Announcement> {
     Some(a)
 }
 
-pub fn fingerprint(pubkey: &[u8; 32]) -> String {
-    let h = hex::encode(&Sha256::digest(pubkey)[..8]);
-    h.as_bytes().chunks(4).map(|c| std::str::from_utf8(c).unwrap()).collect::<Vec<_>>().join(" ")
-}
+pub use arcade_msg::keys::fingerprint;
 
 /// The "other" Pepecoin network's key-hash version (test <-> main).
 fn other_version(p: &ChainParams) -> Option<u8> {
@@ -361,5 +357,8 @@ mod tests {
         assert_eq!(a.doge_h160, Some([4; 20]));
         assert_eq!(a.chains, vec![("dgb".to_string(), [5; 20])]);
         assert_eq!(fingerprint(&[7; 32]).len(), 19);
+        // sha256(bytes([1]*32)).hexdigest()[:16] grouped: user-visible, must not change.
+        assert_eq!(fingerprint(&[1; 32]), "72cd 6e84 22c4 07fb");
+        assert_eq!(fingerprint(&core::array::from_fn(|i| i as u8)), "630d cd29 66c4 3366");
     }
 }
