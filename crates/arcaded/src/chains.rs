@@ -771,6 +771,46 @@ fn mesh_first(node: &Arc<Node>, run: &ChainRun, syncer: &Syncer) {
     }
 }
 
+/// Bring the chain's indexes up to the stored tip, 500 blocks at a time. Runs after each P2P
+/// sync pass and also when the coin's P2P network can't be reached (blocks then come from the
+/// arcade mesh, and the indexes must still walk them). False when stopped or a copy is being
+/// taken in, so the caller starts over.
+fn walk_indexes(node: &Node, run: &ChainRun) -> bool {
+    let p = run.params;
+    // Far behind, the chain comes in first; the indexes walk it once it has caught up.
+    if node.far_behind(p) {
+        return true;
+    }
+    let mut names: Vec<&str> = run.indexes.iter().map(|i| indexer_name(i)).filter(|n| !n.is_empty()).collect();
+    names.dedup();
+    for name in names {
+        loop {
+            if run.stop.load(Ordering::Relaxed) || run.paused.load(Ordering::Relaxed) || crate::coreboot::held(p.key) {
+                return false;
+            }
+            if run.mode == "shared" {
+                if let Err(e) = crate::shares::prepare_backfill(node, p, name, 500) {
+                    *run.state.lock().unwrap() = format!("{name}: waiting for blocks held by other arcades: {e}");
+                }
+            }
+            let more = match node.chain.backfill(p, name, 500) {
+                Ok(n) => n > 0,
+                Err(e) => {
+                    let msg = format!("{} {name} index: {e}", p.name);
+                    eprintln!("{msg}");
+                    *run.state.lock().unwrap() = msg;
+                    false
+                }
+            };
+            std::thread::sleep(Duration::from_millis(30));
+            if !more {
+                break;
+            }
+        }
+    }
+    true
+}
+
 fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
     let p = run.params;
     let syncer = Syncer::new(&node.chain, p);
@@ -802,6 +842,8 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
         }
         let Some(mut peer) = node.coin_candidates(p).iter().find_map(|a| Peer::connect(p, a, Duration::from_secs(20)).ok()) else {
             set(format!("no {} peer reachable; retrying", p.name));
+            // New blocks come from the arcade mesh then: the indexes still walk what is stored.
+            walk_indexes(&node, &run);
             std::thread::sleep(Duration::from_secs(20));
             continue;
         };
@@ -828,6 +870,7 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
                         set(format!("synced at {tip} · new blocks from the arcade mesh ({} P2P doesn't answer)", p.name));
                         *run.source.lock().unwrap() = format!("arcade mesh ({} P2P doesn't answer)", p.name);
                     }
+                    walk_indexes(&node, &run);
                     continue 'outer;
                 }
             };
@@ -838,27 +881,8 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
                     continue 'outer;
                 }
             };
-            let mut names: Vec<&str> = run.indexes.iter().map(|i| indexer_name(i)).filter(|n| !n.is_empty()).collect();
-            names.dedup();
-            // Far behind, the chain comes in first; the indexes walk it once it has caught up.
-            if node.far_behind(p) {
-                names.clear();
-            }
-            for name in names {
-                while {
-                    if run.mode == "shared" {
-                        if let Err(e) = crate::shares::prepare_backfill(&node, p, name, 500) {
-                            set(format!("{name}: waiting for blocks held by other arcades: {e}"));
-                        }
-                    }
-                    let more = node.chain.backfill(p, name, 500).map(|x| x > 0).unwrap_or(false);
-                    std::thread::sleep(Duration::from_millis(30));
-                    more
-                } {
-                    if run.stop.load(Ordering::Relaxed) || crate::coreboot::held(p.key) {
-                        continue 'outer;
-                    }
-                }
+            if !walk_indexes(&node, &run) {
+                continue 'outer;
             }
             if run.mode == "shared" && last_balance.elapsed() > Duration::from_secs(crate::shares::every()) {
                 match crate::shares::balance(&node, p) {
