@@ -1,6 +1,6 @@
 # Faster coin-cache flushes: the tx index while catching up — PLAN
 
-Status: **plan for Martin's approval; nothing built.** Written 2026-11-09 on the GX10 from the JB20B session's findings.
+Status: **plan for Martin's approval; nothing built** (a read-only counter, examples/txlive.rs, for step 1). Written 2026-11-09 on the GX10 from the JB20B session's findings.
 
 ## What the JB20B saw
 
@@ -26,33 +26,51 @@ So the tx index is far bigger than memory (the database is ~30 × RAM). Random t
   - Only txs fully spent within the cache can wait. Those are already logged and indexed after the catch-up in one sorted pass: the "618,214 put off".
   - The other ~3.9 M rows per flush are txs that still have coins.
 
-## The plan
+## Step 1 measured (JB20B, Dogecoin at 5,343,559, read-only, 907 s)
 
-### 1. Measure first (read-only)
-On a copy of a Dogecoin database (or on the JB20B, read-only, with Martin's OK):
-- **How many txs still have unspent outputs** (distinct block+position in `outputs`) compared with all tx index rows. That is the size of the "live" index below.
-- **Page cache:** confirmed from the JB20B's numbers above (index far bigger than RAM). Still to count: txs with unspent outputs against all tx rows, which needs a scan of a Dogecoin database.
+| | Rows |
+|---|---|
+| tx index rows | 325,323,534 |
+| unspent coins | 187,807,436 |
+| txs with an unspent coin | 168,533,179 (**51.8%**) |
 
-### 2. A small "live" tx index while catching up
-- **New table** `core.v1.live_txs` (txid prefix → block and position), the same rows as `core.v1.txs` but only for **txs that still have an unspent coin**.
-- **While catching up** (more than `DEFER_BEHIND` = 20,000 blocks behind, as addresses already are):
-  - a flush writes new txs' rows into `live_txs` instead of `txs`, and logs every row (`TXROW` in `addr_log`, as the fully spent ones are now) for the final sorted build;
-  - a tx whose last coin a flush deletes leaves `live_txs`. The flush already deletes those coins in key order, and whether any coin of that tx is left is a cheap look at the dense `outputs` rows next to it.
-- **Finding a tx** (`locate`): the cache, then `live_txs`, then `txs`.
-- Why it's faster: `live_txs` holds only txs with unspent coins. That is far fewer rows than the whole history (step 1 gives the number), so many more of its pages stay in memory.
+(Pepecoin testnet: 97.7%, mostly unspent coinbases.)
 
-### 3. One sorted build at the end
-- When the chain gets within 20,000 blocks of the tip, the logged rows are sorted in runs and written to `txs` in key order, as `addrbuild` does now. Pages are written once, in order.
-- Then `live_txs` is emptied and the follower goes back to writing `txs` directly.
-- Until then, **lookups of old fully spent txs** by txid (explorer pages) aren't possible, the same as addresses during a catch-up now.
+So a "live" tx index would still be ~168 M rows, far bigger than memory, with the same random writes. At best it about halves the cost. **Dropped as the main idea.**
 
-### 4. Checks
-- **Unit test:** a chain caught up with the live index and one caught up the old way get the same `txs` and `outputs` rows, byte for byte. The V1SHARE copies make this easy to compare: equal copy ids.
-- **Crash test:** kill during a flush and during the final build; on restart the tip winds back to `coins_at` and the build resumes.
-- **Timing:** the same Dogecoin stretch with `ARCADE_SYNC_TIMES=1` before and after, comparing flush parts.
+## Why every row is expensive
+- The index has ~325 M rows in roughly 3 M leaf pages. A flush brings ~4.5 M sorted rows, so almost every row lands on a different page.
+- Each write copies that 4 KB page (copy-on-write) and writes it back: about 4 KB of random disk I/O per 20-byte row.
+- **A bigger cache barely helps.** Rows only start sharing pages when a flush has many more rows than the tree has pages.
+
+## The plan: write the tx index sequentially while catching up (sorted levels)
+
+The standard fix for many random inserts into a big index (an "LSM tree"):
+
+1. **Each flush writes its tx rows as a new sorted run**, appended in key order to its own small table (`core.v1.txs_run.<n>`, written with `append`). That is sequential: one page per ~200 rows instead of one per row.
+2. **Runs are merged in levels** (like 2048-way sorting in rounds). When ~8 runs of a size pile up, they are merged into one run of the next level, in one sequential pass. Every row is rewritten ~log₈(325 M / 4.5 M) ≈ 2–3 times, always sequentially. Merges run in the background between flushes.
+3. **Finding a tx** (a spend's lookup) checks the cache, then the runs from newest to oldest. Each run has a **filter in memory** (a Bloom filter, ~10 bits a row: ~400 MB for all 325 M rows). The filter says "not here" for almost every run, so a lookup touches about one run on disk, the same as now.
+4. **At the end of the catch-up**, the levels are merged once into `core.v1.txs` (sequential), the runs and filters are dropped, and the follower writes `txs` directly again as it does at the tip now.
+5. **Crash safety:**
+   - a run is written and recorded in the same transaction as its flush;
+   - a merge writes its new run, then deletes the old ones in one commit;
+   - filters are rebuilt from the runs at start.
+6. **Other uses of the index while catching up** (explorer lookups by txid) go through the same lookup and keep working.
+
+**Expected:** a flush's tx-index part goes from ~217 s to the time it takes to write ~100 MB sequentially plus a share of the merges. That's seconds rather than minutes, so the ~25% of sync time spent flushing mostly goes away. Still to be measured.
+
+### Steps (each a PR)
+1. **Prototype and measure** on the GX10 without touching the JB20B. Sync Pepecoin mainnet (real use, millions of txs) from zero twice, once with today's index and once with sorted runs, with `ARCADE_SYNC_TIMES=1`, and compare flush times.
+2. **The final build:** the result must equal a normal sync byte for byte. A V1.0 copy id comparison of blocks, coins and (new) the tx index shows it.
+3. **On the JB20B** only with Martin's word: a build with this, for the rest of Dogecoin's catch-up.
+
+### Checks
+- **Unit tests:** a lookup finds every tx through any mix of runs and levels; duplicate txids keep the newest (BIP30), as `locate` does now.
+- **Crash test:** kill during a flush, a merge and the final build; restart finds the same rows.
+- **Equality:** a chain caught up with runs and one caught up the old way give the same `txs` and `outputs`.
 
 ## Not touched without Martin's word
 The JB20B's running arcaded and its `var/`. Anything measured there is read-only, and only when Martin says so.
 
 ## Open question for Martin
-1. Measure on the JB20B's live Dogecoin database (read-only: a count of rows, no writes), or only on a copy elsewhere?
+1. Build the prototype (step 1, GX10 only), or wait until the mini PC has finished Dogecoin?
