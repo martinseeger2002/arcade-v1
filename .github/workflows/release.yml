@@ -1,0 +1,98 @@
+# Prebuilt Linux downloads for the one-line installer (scripts/install.sh).
+#
+# Push a tag like v0.1.1 (or run this workflow by hand with a version) and it builds arcaded, arcade and
+# arcade-desktop for x86_64 and aarch64 on Ubuntu 22.04 (glibc 2.35: runs on Ubuntu 22.04+, Mint 21+, Debian 12+),
+# packs each with the icon and scripts/install-linux.sh, and attaches them to the GitHub release:
+#   arcade-v1-linux-x86_64.tar.gz   (+ .sha256)
+#   arcade-v1-linux-aarch64.tar.gz  (+ .sha256)
+# install.sh downloads releases/latest/download/arcade-v1-linux-<arch>.tar.gz and checks its sha256.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to create, e.g. v0.1.1"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q build-essential pkg-config clang libclang-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev
+
+      - name: Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.arch }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build
+        run: |
+          export LIBCLANG_PATH="$(dirname "$(ls /usr/lib/llvm-*/lib/libclang.so* | head -1)")"
+          export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"
+          cargo build --release --locked -p arcaded -p arcade-cli -p arcade-desktop
+
+      - name: Package
+        run: |
+          name=arcade-v1-linux-${{ matrix.arch }}
+          mkdir -p "$name/bin" "$name/scripts"
+          cp target/release/arcaded target/release/arcade target/release/arcade-desktop "$name/bin/"
+          strip "$name"/bin/*
+          cp crates/arcade-desktop/icons/icon.png "$name/icon.png"
+          cp scripts/install-linux.sh "$name/scripts/"
+          git rev-parse HEAD > "$name/COMMIT"
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arcade-v1-linux-${{ matrix.arch }}
+          path: arcade-v1-linux-${{ matrix.arch }}.tar.gz*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.version || github.ref_name }}
+        run: |
+          ls -la
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" arcade-v1-linux-* --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" arcade-v1-linux-* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "Arcade V1.0 $TAG" \
+              --notes "Prebuilt Linux downloads (x86_64, aarch64). Install: curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/scripts/install.sh | bash"
+          fi

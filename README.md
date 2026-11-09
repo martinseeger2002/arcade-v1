@@ -10,7 +10,7 @@ Paste this one command into a terminal:
 curl -fsSL https://raw.githubusercontent.com/martinseeger2002/arcade-v1/main/scripts/install.sh | bash
 ```
 
-That's all. If build tools are missing, it installs them with apt, asking for your password once. It installs Rust for your user if it's missing, fetches the source into `~/.local/share/arcade-v1-src`, and builds and installs:
+That's all. It downloads the newest ready-made release for your PC (Intel/AMD or ARM), checks its checksum, and installs it in seconds, with nothing to compile. It installs:
 
 - **arcaded**, the arcade service, started now and at every login (`systemctl --user status arcaded`);
 - **arcade**, the command line (`arcade status`, `arcade setup`, ...);
@@ -18,11 +18,19 @@ That's all. If build tools are missing, it installs them with apt, asking for yo
 
 Everything goes in your home folder: programs in `~/.local/bin`, data in `~/.local/share/arcade`. Run the same command again to update.
 
-### What it installs with apt
+### Requirements
 
-When any of these are missing, it installs them: `build-essential pkg-config clang libclang-dev libwebkit2gtk-4.1-dev libgtk-3-dev`. Older releases such as Ubuntu 20.04 and Mint 20 have no `libwebkit2gtk-4.1`; there it skips the desktop app and installs the rest. On a system without apt, install the same tools with your package manager first.
+The ready-made downloads run on Ubuntu 22.04 or newer, Linux Mint 21 or newer, Debian 12 or newer, and similar. The app window uses the system's web engine (`libwebkit2gtk-4.1-0`). Most desktops already have it; if yours doesn't, the installer adds it with apt, asking for your password once.
 
-The first build takes a while: about 10 to 20 minutes on an older laptop. Updates are faster.
+### Building from source instead
+
+It builds from source by itself when there's no download for your PC or the download doesn't run on your Linux. To force a build, run it as `... | ARCADE_BUILD=1 bash`.
+
+A build installs what it needs with apt (`build-essential pkg-config clang libclang-dev libwebkit2gtk-4.1-dev libgtk-3-dev`, asking for your password once) and Rust for your user. The first build takes 10 to 20 minutes on an older laptop. On older releases without `libwebkit2gtk-4.1` (Ubuntu 20.04, Mint 20), it skips the desktop app and installs the rest.
+
+### Making a release
+
+Push a tag such as `v0.1.1`, or run the **release** workflow on GitHub (Actions → release → Run workflow). It builds for x86_64 and aarch64 on Ubuntu 22.04 and attaches `arcade-v1-linux-<arch>.tar.gz` and its `.sha256` to the release. The installer always takes the latest release.
 
 ### After it's installed
 

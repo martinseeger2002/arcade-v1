@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Arcade V1.0: build and install for the current user on Linux, no sudo needed for the install itself.
 #
-#   scripts/install-linux.sh [--no-desktop] [--home DIR] [--http-port N] [--mesh-port N] [--stun-port N]
+#   scripts/install-linux.sh [--prebuilt DIR] [--no-desktop] [--home DIR] [--http-port N] [--mesh-port N] [--stun-port N]
 #
 # What it does:
-#   1. builds arcaded (the service), arcade (the CLI) and arcade-desktop (the app window), release mode;
+#   1. builds arcaded (the service), arcade (the CLI) and arcade-desktop (the app window), release mode -- or, with
+#      --prebuilt DIR, takes them ready-made from DIR/bin (a release download, see .github/workflows/release.yml);
 #   2. installs them in ~/.local/bin;
 #   3. installs the app icon (crates/arcade-desktop/icons/icon.png) into the user's icon theme, and an
 #      "Arcade V1.0" launcher in the app menu that opens the desktop app with that icon;
@@ -25,11 +26,13 @@ ICONS="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps"
 UNITS="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 HOME_DIR="${ARCADE_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/arcade}"
 DESKTOP=1
+PREBUILT=""
 HTTP_PORT="" MESH_PORT="" STUN_PORT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-desktop) DESKTOP=0 ;;
+    --prebuilt) PREBUILT="$(cd "$2" && pwd)"; shift ;;
     --home) HOME_DIR="$2"; shift ;;
     --http-port) HTTP_PORT="$2"; shift ;;
     --mesh-port) MESH_PORT="$2"; shift ;;
@@ -45,50 +48,81 @@ taken_tcp() { ss -Hltn "sport = :$1" 2>/dev/null | grep -q .; }
 taken_udp() { ss -Hlun "sport = :$1" 2>/dev/null | grep -q .; }
 free_tcp() { local p="$1"; while taken_tcp "$p"; do p=$((p + 10)); done; echo "$p"; }
 
-# --- the toolchain --------------------------------------------------------------------------------------------------
-CARGO="$(command -v cargo || true)"
-[ -z "$CARGO" ] && [ -x "$HOME/.cargo/bin/cargo" ] && CARGO="$HOME/.cargo/bin/cargo"
-if [ -z "$CARGO" ]; then
-  echo "Rust is not installed. Install it with:" >&2
-  echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh" >&2
-  exit 1
-fi
-# mdbx-sys makes its bindings with libclang, which cannot always find the compiler's own headers (stdarg.h).
-if [ -z "${LIBCLANG_PATH:-}" ]; then
-  for d in /usr/lib/llvm-*/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu; do
-    if ls "$d"/libclang*.so* >/dev/null 2>&1; then export LIBCLANG_PATH="$d"; fi
+if [ -n "$PREBUILT" ]; then
+  # --- ready-made programs ------------------------------------------------------------------------------------------
+  FROM="$PREBUILT/bin"
+  ICON_SRC="$PREBUILT/icon.png"
+  for b in arcaded arcade; do
+    if [ ! -x "$FROM/$b" ] || ldd "$FROM/$b" 2>&1 | grep -q "not found"; then
+      echo "The prebuilt $b does not run on this system (too old a Linux?). Build from source instead:" >&2
+      echo "  ARCADE_BUILD=1 bash install.sh" >&2
+      exit 3
+    fi
   done
-fi
-if [ -z "${BINDGEN_EXTRA_CLANG_ARGS:-}" ] && command -v gcc >/dev/null; then
-  export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"
-fi
-
-PKGS=(-p arcaded -p arcade-cli)
-if [ "$DESKTOP" = 1 ]; then
-  if pkg-config --exists webkit2gtk-4.1 gtk+-3.0 2>/dev/null; then
-    PKGS+=(-p arcade-desktop)
-  else
-    say "The desktop app needs the GTK/WebKit build files; skipping it. To add it later:"
-    echo "  sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev   # then run this script again"
-    DESKTOP=0
+  if [ "$DESKTOP" = 1 ]; then
+    if [ ! -x "$FROM/arcade-desktop" ]; then
+      DESKTOP=0
+    elif ldd "$FROM/arcade-desktop" 2>&1 | grep -q "not found"; then
+      # The app window needs the system's web engine (WebKitGTK 4.1) and GTK 3 at run time, nothing to build.
+      if command -v apt-get >/dev/null && apt-cache show libwebkit2gtk-4.1-0 >/dev/null 2>&1; then
+        say "The app window needs the system web engine (libwebkit2gtk-4.1-0). sudo will ask for your password:"
+        if [ "$(id -u)" = 0 ]; then SUDO=(); else SUDO=(sudo); fi
+        "${SUDO[@]}" apt-get install -y -q libwebkit2gtk-4.1-0 libgtk-3-0 || true
+      fi
+      if ldd "$FROM/arcade-desktop" 2>&1 | grep -q "not found"; then
+        say "The desktop app can't run here (no WebKitGTK 4.1); skipping it. Everything else installs."
+        DESKTOP=0
+      fi
+    fi
   fi
-fi
+else
+  # --- the toolchain --------------------------------------------------------------------------------------------------
+  CARGO="$(command -v cargo || true)"
+  [ -z "$CARGO" ] && [ -x "$HOME/.cargo/bin/cargo" ] && CARGO="$HOME/.cargo/bin/cargo"
+  if [ -z "$CARGO" ]; then
+    echo "Rust is not installed. Install it with:" >&2
+    echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh" >&2
+    exit 1
+  fi
+  # mdbx-sys makes its bindings with libclang, which cannot always find the compiler's own headers (stdarg.h).
+  if [ -z "${LIBCLANG_PATH:-}" ]; then
+    for d in /usr/lib/llvm-*/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu; do
+      if ls "$d"/libclang*.so* >/dev/null 2>&1; then export LIBCLANG_PATH="$d"; fi
+    done
+  fi
+  if [ -z "${BINDGEN_EXTRA_CLANG_ARGS:-}" ] && command -v gcc >/dev/null; then
+    export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"
+  fi
 
-# --- build ----------------------------------------------------------------------------------------------------------
-say "Building ${PKGS[*]//-p /} (release)..."
-(cd "$ROOT" && "$CARGO" build --release "${PKGS[@]}")
+  PKGS=(-p arcaded -p arcade-cli)
+  if [ "$DESKTOP" = 1 ]; then
+    if pkg-config --exists webkit2gtk-4.1 gtk+-3.0 2>/dev/null; then
+      PKGS+=(-p arcade-desktop)
+    else
+      say "The desktop app needs the GTK/WebKit build files; skipping it. To add it later:"
+      echo "  sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev   # then run this script again"
+      DESKTOP=0
+    fi
+  fi
+
+  # --- build ----------------------------------------------------------------------------------------------------------
+  say "Building ${PKGS[*]//-p /} (release)..."
+  (cd "$ROOT" && "$CARGO" build --release "${PKGS[@]}")
+  FROM="$ROOT/target/release"
+  ICON_SRC="$ROOT/crates/arcade-desktop/icons/icon.png"
+fi
 
 # --- install --------------------------------------------------------------------------------------------------------
 mkdir -p "$BIN" "$HOME_DIR"
 # Stop the service first so its binary can be replaced.
 systemctl --user stop arcaded.service 2>/dev/null || true
-install -m 0755 "$ROOT/target/release/arcaded" "$BIN/arcaded"
-install -m 0755 "$ROOT/target/release/arcade" "$BIN/arcade"
+install -m 0755 "$FROM/arcaded" "$BIN/arcaded"
+install -m 0755 "$FROM/arcade" "$BIN/arcade"
 
 if [ "$DESKTOP" = 1 ]; then
-  install -m 0755 "$ROOT/target/release/arcade-desktop" "$BIN/arcade-desktop"
+  install -m 0755 "$FROM/arcade-desktop" "$BIN/arcade-desktop"
   mkdir -p "$ICONS" "$APPS"
-  install -m 0644 "$ROOT/crates/arcade-desktop/icons/icon.png" "$ICONS/arcade-v1.png"
+  install -m 0644 "$ICON_SRC" "$ICONS/arcade-v1.png"
   # WebKitGTK draws a blank window on some NVIDIA drivers unless its DMA-BUF renderer is off.
   ENV_LINE="ARCADE_HOME=$HOME_DIR"
   [ -e /proc/driver/nvidia ] && ENV_LINE="$ENV_LINE WEBKIT_DISABLE_DMABUF_RENDERER=1"
