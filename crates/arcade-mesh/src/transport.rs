@@ -7,6 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const MAX_FRAME: usize = 64 * 1024;
+/// Largest frame taken in. We send at most MAX_FRAME (the protocol's limit), but old arcades
+/// send their chunk words on link-up in 500-row "dx dn" frames of ~73 KB (the rows grew a
+/// notes digest after the row count was chosen); refusing those dropped the link.
+pub const MAX_INBOUND: usize = 256 * 1024;
 pub const MAX_WS_MESSAGE: usize = 128 * 1024;
 
 pub trait Transport: Send {
@@ -49,7 +53,7 @@ impl Transport for Tcp {
         let mut l = [0u8; 4];
         self.stream.read_exact(&mut l)?;
         let n = u32::from_be_bytes(l) as usize;
-        if n > MAX_FRAME {
+        if n > MAX_INBOUND {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
         }
         let mut b = vec![0u8; n];
@@ -231,7 +235,7 @@ impl Transport for Wss {
         loop {
             if self.inbox.len() >= 4 {
                 let n = u32::from_be_bytes(self.inbox[..4].try_into().unwrap()) as usize;
-                if n > MAX_FRAME {
+                if n > MAX_INBOUND {
                     return Err(bad("frame too large"));
                 }
                 if self.inbox.len() >= 4 + n {

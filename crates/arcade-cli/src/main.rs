@@ -29,8 +29,8 @@ const HELP: &str = "arcade — Arcade V1.0
   arcade chain copy start <key> [coins|all]  bootstrap from the best copy (coins: coin set only, the default)
   arcade chain copy cancel|verify <key>      stop a fetch (sync it myself) | re-check a copied coin set now
   arcade chain index copy status [key]       index copies old arcades offer, fetches, votes, copied indexes
-  arcade chain index copy start <key> ledger [--from NODE]   take a ledger copy now (2+ other arcades must agree)
-  arcade chain index copy cancel <key> ledger                stop fetching it
+  arcade chain index copy start <key> ledger|ord [--from NODE]   take a copy now (2+ other arcades must agree)
+  arcade chain index copy cancel <key> ledger|ord                stop fetching it
   arcade chain pause|resume|remove <key>
   arcade chain index add|remove <key> <index>
   arcade ledger [height]         ledger fingerprints vs. other arcades; a block's digest rows

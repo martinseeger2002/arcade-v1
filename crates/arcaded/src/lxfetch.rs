@@ -658,6 +658,15 @@ pub fn holds(key: &str) -> bool {
     st().jobs.get(p.net).is_some_and(|j| j.phase == "converting" || (matches!(j.phase.as_str(), "manifest" | "copy" | "votes") && now() < j.started + 1800))
 }
 
+/// Whether a chain's own walk of an index should wait for a copy (ledger: lx, ord: dx).
+pub fn walk_waits(key: &str, indexer: &str) -> bool {
+    match indexer {
+        "ledger.v1" => holds(key),
+        "ord.v1" => crate::dxfetch::holds(key),
+        _ => false,
+    }
+}
+
 // ---------------- operator ----------------
 
 /// Start fetching a ledger copy now, whatever the distance (optionally only from one arcade).
@@ -697,7 +706,16 @@ pub fn cancel(node: &Node, key: &str) -> Result<Value, String> {
 pub fn status(node: &Node, key: Option<&str>) -> Value {
     let s = st();
     let mut out = Vec::new();
-    for p in ledger_chains(node) {
+    // Chains with the ledger index, and any whose copy is being taken in (its index is out meanwhile).
+    let mut chains = ledger_chains(node);
+    for net in s.jobs.keys() {
+        if let Some(p) = by_net(net) {
+            if !chains.iter().any(|x| x.chain_no == p.chain_no) {
+                chains.push(p);
+            }
+        }
+    }
+    for p in chains {
         if key.is_some_and(|k| by_key(k).map(|x| x.key) != Some(p.key)) {
             continue;
         }

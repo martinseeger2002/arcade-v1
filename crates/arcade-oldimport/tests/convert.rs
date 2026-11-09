@@ -219,3 +219,33 @@ fn ledger_snapshot_converts() {
     assert_eq!(r["n"], index::names_digest(&db, c).unwrap());
     assert!(r["cp"].is_null()); // too few blocks for a checkpoint
 }
+
+#[test]
+fn ord_summary_and_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("ord.sqlite");
+    let conn = Connection::open(&file).unwrap();
+    conn.execute_batch(ORD_SCHEMA).unwrap();
+    conn.execute_batch("INSERT INTO meta VALUES ('layout','3'), ('rules','4'), ('walk_next','1250'), ('next_number','7');").unwrap();
+    let mut cat = String::new();
+    let mut moves = String::new();
+    for h in 1000..1250u32 {
+        if h == 1150 {
+            continue; // a gap: chunk 1 is not complete
+        }
+        let line = sha256_hex(format!("l{h}").as_bytes());
+        let mv = sha256_hex(format!("m{h}").as_bytes());
+        if h < 1100 {
+            cat.push_str(&line);
+            moves.push_str(&mv);
+        }
+        conn.execute("INSERT INTO block VALUES (?, 'x', ?, 1, ?)", params![h, line, mv]).unwrap();
+    }
+    drop(conn);
+    let s = arcade_oldimport::ord_summary(&file, 1000).unwrap();
+    assert_eq!((s.rules, s.walk_next, s.next_number), (4, 1250, 7));
+    assert_eq!(s.chunks, vec![(0, sha256_hex(cat.as_bytes()), 100)]); // chunk 1 has a gap, chunk 2 isn't finished
+    let m = arcade_oldimport::ord_moves(&file, 1000, &[0, 1]).unwrap();
+    assert_eq!(m[&0].as_deref(), Some(sha256_hex(moves.as_bytes()).as_str()));
+    assert_eq!(m[&1], None);
+}
