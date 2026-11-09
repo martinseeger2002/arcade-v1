@@ -36,9 +36,9 @@ pub struct ChainRun {
     pub share_note: Mutex<String>,
     /// Where the chain is coming from right now (arcade mesh, an arcade's Core node, P2P).
     pub source: Mutex<String>,
-    /// An index that can't move: "<indexer name>: <why>", empty when they all walk. Kept apart
-    /// from `state`, which follow() reads to tell whether the coin's P2P network is failing.
-    pub index_note: Mutex<String>,
+    /// Indexes that can't move: indexer name -> why. Kept apart from `state`, which follow()
+    /// reads to tell whether the coin's P2P network is failing.
+    pub index_notes: Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 pub fn indexer_name(index: &str) -> &'static str {
@@ -219,7 +219,7 @@ fn launch(node: &Arc<Node>, key: &str, mode: &str, mut indexes: Vec<String>, add
         added,
         share,
         share_note: Mutex::new(String::new()),
-        index_note: Mutex::new(String::new()),
+        index_notes: Mutex::new(Default::default()),
         source: Mutex::new(String::new()),
     });
     node.extra.lock().unwrap().insert(key.into(), run.clone());
@@ -575,8 +575,8 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
         let top = tip.max(peer);
         let span = top.saturating_sub(start) + 1;
         let put_off = peer.saturating_sub(tip) > arcade_chaindb::sync::DEFER_BEHIND as u64 && at < tip && tip + 1 >= start;
-        let stuck = run.as_ref().map(|r| r.index_note.lock().unwrap().clone()).filter(|n| n.starts_with(&format!("{name}: ")));
-        let detail = if let Some(n) = stuck { n[name.len() + 2..].to_string() } else if put_off { format!("from block {start}: put off until the chain catches up, then read from the stored blocks") } else if !running { "waiting to start (rebuilding)".to_string() } else if is_rider(ix) { format!("from block {start}, with the ord index") } else { format!("from block {start}") };
+        let stuck = run.as_ref().and_then(|r| r.index_notes.lock().unwrap().get(name).cloned());
+        let detail = if let Some(n) = stuck { n } else if put_off { format!("from block {start}: put off until the chain catches up, then read from the stored blocks") } else if !running { "waiting to start (rebuilding)".to_string() } else if is_rider(ix) { format!("from block {start}, with the ord index") } else { format!("from block {start}") };
         // An index that starts further along the chain than we are can't move yet; for the
         // overall figure it counts at the pace of the blocks (it finishes with them).
         let blocks_pct = pct(tip, peer.max(1));
@@ -777,48 +777,49 @@ fn mesh_first(node: &Arc<Node>, run: &ChainRun, syncer: &Syncer) {
 }
 
 /// Bring the chain's indexes up to the stored tip, 500 blocks a batch, at most `max_batches`
-/// batches this call (the rest on the next). Runs after each P2P sync pass and also when the
-/// coin's P2P network can't be reached (blocks then come from the arcade mesh, and the indexes
-/// must still walk them; a capped call there keeps the mesh pulls coming). False when stopped,
-/// paused or a copy is being taken in, so the caller starts over. Never touches `run.state`.
+/// batches per index this call (the rest on the next), so one index catching up doesn't hold
+/// back the others. Runs after each P2P sync pass and also when the coin's P2P network can't
+/// be reached (blocks then come from the arcade mesh, and the indexes must still walk them; a
+/// capped call there keeps the mesh pulls coming). False when stopped, paused or a copy is
+/// being taken in, so the caller starts over. Never touches `run.state`.
 fn walk_indexes(node: &Node, run: &ChainRun, max_batches: usize) -> bool {
     let p = run.params;
     // Far behind, the chain comes in first; the indexes walk it once it has caught up.
     if node.far_behind(p) {
         return true;
     }
-    let note = |s: String| {
-        let mut n = run.index_note.lock().unwrap();
-        if *n != s {
-            if !s.is_empty() {
-                eprintln!("{}: {s}", p.name);
+    // One note per index, changed only for an index walked this call; logged when it changes.
+    let note = |name: &str, why: Option<String>| {
+        let mut notes = run.index_notes.lock().unwrap();
+        match why {
+            Some(w) if notes.get(name) != Some(&w) => {
+                eprintln!("{} {name} index: {w}", p.name);
+                notes.insert(name.to_string(), w);
             }
-            *n = s;
+            None => {
+                notes.remove(name);
+            }
+            _ => {}
         }
     };
     let mut names: Vec<&str> = run.indexes.iter().map(|i| indexer_name(i)).filter(|n| !n.is_empty()).collect();
+    names.sort_unstable();
     names.dedup();
-    let mut batches = 0usize;
-    let mut problem = String::new();
     for name in names {
-        loop {
+        let mut problem = None;
+        for _ in 0..max_batches {
             if run.stop.load(Ordering::Relaxed) || run.paused.load(Ordering::Relaxed) || crate::coreboot::held(p.key) {
                 return false;
             }
-            if batches >= max_batches {
-                note(problem);
-                return true;
-            }
             if run.mode == "shared" {
                 if let Err(e) = crate::shares::prepare_backfill(node, p, name, 500) {
-                    problem = format!("{name}: waiting for blocks held by other arcades: {e}");
+                    problem = Some(format!("waiting for blocks held by other arcades: {e}"));
                 }
             }
-            batches += 1;
             let more = match node.chain.backfill(p, name, 500) {
                 Ok(n) => n > 0,
                 Err(e) => {
-                    problem = format!("{name}: {e}");
+                    problem = Some(e.to_string());
                     false
                 }
             };
@@ -827,8 +828,8 @@ fn walk_indexes(node: &Node, run: &ChainRun, max_batches: usize) -> bool {
                 break;
             }
         }
+        note(name, problem);
     }
-    note(problem);
     true
 }
 
