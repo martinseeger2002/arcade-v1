@@ -71,6 +71,8 @@ Set these in the service's environment, for example with `systemctl --user edit 
 | `ARCADE_COMMIT_TXS` | Transactions per database commit while catching up (default 20000). |
 | `ARCADE_SYNC_TIMES` | Any value: log how long each part of every sync batch takes. |
 
+Stopping the service writes the coin cache to disk first, which can take a few minutes while a chain is catching up. The service units allow 300 s for that (`TimeoutStopSec=300`). A unit written by an older installer lacks this line, so systemd kills the service after 90 s and the next start redoes the unsaved blocks. Re-run the installer, or add `TimeoutStopSec=300` under `[Service]` with `systemctl --user edit arcaded`.
+
 ### Uninstall
 
 ```sh

@@ -472,6 +472,11 @@ fn ix_key(c: u16, name: &str) -> Vec<u8> {
     k_state(c, &format!("ix:{name}"))
 }
 
+/// Set when the arcade is stopping: no more blocks are connected, so the coin caches it then
+/// writes are the last word (a block connected after its chain's flush would land in a new
+/// cache that is lost, winding the tip back again at the next start).
+pub static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl ChainDb {
     pub fn open(path: impl AsRef<Path>) -> Result<ChainDb> {
         // chain.mdbx can always be rebuilt from the chain: skip the per-commit flush (a power
@@ -1242,6 +1247,9 @@ impl ChainDb {
     }
 
     pub(crate) fn connect_blocks_with(&self, params: &ChainParams, blocks: &[Block], check: bool, defer: bool) -> Result<Tip> {
+        if STOPPING.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(other("the arcade is stopping"));
+        }
         let c = params.chain_no;
         // Far behind (defer), protocol indexes are left out of the commit: they fall behind
         // and walk the stored blocks once the chain has caught up (backfill), so the chain

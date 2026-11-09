@@ -115,7 +115,11 @@ fn tame_malloc() {}
 static STOP_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 extern "C" fn on_stop_signal(_: libc::c_int) {
-    STOP_ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
+    // A second SIGTERM / Ctrl-C while the caches are being written: leave at once (the next
+    // start winds the tip back, as before this flush existed). _exit is async-signal-safe.
+    if STOP_ASKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        unsafe { libc::_exit(1) };
+    }
 }
 
 /// On SIGTERM (systemctl stop, kill) or SIGINT (Ctrl-C): write every chain's coin cache to the
@@ -131,7 +135,10 @@ fn stop_cleanly_on_signal(node: Arc<Node>) {
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(200));
             if STOP_ASKED.load(std::sync::atomic::Ordering::SeqCst) {
-                eprintln!("arcaded: stopping: writing the coin caches");
+                // Stop connecting blocks first; a batch already writing finishes (flush_coins
+                // waits for the write lock), then nothing new lands in a cache.
+                arcade_chaindb::db::STOPPING.store(true, std::sync::atomic::Ordering::SeqCst);
+                eprintln!("arcaded: stopping: writing the coin caches (stop again to leave without writing them)");
                 let t = std::time::Instant::now();
                 for c in 0..=255u16 {
                     if !node.chain.coins_settled(c) {
