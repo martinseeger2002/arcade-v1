@@ -122,6 +122,10 @@ pub fn watched(node: &Node, p: &ChainParams) -> Vec<Watched> {
                 for (a, s) in crate::coinsend::key_scripts(p, &pk) {
                     add(&mut out, Watched { address: a, script: s, key: KeySrc::Tag(k.index) });
                 }
+                // DigiDollar coins sit at the key's Taproot output (zero-value outputs).
+                if let Some((a, _, s)) = crate::ddsvc::dd_address(p, &pk) {
+                    add(&mut out, Watched { address: a, script: s, key: KeySrc::Tag(k.index) });
+                }
             }
             None => {
                 if let Some(s) = script_for_address(p, &k.address) {
@@ -1215,6 +1219,22 @@ pub fn send(node: &Node, key: &str, to: &str, amount: u64, from: Option<&str>, b
     if !broadcast {
         return Ok(out);
     }
+    match broadcast_tx(node, p, &tx) {
+        Ok(answers) => out["lenders"] = answers,
+        Err((why, answers)) => {
+            out["lenders"] = answers;
+            return Err(why);
+        }
+    }
+    let _ = node.app.event("borrow", &format!("sent {amount} on {} to {to} ({})", p.name, tx.txid.to_hex()));
+    out["sent"] = json!(true);
+    Ok(out)
+}
+
+/// Send a signed transaction on a borrowed chain: to every lender (sendrawtransaction) and the
+/// coin's P2P peers we know; kept as waiting here once a lender takes it. Ok(lender answers),
+/// or Err(why, lender answers) when no lender took it.
+pub fn broadcast_tx(node: &Node, p: &'static ChainParams, tx: &Tx) -> Result<Value, (String, Value)> {
     let hx = hex::encode(&tx.raw);
     let mut answers = Vec::new();
     let mut ok = false;
@@ -1246,14 +1266,22 @@ pub fn send(node: &Node, key: &str, to: &str, amount: u64, from: Option<&str>, b
         });
     }
     if !ok {
-        out["lenders"] = json!(answers);
-        return Err(format!("no lender took the transaction: {}", json!(answers)));
+        return Err((format!("no lender took the transaction: {}", json!(answers)), json!(answers)));
     }
     ST.pool.lock().unwrap().entry(p.key.to_string()).or_default().insert(tx.txid, (tx.raw.clone(), arcade_app::now()));
-    let _ = node.app.event("borrow", &format!("sent {amount} on {} to {to} ({})", p.name, tx.txid.to_hex()));
-    out["sent"] = json!(true);
-    out["lenders"] = json!(answers);
-    Ok(out)
+    Ok(json!(answers))
+}
+
+/// A transaction of a borrowed chain, from a lender's Core (checked against its txid).
+pub fn raw_tx(node: &Node, p: &ChainParams, txid: &arcade_chain::Hash256) -> Result<Tx, String> {
+    let (_, a) = call_any(node, p, json!([["getrawtransaction", [txid.to_hex(), 0]]]))?;
+    let hx = r(&a[0])?;
+    let raw = hex::decode(hx.as_str().ok_or("not hex")?).map_err(|e| e.to_string())?;
+    let tx = Tx::parse_with(&raw, &p.format).map_err(|e| e.to_string())?;
+    if tx.txid != *txid {
+        return Err("the lender's transaction has another txid".into());
+    }
+    Ok(tx)
 }
 
 // ---------------- status ----------------

@@ -84,6 +84,24 @@
         <button id="w-review">Review</button>
       </div>
       <p class="msg" id="w-send-msg"></p>
+      <div id="w-dd" hidden>
+        <h2>DigiDollar</h2>
+        <table><tbody>
+          <tr><td>Address</td><td id="w-dd-addr"></td></tr>
+          <tr><td>Balance</td><td id="w-dd-bal"></td></tr>
+        </tbody></table>
+        <p class="note" id="w-dd-note"></p>
+        <div class="row">
+          <input id="w-dd-to" placeholder="DD... address" autocomplete="off" style="flex:1;min-width:16em">
+          <span class="at">$</span><input id="w-dd-amt" placeholder="amount" inputmode="decimal" autocomplete="off" style="max-width:8em">
+          <button id="w-dd-review">Review</button>
+        </div>
+        <p class="msg" id="w-dd-msg"></p>
+        <div id="w-dd-confirm" class="warn" hidden>
+          <div id="w-dd-confirm-text"></div>
+          <div class="row"><button class="primary" id="w-dd-sendnow">Send</button><button id="w-dd-cancel">Cancel</button></div>
+        </div>
+      </div>
       <div id="w-confirm" class="warn" hidden>
         <div id="w-confirm-text"></div>
         <div class="row"><button class="primary" id="w-sendnow">Send</button><button id="w-cancel">Cancel</button></div>

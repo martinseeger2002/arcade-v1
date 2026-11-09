@@ -112,6 +112,13 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 | `wallet.approve` | `/api/v1/wallet/approve` | local | id | Approve a request: sign and send it. |
 | `wallet.deny` | `/api/v1/wallet/deny` | local | id | Refuse a request. |
 
+### Dd
+
+| method | route | needs | params | what |
+|---|---|---|---|---|
+| `dd.wallet` | `/api/v1/dd/wallet` | read | chain? | Your DigiDollar on DigiByte (chain dgb, the default, or dgbtest): address (DD.../TD...), cents, coins, borrowed, whole (false when only coins from the borrow floor on can be seen). |
+| `dd.send` | `/api/v1/dd/send` | local | chain?, to, cents, send? | Send DigiDollars (cents, $1 to $100,000 per send) to a DD.../TD... address, with DGB from the same wallet for the fee (0.35 DGB/kB, at least 0.1, at most 0.5 DGB); send: true broadcasts, otherwise it's only built and shown. |
+
 ### Account
 
 | method | route | needs | params | what |
