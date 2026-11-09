@@ -1,9 +1,11 @@
 //! arcade-oldimport: convert an old arcade's snapshot into a V1.0 home's chain.mdbx, once.
 //!
-//!   arcade-oldimport ord|ledger --home DIR --chain KEY FILE [--allow-unstored] [--blocks-from HOME]
+//!   arcade-oldimport ord|ledger --home DIR --chain KEY FILE [--allow-unstored] [--blocks-from HOME] [--spill-mb N]
 //!
 //! --blocks-from reads the chain's blocks from another home's chain.mdbx, opened read-only (safe
 //! while its arcaded runs), for checks: the rows still go to --home.
+//! --spill-mb: rows held in memory before a sorted run goes to disk (default 1024). The heap
+//! peaks at about 1.7x this, whatever the index's size.
 //!
 //! Run it on a home whose arcaded is stopped. The SQLite file is only read.
 
@@ -12,13 +14,13 @@ use std::path::PathBuf;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let opt = |n: &str| args.iter().position(|a| a == n).and_then(|i| args.get(i + 1)).cloned();
-    let usage = "usage: arcade-oldimport ord|ledger --home DIR --chain KEY FILE [--allow-unstored] [--blocks-from HOME]";
+    let usage = "usage: arcade-oldimport ord|ledger --home DIR --chain KEY FILE [--allow-unstored] [--blocks-from HOME] [--spill-mb N]";
     let kind = args.first().cloned().unwrap_or_default();
     let (Some(home), Some(chain)) = (opt("--home"), opt("--chain")) else {
         eprintln!("{usage}");
         std::process::exit(2);
     };
-    let Some(file) = args.last().filter(|a| !a.starts_with("--") && args.len() > 5 && Some(*a) != opt("--blocks-from").as_ref()).map(PathBuf::from) else {
+    let Some(file) = args.last().filter(|a| !a.starts_with("--") && args.len() > 5 && Some(*a) != opt("--blocks-from").as_ref() && Some(*a) != opt("--spill-mb").as_ref()).map(PathBuf::from) else {
         eprintln!("{usage}");
         std::process::exit(2);
     };
@@ -30,7 +32,11 @@ fn main() {
         eprintln!("chain.mdbx: {e}");
         std::process::exit(1);
     });
-    let opts = arcade_oldimport::Opts { allow_unstored: args.iter().any(|a| a == "--allow-unstored"), ..Default::default() };
+    let spill = opt("--spill-mb").map(|v| v.parse::<usize>().unwrap_or_else(|_| {
+        eprintln!("--spill-mb N");
+        std::process::exit(2);
+    }) << 20);
+    let opts = arcade_oldimport::Opts { allow_unstored: args.iter().any(|a| a == "--allow-unstored"), spill_bytes: spill };
     let t0 = std::time::Instant::now();
     let say = |m: &str| eprintln!("[{:>6.1}s] {m}", t0.elapsed().as_secs_f64());
     let blocks = opt("--blocks-from").map(|h| {
