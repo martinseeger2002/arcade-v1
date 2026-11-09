@@ -237,3 +237,43 @@ nothing auto-wiped.
   clamps 1..16, default 1. One lane per lent lane, round-robin over lenders; FETCH_BATCH 50 txs in proportion
   to lanes; a lender missing 3 times rests 5 min. Lanes read raw blocks over cr (getblock/getrawtransaction),
   proved by rawchain: chain data only.
+
+---
+# Part 3 of 3: "kc" known collections, HTTP bootstrap, summary
+
+## 6. "kc": known collections (mesh/collectionshare.py, known_collections.py)
+  hi {v:1, d:{net:digest}}
+  ix {net}
+  il {net, seq, end, rows:[[slug,fp,name,supply,count,sig]..]}     (100 rows/frame)
+  ig {id, net, slug, fp}
+  ib {id, seq, end[, err:"gone"|"busy"]} + slice of zlib(json [[id,name,position,number]..])
+- Limits: PART 60 KB, MAX_PACKED 16 MiB, MAX_INFLATED 32 MiB, 30 answers/min (ix+ig), 2 served at once,
+  HELLO_EVERY 600 s, PEER_TTL 6 h.
+- fp = sha256(f"{chain}\n{slug}\n" + "\n".join(sorted(ids))); chain digest = sha256("\n".join(sorted(f"{slug} {fp}"))),
+  UTF-8. Agreement = this node plus linked peers holding the same fp. Mode "demand" (default) or "all". Direct
+  links only.
+
+## 7. HTTP ledger bootstrap (not mesh)
+- GET /bootstrap/<net>.sqlite.gz: gzip-6 VACUUM INTO copy, private tables stripped; header X-Arcade-Height; 503 +
+  Retry-After 120 while building; 404 if none. GET /bootstrap/<net>.json: {"network","height","floor",
+  "consensus_hash","index_digest" (the 3g variant),"sha256" (of the .gz),"bytes","made","file","what"}. Remade when
+  > 3600 s old or > 100 blocks behind. Used only by people cloning (clone.html); no arcade fetches it
+  automatically. Ord indexes have no HTTP bootstrap.
+
+## Summary
+- Ord: dx (dn, ng/nb, q/a, sq/g/gb). -20 tokens, dns/.mesh names: dx q only (+ ord snapshots). Ledger (arcade
+  tokens, MetaDEx, INSC inscriptions, @names): ix to verify, lx whole copies (+ HTTP bootstrap). Collections: kc.
+  Coins/utxo: never as an index (cr arcade_utxoset (Kotia), arcade_coinscan). Maps not indexed; messages not shared.
+- Borrowers: on demand via dx q to walkers (heard within 24 h and ahead); copies via lx / dx snapshots replace
+  the index file; dx spend notes stitched into own walk; helpers scan leased chunks with Core lanes over cr. No
+  arcade_ord_* in cr.
+- Offering: ix tip whenever a checkpoint exists; lx copy when serve_index_copies, within 20 of Core, asked within
+  15 min; dx hi/dn/ls in any mode except off, only walk answers q, snapshots need walk + 8 cores. Rates: ix 120
+  q/min/peer; lx 120 pieces/min/peer, 2 at once; dx 120 q/min/peer, 4 sends at once; kc 30/min; cr 4 batches in
+  flight per peer, 2 Core batches overall, 500 calls/batch, 8 MiB request, 512 KB/s, 48 KB parts; "l" 4 if ≥ 8
+  cores else 1.
+- Verification: ledger checkpoints (100, 6 deep), range digests, bisection, s and n at equal heights (mismatch
+  only reported); lx copies: manifest self-check + Core block hash + votes (≥ 2 and strict majority) + background
+  self-rebuild; ord: chunk hashes agree at 2 (audit to 5), notes vs nd + chunk hash + merkle roots, snapshots vs
+  agreed chunks (maker excluded) + 64-chunk moves sample.
+- Traps: bootstrap.py's index_digest is NOT the ix digest; notes txids are display hex, not byte-reversed.
