@@ -504,7 +504,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "share.install" => crate::v1import::start(node.self_arc(), &s("key").ok_or("key required")?),
         "share.install_cancel" => crate::v1import::cancel(&s("key").ok_or("key required")?),
         "share.cancel" => crate::vxshare::cancel(node, &s("key").ok_or("key required")?, &s("fam").ok_or("fam required")?),
-        "share.auto" => crate::v1copy::set_auto(node, &s("key").ok_or("key required")?, req["on"] == true),
+        "share.serve" => crate::v1copy::set_serve(node, &s("key").ok_or("key required")?, req["on"] != false),
         "share.make" => crate::v1copy::start_make(node.self_arc(), &s("key").ok_or("key required")?, &s("fam").ok_or("fam required (blocks, coins, ord, ...)")?),
         // Borrowed coins (crate::borrow)
         "borrow.status" => Ok(crate::borrow::status_all(node)),

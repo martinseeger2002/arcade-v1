@@ -19,15 +19,15 @@ This replaces INDEXBOOT §2.2, §5 "Native copies" and §7 (phase 5, `vx`), and 
 
 ## 1. The idea: identical copies, made independently
 
-Every V1.0 arcade that shares a chain makes its copies **at the same heights** (checkpoints) and writes them **byte for byte the same way**. Two arcades at the same height hold the same rows, so their copies get the **same manifest id**.
+Every V1.0 arcade that shares a chain makes its copies **at the same height** (the one the asking arcade names) and writes them **byte for byte the same way**. Two arcades at the same height hold the same rows, so their copies get the **same manifest id**.
 
 That gives three things at once:
 1. **Swarm:** a new install fetches pieces from **every** arcade holding that id, 6 at a time from each. Ten V1.0 arcades → about ten times the speed of one.
 2. **Trust for free:** the same id announced by 2 or more arcades that each **made** it from their own rows is the "2 or more agree" check, with no separate digest to compute or ask for.
-3. **Re-seeding:** an arcade that took a copy in can keep its pieces and serve them under the same id until its own next checkpoint copy replaces them (optional: by default pieces are deleted once imported, §5.0).
+3. **Re-seeding:** an arcade that took a copy in can keep its pieces and serve them under the same id until it is deleted after 2 hours unused (optional: by default pieces are deleted once imported, §5.0).
 
 What makes a copy identical everywhere:
-- **Checkpoint heights:** multiples of a per-chain interval `K`, about one a day (§3).
+- **The same height:** the height the asking arcade names (§3).
 - **Canonical rows:** only rows that follow from the chain itself, in key order, with local numbers replaced by chain facts (§2).
 - **Fixed encoding:** our own piece writer, pieces of exactly 8 MiB of the row stream (the last one shorter), each compressed on its own with a fixed zstd level and no dictionary, the same crate version pinned. The manifest is canonical JSON.
 - **Format version** in the manifest (`fmt`, bumped whenever a family's rows change between releases). Only copies of the same `fmt` share an id.
@@ -46,14 +46,14 @@ What makes a copy identical everywhere:
 - **One family, one copy.** A new install can take blocks + coins (the chain) and then the indexes it wants.
 - **Not shared:** mempool, undo records, wallet and app data (`arcade.mdbx`), copy and walk progress state.
 
-## 3. Making copies
+## 3. Making copies: only when asked
 
-- **When:** each family's own writer (the chain follower for blocks/coins/addresses, the ord walker, the ledger engine, the messages indexer) commits the checkpoint block on its own. Right after that commit it opens a **read transaction**, a frozen view of that height. It goes on with the next block at once while a background thread writes the copy from the frozen view. Only that chain's keys are read (`C|...`), so other chains writing meanwhile don't matter.
-- **Only at the tip:** while catching up the follower writes in batches and passes checkpoints mid-batch, so no copy is made then. An arcade starts making copies once that family is at the tip.
-- **Interval `K`** (blocks between checkpoints, about a day): Dogecoin, Pepecoin, Flopcoin 1,440; DigiByte 5,760; Litecoin 576; Bitcoin 144; Kotia 720; others from their block spacing. Indexes that are expensive to scan (ord on Dogecoin) use 7 × K.
-- **Settled:** a copy at checkpoint `cp` is offered once the tip is 6 blocks past it, and only while our block at `cp` is still on the best chain.
-- **Disk:** one copy per family kept, the previous one deleted when the new one is complete. Not made while free disk would fall under 2 × the copy size. Copies live in `<home>/copies/<net>/<family>/<id>/`.
-- **Who makes them:** every arcade with sharing on for that chain (the same "share" switch the chain already has in Chains & Coins, on by default), whether it is a full node or a chain-mode install that has the family.
+Martin (2026-11-09): copies are made **only when requested**; there are no daily copies.
+- **Asking:** an arcade that wants copies sends `vx sq {net, h, fams}` to the V1.0 arcades it is linked to. `h` is a few blocks past the network's tip (3 now), so every arcade at the tip reaches it within seconds of the others.
+- **Making:** each arcade that shares that chain makes the copies when its follower connects block `h` (the chain follower for blocks/coins/addresses, with the indexes walked to `h` in the same step). Right after that commit it opens a **read transaction**, a frozen view of that height, and goes on with the next block at once while a background thread writes the copies. Only that chain's keys are read (`C|...`), so other chains writing meanwhile don't matter. Arcades passing `h` inside a batch (catching up) don't make one; the asker asks again at a new height when `h` went by without enough copies.
+- **Same copies:** all arcades at `h` hold the same rows, so their copies have the same id (§1): the asker can fetch from all of them, and trusts the copy once 2 or more made it.
+- **Disk:** a copy nobody fetched for **2 hours** is deleted. Not made while free disk would fall under 2 × the last copy's size + 10 GB. Copies live in `<home>/copies/<net>/<fam>/<id>/`.
+- **Who makes them:** every arcade sharing that chain (`share.serve`, on by default), full node or chain-mode install with the part asked for.
 
 ## 4. Wire: frame `vx`
 
@@ -91,7 +91,7 @@ Martin (2026-11-09): fetching from several arcades at once brings data faster th
 3. **Every core works.** Inflating and checking pieces (zlib, sha256) runs on all cores in parallel; one writer feeds mdbx in order.
 4. **Import while fetching.** Pieces are taken in, in order, as they arrive; nothing waits for the whole copy.
 5. **Back-pressure.** The fetcher keeps only a window of pieces ahead of the writer (about 512 MB), so a fast swarm never fills the disk with pieces waiting their turn.
-6. **Written once.** By default a piece is deleted once it is in the tables (no second copy on disk, and the disk only writes the data once). The arcade serves its own identical copy from its next checkpoint (§3). Keeping the pieces to re-seed at once is an option for machines with room.
+6. **Written once.** By default a piece is deleted once it is in the tables (no second copy on disk, and the disk only writes the data once). The arcade makes its own identical copy whenever another arcade asks (§3). Keeping the pieces to re-seed at once is an option for machines with room.
 7. **Measured:** the import's own rate (MB/s of rows written) shows in status next to the download rate, so it's clear which one is the limit.
 
 ### 5.1 Only the parts you pick
@@ -107,7 +107,7 @@ Every family is its own copy, so an install takes only what was picked in Chains
 - **Index only** is the mode Chains & Coins already lists as "coming" (`chains.rs` refuses `index` today). This plan builds it: `arcade chain add doge --mode index --with ord`.
 - An index-only install holds **no blocks**. A lookup that needs one (an inscription's full body, a transaction page) asks the arcades holding the chain, as a borrowed chain does now.
 - More parts can be added later. Picking the chain later takes the blocks and coins copies; the index is kept.
-- Index-only installs **re-seed** the index copy they took, and make their own at the next checkpoint (§3), so they add to the swarm like everyone else.
+- Index-only installs **re-seed** the index copy they took, and make their own when asked (§3), so they add to the swarm like everyone else.
 
 ## 6. Background re-check ("verified")
 
@@ -123,23 +123,24 @@ Every family is its own copy, so an install takes only what was picked in Chains
   - "ord: trusted (3 arcades) · verifying 12%".
 - **Home mesh overview:** V1.0 arcades show "chain copy · block N" and "ord copy · block N", the way old arcades do now.
 - **CLI:**
-  - `arcade chain copy status [key]`
-  - `arcade chain copy make <key> <fam>` (now, at the last checkpoint, for testing)
-  - `arcade chain copy take <key> <fam>`
-  - `arcade chain copy cancel <key> <fam>`
-  - `arcade chain copy share <key> on|off`
-- **API:** `chains.v1copy_status|make|take|cancel|share` (admin, except status).
+  - `arcade chain share held` (copies held, being made, asked for, fetched, installs)
+  - `arcade chain share offers <key>`
+  - `arcade chain share install <key>` (asks for copies, then installs from them) and `... install <key> cancel`
+  - `arcade chain share fetch <key> <fam> [id]`, `arcade chain share cancel <key> <fam>`
+  - `arcade chain share serve <key> on|off` (answer requests; on by default)
+  - `arcade chain share make <key> <fam>` (tests)
+- **API:** `share.held|offers|install|install_cancel|fetch|cancel|serve|make` (admin, except held and offers).
 
 ## 8. Testing
 
-1. **Identical copies:** the GX10 and the mini PC each make a Pepecoin testnet copy of every family at the same checkpoint. The ids must be equal. Any difference is found row by row and fixed (local fields leaking into a family).
+1. **Identical copies:** the GX10 and the mini PC each make a Pepecoin testnet copy of every family at the same height. The ids must be equal. Any difference is found row by row and fixed (local fields leaking into a family).
 2. **Swarm:** a throwaway V1.0 home takes Pepecoin testnet blocks + coins + ord from both at once. The pieces must come from both, and the result must equal the makers' tables.
 3. **Trust:** a copy announced by 1 maker is not taken; a tampered piece is refused; a copy whose `hash` isn't on our best chain is refused.
 4. **Dogecoin:** once the mini PC is at the tip with ord, a third machine installs Dogecoin from it, with time and speed measured. The GX10 then makes its own copies, and the next install pulls from both.
 
 ## 9. Phases (each one a PR)
 
-1. **Copy format and makers:** canonical row export per family, the piece writer, the manifest, checkpoint copies, `arcade chain copy make`. Tested by comparing the ids of independent machines (§8.1).
+1. **Copy format and makers:** canonical row export per family, the piece writer, the manifest, `arcade chain share make`. Tested by comparing the ids of independent machines (§8.1).
 2. **Serving and the swarm fetch:** `vx` hi/g/gb, limits, resumable fetching from many holders, re-seeding.
 3. **Chain install from copies:** headers → blocks → coins, trusted, then following the network. The coin re-check from `cbimport` is reused.
 4. **Index copies:** addresses, ord (+ riders), ledger, messages, and **Index-only installs** (§5.1): a block with its spent outputs from chain holders (a new `bk` question), and an index following the tip from those.
