@@ -4,13 +4,13 @@ A from-scratch Rust rebuild of Dogecoin Arcade, wire-compatible with the existin
 
 ## Install on Linux
 
-One command, as your normal user (no `sudo`):
+Paste this one command into a terminal:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/martinseeger2002/arcade-v1/main/scripts/install.sh | bash
 ```
 
-It fetches the source into `~/.local/share/arcade-v1-src`, installs Rust for your user if it's missing, and builds and installs:
+That's all. If build tools are missing, it installs them with apt, asking for your password once. It installs Rust for your user if it's missing, fetches the source into `~/.local/share/arcade-v1-src`, and builds and installs:
 
 - **arcaded**, the arcade service, started now and at every login (`systemctl --user status arcaded`);
 - **arcade**, the command line (`arcade status`, `arcade setup`, ...);
@@ -18,15 +18,11 @@ It fetches the source into `~/.local/share/arcade-v1-src`, installs Rust for you
 
 Everything goes in your home folder: programs in `~/.local/bin`, data in `~/.local/share/arcade`. Run the same command again to update.
 
-### Before you run it
+### What it installs with apt
 
-The build needs a C compiler, clang and the GTK/WebKit build files. On Debian or Ubuntu:
+When any of these are missing, it installs them: `build-essential pkg-config clang libclang-dev libwebkit2gtk-4.1-dev libgtk-3-dev`. Older releases such as Ubuntu 20.04 and Mint 20 have no `libwebkit2gtk-4.1`; there it skips the desktop app and installs the rest. On a system without apt, install the same tools with your package manager first.
 
-```sh
-sudo apt install -y git build-essential pkg-config clang libclang-dev libwebkit2gtk-4.1-dev libgtk-3-dev
-```
-
-Without the GTK/WebKit files the installer skips the desktop app and installs the rest.
+The first build takes a while: about 10 to 20 minutes on an older laptop. Updates are faster.
 
 ### After it's installed
 
