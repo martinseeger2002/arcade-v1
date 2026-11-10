@@ -338,13 +338,14 @@ fn main() {
             for st in r["stages"].as_array().unwrap() {
                 let p = st["pct"].as_f64().unwrap_or(0.0);
                 let bar: String = "█".repeat((p / 5.0).round() as usize);
+                let per = if st["unit"] == "rows" { "rows/s" } else { "blk/s" };
                 let rate = match st["rate"].as_f64() {
-                    Some(r) if r >= 10.0 => format!("{r:.0} blk/s"),
-                    Some(r) => format!("{r:.1} blk/s"),
+                    Some(r) if r >= 10.0 => format!("{r:.0} {per}"),
+                    Some(r) => format!("{r:.1} {per}"),
                     None if st["info"] == true => String::new(),
                     None => "measuring".into(),
                 };
-                println!("  {:<22} {:<20} {:>5.1}% {:>11}  {}", st["name"].as_str().unwrap_or(""), format!("{bar:░<20}"), p, rate, st["detail"].as_str().unwrap_or(""));
+                println!("  {:<34} {:<20} {:>5.1}% {:>13}  {}", st["name"].as_str().unwrap_or(""), format!("{bar:░<20}"), p, rate, st["detail"].as_str().unwrap_or(""));
             }
             println!("  overall {:.1}%", r["overall"].as_f64().unwrap_or(0.0));
             return;

@@ -59,10 +59,12 @@ pub fn clear_in_background(node: Arc<Node>, p: &'static ChainParams) {
 /// Background: look for chains with address rows waiting and build them when near the tip.
 pub fn run(node: Arc<Node>) {
     let tmp = node.home.join("tmp");
-    // Leftovers from a build cut short by a restart.
+    // Leftovers from a build cut short by a restart, except the run files a build recorded
+    // to go on from (docs/ADDRBUILD.md).
+    let keep: std::collections::HashSet<std::path::PathBuf> = node.chain.addr_resume_files().into_iter().collect();
     if let Ok(rd) = std::fs::read_dir(&tmp) {
         for e in rd.flatten() {
-            if e.file_name().to_string_lossy().starts_with("addr-") {
+            if e.file_name().to_string_lossy().starts_with("addr-") && !keep.contains(&e.path()) {
                 let _ = std::fs::remove_file(e.path());
             }
         }

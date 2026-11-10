@@ -657,8 +657,28 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
                 // the index is written in one sorted pass after the catch-up.
                 stages.push(json!({"name": "Addresses · collect", "detail": "taken from each block as it is stored (received coins, spends, history)",
                                    "overall_pct": blocks_pct, "pct": blocks_pct, "at": tip, "of": peer}));
-                stages.push(json!({"name": "Addresses · build", "index": ix, "detail": detail, "overall_pct": blocks_pct * 0.9,
-                                   "pct": p_, "at": 0, "of": peer}));
+                // The build's six steps, each with its own bar and rate (docs/ADDRBUILD.md).
+                match node.chain.build_progress(c) {
+                    Some(steps) => {
+                        for (i, st) in steps.iter().enumerate() {
+                            let name = format!("Addresses · {} {}", i + 1, arcade_chaindb::addrbuild::STEP_NAMES[i]);
+                            let pct = if st.state == 2 { 100.0 } else if st.total > 0 { st.done as f64 * 100.0 / st.total as f64 } else { 0.0 };
+                            let rate = if st.state == 1 { stage_rate(p.key, &name, st.done) } else { None };
+                            let unit = if st.unit.is_empty() { "rows" } else { st.unit };
+                            let detail = match st.state {
+                                2 => "done".to_string(),
+                                1 => unit.to_string(),
+                                _ => "waiting".to_string(),
+                            };
+                            // (The index's remove button on the first of the six rows only.)
+                            let index = if i == 0 { json!(ix) } else { Value::Null };
+                            stages.push(json!({"name": name, "index": index, "detail": detail, "overall_pct": blocks_pct * 0.9,
+                                               "pct": pct, "at": st.done, "of": st.total, "rate": rate, "unit": unit}));
+                        }
+                    }
+                    None => stages.push(json!({"name": "Addresses · build", "index": ix, "detail": detail, "overall_pct": blocks_pct * 0.9,
+                                               "pct": p_, "at": 0, "of": peer})),
+                }
             } else {
                 stages.push(json!({"name": "Addresses", "index": ix, "detail": detail, "overall_pct": blocks_pct, "pct": p_, "at": tip, "of": peer}));
             }
