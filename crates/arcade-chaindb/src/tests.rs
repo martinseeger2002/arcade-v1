@@ -510,6 +510,49 @@ fn coin_cache_matches_direct_and_survives_a_crash() {
 }
 
 #[test]
+fn tx_index_runs_many_flushes_then_built() {
+    let direct = fixture();
+    let blocks = busy_chain(&direct.g, 60);
+    direct.db.connect_blocks(direct.p, &blocks).unwrap();
+    let c = direct.p.chain_no;
+
+    // A flush after every 3 blocks: 20 runs, so spends find coins made in earlier runs and
+    // level 0 merges (8 runs into 1) happen twice.
+    let f = fixture();
+    f.db.set_coin_cache_mb(1024);
+    for part in blocks.chunks(3) {
+        f.db.connect_blocks_with(f.p, part, true, true).unwrap();
+        f.db.flush_coins(c).unwrap();
+    }
+    let runs = crate::txruns::of(f.db.store.id(), c).expect("runs while catching up");
+    let (n, levels): (usize, Vec<u32>) = {
+        let r = runs.read().unwrap();
+        (r.list.len(), r.list.iter().map(|x| x.level).collect())
+    };
+    assert!(n < 20 && levels.contains(&1), "level 0 merged: {levels:?}");
+    // Every tx with a coin left is found through the runs (TXS holds none of them yet).
+    f.db.store
+        .read(|r| {
+            for (k, _) in r.scan_prefix(OUTPUTS, &k_chain(c))? {
+                let (b, p) = (arcade_store::key::be_u32(&k, 2), arcade_store::key::be_u32(&k, 6));
+                let raw = r.get(BLOCK_TX, &k_block_tx(c, b, p))?.unwrap();
+                let txid = crate::db::row_txid(&raw, f.p)?;
+                assert_eq!(crate::db::locate(r, f.p, &txid)?, Some((b, p)), "found through a run");
+            }
+            Ok(())
+        })
+        .unwrap();
+    // Reopened, the filters come back from the rows.
+    build(&f);
+    assert!(crate::txruns::of(f.db.store.id(), c).is_none(), "runs dropped after the build");
+    assert!(f.db.store.read(|r| r.scan_prefix(TXS_RUNS, b"")).unwrap().is_empty());
+    let mut want = coin_tables(&direct.db);
+    let got = coin_tables(&f.db);
+    want[2] = got[2].clone();
+    assert_eq!(got, want, "runs, then built = direct");
+}
+
+#[test]
 fn failed_cached_batch_winds_back_and_reconnects_the_same() {
     let direct = fixture();
     let blocks = busy_chain(&direct.g, 40);

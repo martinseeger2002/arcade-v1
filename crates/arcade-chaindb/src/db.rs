@@ -215,8 +215,13 @@ fn parse_meta(v: &[u8]) -> Result<Meta> {
 pub trait Rd {
     fn get(&self, table: &str, key: &[u8]) -> Result<Option<Vec<u8>>>;
     fn scan(&self, table: &str, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+    /// The open database (for the tx index runs kept in memory beside it).
+    fn store_id(&self) -> usize;
 }
 impl Rd for ReadTxn<'_> {
+    fn store_id(&self) -> usize {
+        ReadTxn::store_id(self)
+    }
     fn get(&self, t: &str, k: &[u8]) -> Result<Option<Vec<u8>>> {
         ReadTxn::get(self, t, k)
     }
@@ -225,6 +230,9 @@ impl Rd for ReadTxn<'_> {
     }
 }
 impl Rd for WriteTxn<'_> {
+    fn store_id(&self) -> usize {
+        WriteTxn::store_id(self)
+    }
     fn get(&self, t: &str, k: &[u8]) -> Result<Option<Vec<u8>>> {
         WriteTxn::get(self, t, k)
     }
@@ -253,14 +261,15 @@ pub(crate) fn header_rec<R: Rd>(r: &R, c: u16, hash: &Hash256) -> Result<Option<
 /// duplicate txid; then each is checked by full hash.
 pub(crate) fn locate<R: Rd>(r: &R, params: &ChainParams, txid: &Hash256) -> Result<Option<(u32, u32)>> {
     let c = params.chain_no;
-    let cands = r.scan(TXS, &k_txs(c, &txid.t12()))?;
+    let mut cands: Vec<(u32, u32)> = r.scan(TXS, &k_txs(c, &txid.t12()))?.iter().map(|(_, bp)| (be_u32(bp, 0), be_u32(bp, 4))).collect();
+    cands.extend(crate::txruns::find(r, r.store_id(), c, &txid.t12())?);
+    cands.sort_unstable();
+    cands.dedup();
     if cands.len() == 1 {
-        let bp = &cands[0].1;
-        return Ok(Some((be_u32(bp, 0), be_u32(bp, 4))));
+        return Ok(Some(cands[0]));
     }
     let mut found = None;
-    for (_, bp) in cands {
-        let (b, p) = (be_u32(&bp, 0), be_u32(&bp, 4));
+    for (b, p) in cands {
         if let Some(raw) = r.get(BLOCK_TX, &k_block_tx(c, b, p))? {
             if row_txid(&raw, params)? == *txid {
                 found = Some((b, p)); // the latest stored copy wins (BIP30-style duplicates)
@@ -362,6 +371,9 @@ fn locate_c<R: Rd>(r: &R, params: &ChainParams, cc: &CoinCache, txid: &Hash256) 
     for (_, bp) in r.scan(TXS, &k_txs(c, &t12))? {
         cands.push((be_u32(&bp, 0), be_u32(&bp, 4)));
     }
+    cands.extend(crate::txruns::find(r, r.store_id(), c, &t12)?);
+    cands.sort_unstable();
+    cands.dedup();
     if cands.len() <= 1 {
         return Ok(cands.pop());
     }
@@ -405,10 +417,21 @@ fn flush_cache(w: &WriteTxn, c: u16, cc: &mut CoinCache, tip: &Tip) -> Result<()
     let left: std::collections::HashSet<(u32, u32)> =
         if cc.log_txs { coins.iter().map(|(k, _)| (be_u32(k, 2), be_u32(k, 6))).collect() } else { Default::default() };
     let mut logged = 0u32;
+    // While catching up with the log on, txs that still have a coin go into a sorted run
+    // (sequential) instead of TXS (random), and are logged too, for the sorted build of TXS
+    // after the catch-up (txruns). ARCADE_TXS_RUNS=0 keeps the old way (for comparisons).
+    let runs_on = cc.log_txs && std::env::var("ARCADE_TXS_RUNS").map(|v| v != "0").unwrap_or(true);
+    let mut run_rows: Vec<([u8; 12], [u8; 8])> = Vec::new();
     for (t12, bps) in &txs {
         let k = k_txs(c, t12);
-        for bp in bps {
-            if cc.log_txs && !left.contains(&(be_u32(bp, 0), be_u32(bp, 4))) {
+        let mut bps = bps.clone();
+        bps.sort_unstable();
+        for bp in &bps {
+            let live = left.contains(&(be_u32(bp, 0), be_u32(bp, 4)));
+            if runs_on && live {
+                run_rows.push((*t12, *bp));
+            }
+            if cc.log_txs && (!live || runs_on) {
                 let mut lk = k_chain(c);
                 lk.extend_from_slice(&tip.height.to_be_bytes());
                 lk.extend_from_slice(&(0x8000_0000u32 + logged).to_be_bytes());
@@ -424,6 +447,7 @@ fn flush_cache(w: &WriteTxn, c: u16, cc: &mut CoinCache, tip: &Tip) -> Result<()
             }
         }
     }
+    crate::txruns::add_run(w, c, &run_rows)?;
     if logged > 0 {
         w.put(STATE, &k_state(c, crate::addrbuild::TXS_PENDING), b"1")?;
     }
@@ -442,8 +466,8 @@ fn flush_cache(w: &WriteTxn, c: u16, cc: &mut CoinCache, tip: &Tip) -> Result<()
     w.put(STATE, &k_state(c, "coins_at"), &encode_tip(tip))?;
     if std::env::var_os("ARCADE_SYNC_TIMES").is_some() {
         eprintln!(
-            "  flush parts: {n_coins} coins {:.1}s · {n_txs} tx index rows ({logged} put off) {:.1}s · {n_spent} older coins deleted {:.1}s · {n_bs} address rows deleted {:.1}s",
-            t_coins.as_secs_f64(), (t_txs - t_coins).as_secs_f64(), (t_spent - t_txs).as_secs_f64(), (t0.elapsed() - t_spent).as_secs_f64()
+            "  flush parts: {n_coins} coins {:.1}s · {n_txs} tx index rows ({logged} put off, {} in a run) {:.1}s · {n_spent} older coins deleted {:.1}s · {n_bs} address rows deleted {:.1}s",
+            t_coins.as_secs_f64(), run_rows.len(), (t_txs - t_coins).as_secs_f64(), (t_spent - t_txs).as_secs_f64(), (t0.elapsed() - t_spent).as_secs_f64()
         );
     }
     cc.bytes = 0;
@@ -495,19 +519,33 @@ impl ChainDb {
         for c in 0..=255u16 {
             db.recover_coins(c)?;
         }
+        db.load_runs()?;
         Ok(db)
+    }
+
+    /// The tx index runs of chains catching up (filters into memory).
+    fn load_runs(&self) -> Result<()> {
+        let sid = self.store.id();
+        self.store.read(|r| {
+            let chains: Vec<u16> = r.scan_prefix(STATE, b"")?.into_iter()
+                .filter(|(k, _)| k.len() > 2 && &k[2..] == crate::txruns::STATE_RUNS.as_bytes())
+                .map(|(k, _)| u16::from_be_bytes([k[0], k[1]])).collect();
+            crate::txruns::load(r, sid, &chains)
+        })
     }
 
     /// Use a coin cache of `mb` MB while catching up (0 = none).
     /// Open a chain.mdbx for reading only (safe while its arcaded runs): reads work, writes fail.
     pub fn open_readonly(path: impl AsRef<Path>) -> Result<ChainDb> {
-        Ok(ChainDb {
+        let db = ChainDb {
             store: Store::open_readonly(path, &CHAIN_SCHEMA)?,
             indexers: Default::default(),
             caches: Default::default(),
             cache_bytes: std::sync::atomic::AtomicUsize::new(0),
             addr_progress: Default::default(),
-        })
+        };
+        db.load_runs()?;
+        Ok(db)
     }
 
     pub fn set_coin_cache_mb(&self, mb: usize) {
@@ -827,8 +865,9 @@ impl ChainDb {
     pub fn tx_raw(&self, params: &ChainParams, txid: &Hash256) -> Result<Option<(Vec<u8>, u32)>> {
         let c = params.chain_no;
         self.store.read(|r| {
-            for (_, bp) in r.scan_prefix(TXS, &k_txs(c, &txid.t12()))? {
-                let (b, p) = (be_u32(&bp, 0), be_u32(&bp, 4));
+            let mut cands: Vec<(u32, u32)> = r.scan_prefix(TXS, &k_txs(c, &txid.t12()))?.iter().map(|(_, bp)| (be_u32(bp, 0), be_u32(bp, 4))).collect();
+            cands.extend(crate::txruns::find(r, r.store_id(), c, &txid.t12())?);
+            for (b, p) in cands {
                 let Some(raw) = r.get(BLOCK_TX, &k_block_tx(c, b, p))? else { continue };
                 if row_txid(&raw, params)? == *txid {
                     return Ok(if is_pruned(&raw) { None } else { Some((raw, b)) });
@@ -1027,8 +1066,10 @@ impl ChainDb {
         let c = params.chain_no;
         self.store.read(|r| {
             let mut out = Vec::new();
-            for (_, bp) in r.scan_prefix(TXS, &k_txs(c, t12))? {
-                if let Some(raw) = r.get(BLOCK_TX, &k_block_tx(c, be_u32(&bp, 0), be_u32(&bp, 4)))? {
+            let mut cands: Vec<(u32, u32)> = r.scan_prefix(TXS, &k_txs(c, t12))?.iter().map(|(_, bp)| (be_u32(bp, 0), be_u32(bp, 4))).collect();
+            cands.extend(crate::txruns::find(r, r.store_id(), c, t12)?);
+            for (b, p) in cands {
+                if let Some(raw) = r.get(BLOCK_TX, &k_block_tx(c, b, p))? {
                     let txid = row_txid(&raw, params)?;
                     if !out.contains(&txid) {
                         out.push(txid);
@@ -1235,6 +1276,7 @@ impl ChainDb {
             for tx in &blk.txs {
                 let t12 = tx.txid.t12();
                 let _ = r.scan(TXS, &k_txs(c, &t12));
+                let _ = crate::txruns::find(r, r.store_id(), c, &t12);
                 if !tx.is_coinbase() {
                     for inp in &tx.inputs {
                         let Ok(Some((pb, pp))) = locate(r, params, &inp.prevout.txid) else { continue };
