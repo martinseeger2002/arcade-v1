@@ -143,11 +143,11 @@ fn stop_cleanly_on_signal(node: Arc<Node>) {
                 arcade_chaindb::db::STOPPING.store(true, std::sync::atomic::Ordering::SeqCst);
                 eprintln!("arcaded: stopping: writing the coin caches (stop again to leave without writing them)");
                 let t = std::time::Instant::now();
-                for c in 0..=255u16 {
-                    if !node.chain.coins_settled(c) {
-                        if let Err(e) = node.chain.flush_coins(c) {
-                            eprintln!("arcaded: chain {c}: coin cache not written: {e}");
-                        }
+                // Waits for a batch still writing to commit first: its cache flush is only
+                // in the database once that batch commits.
+                for (c, r) in node.chain.flush_all_for_stop() {
+                    if let Err(e) = r {
+                        eprintln!("arcaded: chain {c}: coin cache not written: {e}");
                     }
                 }
                 eprintln!("arcaded: stopped ({:.1}s)", t.elapsed().as_secs_f64());
