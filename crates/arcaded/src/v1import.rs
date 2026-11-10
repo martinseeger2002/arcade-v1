@@ -51,15 +51,32 @@ pub fn auto_home(node: Arc<Node>) {
     std::thread::Builder::new()
         .name("install-home".into())
         .spawn(move || {
-            // Give the mesh a minute to tell us tips and holders.
-            std::thread::sleep(Duration::from_secs(60));
-            let (lag, _) = crate::borrow::home_lag(&node);
-            if lag < 50_000 {
-                return;
-            }
-            let _ = node.app.event("chain", &format!("{} is {lag} blocks behind: asking the mesh for copies to install it from", node.params.name));
-            if let Err(e) = start_with(node.clone(), node.params.key, 1200) {
-                let _ = node.app.event("chain", &format!("installing {} from copies: {e}", node.params.name));
+            // Checked every minute, not once: the mesh may not have told us tips in the first
+            // minute (links still forming), and an attempt can fail (no 2 makers linked yet,
+            // a maker restarted). Tried again 10 minutes after a failed attempt, for as long
+            // as the home chain is far behind (ThinkPad 2026-11-10 synced from zero after one
+            // early check).
+            let mut last_try: Option<Instant> = None;
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+                let (lag, _) = crate::borrow::home_lag(&node);
+                let running = jobs().get(node.params.key).is_some_and(|x| x.phase != "done" && x.phase != "failed");
+                let done = jobs().get(node.params.key).is_some_and(|x| x.phase == "done");
+                if done {
+                    return;
+                }
+                if running || lag < 50_000 || last_try.is_some_and(|t| t.elapsed() < Duration::from_secs(600)) {
+                    // Caught up the usual way (and tips known): nothing more to do.
+                    if !running && lag < 1_000 && node.mesh_tips.lock().unwrap().len() > 0 {
+                        return;
+                    }
+                    continue;
+                }
+                last_try = Some(Instant::now());
+                let _ = node.app.event("chain", &format!("{} is {lag} blocks behind: asking the mesh for copies to install it from", node.params.name));
+                if let Err(e) = start_with(node.clone(), node.params.key, 1200) {
+                    let _ = node.app.event("chain", &format!("installing {} from copies: {e}", node.params.name));
+                }
             }
         })
         .unwrap();
