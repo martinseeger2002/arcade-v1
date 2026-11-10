@@ -195,7 +195,7 @@ fn listen(node: &Node, peer: &mut Peer, dur: Duration) -> Result<(), String> {
                 "headers" => return Ok(()),
                 "tx" => {
                     if let Ok(tx) = arcade_chain::Tx::parse_with(&m.payload, &p.format) {
-                        let _ = node.chain.mempool_add(p, &tx, arcade_app::now());
+                        let _ = crate::mempoolshare::add(node, p, &tx);
                     }
                 }
                 _ => {}

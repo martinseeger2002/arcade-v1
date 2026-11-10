@@ -1146,6 +1146,11 @@ impl ChainDb {
             .collect())
     }
 
+    /// A pooled transaction's raw bytes by txid.
+    pub fn mempool_tx(&self, c: u16, txid: &Hash256) -> Result<Option<Vec<u8>>> {
+        Ok(self.store.read(|r| r.get(MEMPOOL, &k_txs(c, &txid.t12())))?.map(|v| v[8..].to_vec()))
+    }
+
     /// The pooled transaction spending an outpoint, if any.
     pub fn mempool_spender(&self, c: u16, op: &OutPoint) -> Result<Option<Hash256>> {
         self.store.read(|r| {

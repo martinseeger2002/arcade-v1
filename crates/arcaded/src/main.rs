@@ -39,6 +39,7 @@ mod meshsource;
 mod miner;
 mod meshsvc;
 mod meshview;
+mod mempoolshare;
 mod msgsvc;
 mod ordtypes;
 mod sitesvc;
