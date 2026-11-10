@@ -202,6 +202,13 @@ impl Store {
             w.txn.commit()?;
             ver = to;
         }
+        // Tables declared by this version but missing from an older file (added without a
+        // version bump) are created now, so a newer build can always use them.
+        let txn = self.db.begin_rw_txn()?;
+        for t in self.schema.tables {
+            txn.create_table(Some(t.name), flags(t))?;
+        }
+        txn.commit()?;
         Ok(())
     }
 
@@ -585,6 +592,23 @@ mod tests {
 
     static OTHER: Schema =
         Schema { name: "other", version: 1, tables: TABLES_V1, migrations: &[], max_size: 1 << 30 };
+
+    // The same version as SCHEMA_V1 with one more table (added without a version bump).
+    static TABLES_V1_PLUS: &[TableDef] = &[TableDef::plain("t.v1.a"), TableDef::dup("t.v1.d"), TableDef::plain("t.v1.new")];
+    static SCHEMA_V1_PLUS: Schema = Schema { name: "test", version: 1, tables: TABLES_V1_PLUS, migrations: &[], max_size: 1 << 30 };
+
+    #[test]
+    fn table_added_without_a_version_bump_exists_in_an_older_file() {
+        let (_d, p) = tmp();
+        {
+            let s = Store::open(&p, &SCHEMA_V1).unwrap();
+            s.write(|w| w.put("t.v1.a", b"k", b"v")).unwrap();
+        }
+        let s = Store::open(&p, &SCHEMA_V1_PLUS).unwrap();
+        s.write(|w| w.put("t.v1.new", b"x", b"y")).unwrap();
+        assert_eq!(s.read(|r| r.get("t.v1.new", b"x")).unwrap(), Some(b"y".to_vec()));
+        assert_eq!(s.read(|r| r.get("t.v1.a", b"k")).unwrap(), Some(b"v".to_vec()));
+    }
 
     fn tmp() -> (tempfile::TempDir, std::path::PathBuf) {
         let d = tempfile::tempdir().unwrap();

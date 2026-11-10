@@ -24,6 +24,11 @@ pub fn on_op_me(peer: &str, head: &Value) {
     ops().insert(peer.to_string(), (arcade_app::now(), keep));
 }
 
+/// The operator's @tag of an arcade, as its "op me" said (None if not heard).
+pub fn tag_of(peer: &str) -> Option<String> {
+    ops().get(peer).and_then(|(_, v)| v["tag"].as_str().map(String::from))
+}
+
 fn key_of_net(net: &str) -> String {
     by_net(net).map(|p| p.key.to_string()).unwrap_or_else(|| net.to_string())
 }

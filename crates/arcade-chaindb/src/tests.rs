@@ -551,3 +551,34 @@ fn tx_index_runs_many_flushes_then_built() {
     want[2] = got[2].clone();
     assert_eq!(got, want, "runs, then built = direct");
 }
+
+#[test]
+fn failed_cached_batch_winds_back_and_reconnects_the_same() {
+    let direct = fixture();
+    let blocks = busy_chain(&direct.g, 40);
+    direct.db.connect_blocks(direct.p, &blocks).unwrap();
+    let c = direct.p.chain_no;
+
+    let f = fixture();
+    f.db.set_coin_cache_mb(1024);
+    // A flushed stretch, then cached batches whose coins live only in the cache.
+    f.db.connect_blocks_with(f.p, &blocks[..10], true, true).unwrap();
+    f.db.flush_coins(c).unwrap();
+    f.db.connect_blocks_with(f.p, &blocks[10..20], true, true).unwrap();
+    assert!(!f.db.coins_settled(c));
+    // A batch that fails part way (its last block doesn't follow): it rolls back, and the
+    // cache, already changed by the good blocks before it, must not be kept.
+    let mut bad: Vec<Block> = blocks[20..25].to_vec();
+    bad.push(blocks[30].clone());
+    assert!(f.db.connect_blocks_with(f.p, &bad, true, true).is_err());
+    assert!(f.db.coins_settled(c), "cache dropped");
+    assert_eq!(f.db.tip(c).unwrap().unwrap().height, 10, "wound back to the last complete flush");
+    // That stretch connects again, to the same coins as a direct sync.
+    f.db.connect_blocks_with(f.p, &blocks[10..], true, true).unwrap();
+    f.db.flush_coins(c).unwrap();
+    build(&f);
+    let mut want = coin_tables(&direct.db);
+    let got = coin_tables(&f.db);
+    want[2] = got[2].clone();
+    assert_eq!(got, want, "failed batch, wound back, reconnected = direct");
+}

@@ -37,6 +37,11 @@
 <main>
   <!-- Home: the arcade mesh at a glance -->
   <section id="home" class="tab on">
+    <div id="h-start" class="start" hidden>
+      <h2>Getting started</h2>
+      <p class="hint">Three steps to get going: a wallet, then your @handle. Test coins for the handle come from the mesh by themselves.</p>
+      <ol class="start-steps" id="h-steps"></ol>
+    </div>
     <h1>Arcade mesh</h1>
     <p class="note" id="h-sum">Asking the mesh…</p>
     <div class="arcades" id="h-arcades"></div>
@@ -78,7 +83,6 @@
         <div class="wl-actions">
           <button class="primary" id="w-btn-send">Send ↑</button>
           <button class="primary" id="w-btn-recv">Receive ↓</button>
-          <button id="w-faucet">Test coins</button>
         </div>
       </div>
 

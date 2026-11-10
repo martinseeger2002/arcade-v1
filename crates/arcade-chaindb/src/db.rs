@@ -500,6 +500,8 @@ fn ix_key(c: u16, name: &str) -> Vec<u8> {
 /// writes are the last word (a block connected after its chain's flush would land in a new
 /// cache that is lost, winding the tip back again at the next start).
 pub static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Held while a batch of blocks is connected (and committed), and by the stop's last flush.
+static BATCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl ChainDb {
     pub fn open(path: impl AsRef<Path>) -> Result<ChainDb> {
@@ -549,6 +551,19 @@ impl ChainDb {
     /// Whether a chain's coin cache is empty (everything is in the database).
     pub fn coins_settled(&self, c: u16) -> bool {
         self.caches.lock().unwrap().get(&c).is_none_or(|cc| cc.is_empty())
+    }
+
+    /// Stopping: wait for a batch being connected to commit (or roll back), then write every
+    /// coin cache. Nothing connects afterwards (STOPPING is set first by the caller).
+    pub fn flush_all_for_stop(&self) -> Vec<(u16, Result<()>)> {
+        let _batch = BATCH.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        for c in 0..=255u16 {
+            if !self.coins_settled(c) {
+                out.push((c, self.flush_coins(c)));
+            }
+        }
+        out
     }
 
     /// Write a chain's coin cache to the database now (it matches the current tip).
@@ -1289,6 +1304,8 @@ impl ChainDb {
     }
 
     pub(crate) fn connect_blocks_with(&self, params: &ChainParams, blocks: &[Block], check: bool, defer: bool) -> Result<Tip> {
+        // One batch at a time against a stop (flush_all_for_stop waits for it to commit).
+        let _batch = BATCH.lock().unwrap_or_else(|e| e.into_inner());
         if STOPPING.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(other("the arcade is stopping"));
         }
@@ -1352,6 +1369,15 @@ impl ChainDb {
             Ok(t)
         });
         TIMES[2].fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        if r.is_err() && defer {
+            // The batch rolled back, but the coin cache already holds (or, after a flush,
+            // lost) its changes: it no longer matches the database. Drop it and wind the tip
+            // back to the last complete flush, as after a crash; that stretch connects again.
+            self.caches.lock().unwrap().remove(&c);
+            if let Err(e) = self.recover_coins(c) {
+                eprintln!("chain {c}: winding back after a failed batch: {e}");
+            }
+        }
         r
     }
 
