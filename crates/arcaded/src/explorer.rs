@@ -127,6 +127,28 @@ pub fn handle(node: &Node, cmd: &str, req: &Value) -> R {
                         }
                     }
                 }
+                // The overview's sections for those indexes (latest inscriptions, tokens,
+                // names, maps) from an arcade keeping them: one summary question.
+                let parts: &[(&str, &[&str])] = &[
+                    ("ord", &["inscriptions", "latest"]),
+                    ("tokens", &["ticks", "protocol", "tokens"]),
+                    ("names", &["names", "name_rows"]),
+                    ("maps", &["maps", "map_rows"]),
+                ];
+                if let Some((first, _)) = parts.iter().find(|(ix, _)| more.iter().any(|m| m == ix)) {
+                    let mut q = req.clone();
+                    q["chain"] = json!(p.key);
+                    if let Ok((r, id)) = crate::shares::ask_explorer(node, p, first, cmd, &q) {
+                        for (ix, keys) in parts {
+                            if more.iter().any(|m| m == ix) && r[keys[0]].is_null() == false {
+                                for k in *keys {
+                                    v[*k] = r[*k].clone();
+                                }
+                                v["mesh_parts"][*ix] = mesh_from(&id);
+                            }
+                        }
+                    }
+                }
                 v["mesh_indexes"] = json!(more);
             }
             if cmd == "explorer.address" && v.is_object() {

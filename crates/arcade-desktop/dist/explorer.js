@@ -399,14 +399,18 @@
     paintNav();
     try {
       if (!sum || sum.chain !== chain.key) sum = await xapi("explorer.summary", { chain: chain.key });
+      const sumFrom = sum._mesh || (sum.mesh_parts ? Object.values(sum.mesh_parts)[0] : null);
       // A page whose index is off on this chain isn't available: back to the overview.
       if (NEEDS[page] && !has(NEEDS[page])) { page = "home"; arg = null; }
       if (!VIEWS[page]) { page = "home"; arg = null; }
-      meshFrom = null;
+      meshFrom = page === "home" ? sumFrom : null;
       const v = await VIEWS[page]();
       if (my !== seq) return;
-      const from = meshFrom && page !== "home"
-        ? h("div", { class: "x-mesh" }, `Answered by ${meshFrom.tag ? "@" + meshFrom.tag + "'s arcade" : "arcade " + meshFrom.node.slice(0, 8)} on the mesh: this arcade doesn't keep that ${chain.name} index, so it's their word, not checked here.`)
+      const who = meshFrom ? (meshFrom.tag ? "@" + meshFrom.tag + "'s arcade" : "arcade " + meshFrom.node.slice(0, 8)) : "";
+      const from = meshFrom
+        ? h("div", { class: "x-mesh" }, page === "home"
+            ? `Inscriptions, tokens and names below come from ${who} on the mesh: this arcade doesn't keep those ${chain.name} indexes, so they're their word, not checked here.`
+            : `Answered by ${who} on the mesh: this arcade doesn't keep that ${chain.name} index, so it's their word, not checked here.`)
         : null;
       $("x-view").replaceChildren(...[from, v].filter(Boolean));
       paintNav();

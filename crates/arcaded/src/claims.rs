@@ -344,10 +344,25 @@ pub fn start_status(node: &Node) -> serde_json::Value {
     let script = arcade_wallet::keys::p2pkh_script_for(&arcade_wallet::secp256k1::PublicKey::from_slice(&hex::decode(&key.pubkey).unwrap()).unwrap());
     let balance: u64 = coins(node, &script).iter().map(|u| u.value).sum();
     let ask = crate::faucet::last_ask(node, &key.address);
+    let best = {
+        let ours = node.chain.best_header(p.chain_no).ok().flatten().and_then(|h| node.chain.header(p.chain_no, &h).ok().flatten()).map(|r| r.height as u64).unwrap_or(0);
+        let mesh = node.mesh_tips.lock().unwrap().values().map(|t| t.height).max().unwrap_or(0);
+        let bk = node.bk_peers.lock().unwrap().values().copied().max().unwrap_or(0);
+        ours.max(mesh).max(bk)
+    };
     json!({
         "wallet": true, "tag": tag, "address": key.address, "balance": balance,
         "claim": claim.map(|c| json!({"tag": c.tag, "status": format!("{:?}", c.status).to_lowercase(), "note": c.note})),
-        "faucet": ask.map(|(s, at)| json!({"status": format!("{s:?}").to_lowercase(), "at": at})),
+        "faucet": ask.map(|(s, at)| {
+            let paid = node.app.faucet_requests().unwrap_or_default().into_iter().filter(|f| f.address == key.address && f.txid.is_some()).max_by_key(|f| f.created);
+            json!({"status": format!("{s:?}").to_lowercase(), "at": at, "txid": paid.as_ref().and_then(|f| f.txid.clone()), "by": paid.and_then(|f| f.paid_by)})
+        }),
         "synced": node.sync_state.lock().unwrap().starts_with("synced"),
+        // How far this arcade has read the chain (a fresh install catches up first; a coin
+        // paid in a recent block shows only once it gets there).
+        "height": node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height),
+        // The chain's height: our best header, or what other arcades report (a fresh install
+        // is still fetching headers too).
+        "best": best,
     })
 }
