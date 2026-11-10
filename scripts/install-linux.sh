@@ -119,6 +119,9 @@ systemctl --user stop arcaded.service 2>/dev/null || true
 install -m 0755 "$FROM/arcaded" "$BIN/arcaded"
 install -m 0755 "$FROM/arcade" "$BIN/arcade"
 
+# A first install opens the app at the end (updates don't); ARCADE_NO_OPEN=1 never does.
+FIRST=0
+[ ! -x "$BIN/arcade-desktop" ] && FIRST=1
 if [ "$DESKTOP" = 1 ]; then
   install -m 0755 "$FROM/arcade-desktop" "$BIN/arcade-desktop"
   mkdir -p "$ICONS" "$APPS"
@@ -173,9 +176,16 @@ echo "  data:     $HOME_DIR"
 echo "  ports:    http $HTTP_PORT, mesh $MESH_PORT, STUN $([ "$STUN_PORT" = 0 ] && echo off || echo "$STUN_PORT")"
 echo "  service:  systemctl --user status arcaded"
 [ "$DESKTOP" = 1 ] && echo "  app:      \"Arcade V1.0\" in your app menu (or run arcade-desktop)"
-echo "  setup:    arcade --home $HOME_DIR setup     (wallet and @handle)"
+echo "  setup:    the app's Home tab walks you through it (or: arcade --home $HOME_DIR setup)"
 if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]; then
   echo
   echo "To keep it running when you are logged out (and start it at boot):  sudo loginctl enable-linger $USER"
 fi
 case ":$PATH:" in *":$BIN:"*) ;; *) echo; echo "Add $BIN to your PATH to run arcade from any terminal." ;; esac
+
+# First install on a desktop: open the app (its Home tab walks through wallet and @handle).
+if [ "$DESKTOP" = 1 ] && [ "$FIRST" = 1 ] && [ "${ARCADE_NO_OPEN:-0}" != 1 ] && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
+  echo
+  say "Opening Arcade V1.0..."
+  setsid -f env $ENV_LINE "$BIN/arcade-desktop" >/dev/null 2>&1 < /dev/null || true
+fi
