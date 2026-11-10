@@ -38,17 +38,18 @@ const goTab = (t) => { const b = document.querySelector(`nav button[data-tab="${
 async function drawStart() {
   const st = await api("start.status").catch(() => null);
   const box = $("h-start");
-  if (!st || st.tag) { box.hidden = true; return; }
+  if (!st || st.tag) { box.hidden = true; drawStart.sig = null; return; }
   box.hidden = false;
   const c = st.claim, f = st.faucet;
   const coin = homeTicker();
   const steps = [
     {
       done: st.wallet,
-      title: "Make your wallet",
+      title: "Make your wallet, or restore yours",
       text: st.wallet ? "Done. Your wallet is a 12-word recovery phrase kept on this PC; it's the only backup, so keep the words safe."
-        : "Open the Wallet tab and press Create a new wallet (or restore one from its 12 words). Write the words down.",
-      go: st.wallet ? null : ["Open Wallet", "wallet"],
+        : "New here: create a wallet on the Wallet tab and write its 12 words down. Had one before: type its 12 words below to restore it, your @handle and coins included.",
+      go: st.wallet ? null : ["Create a new wallet", "wallet"],
+      restore: !st.wallet,
     },
     {
       done: !!st.wallet && (st.balance > 0 || (c && c.status !== "failed")),
@@ -67,10 +68,35 @@ async function drawStart() {
       go: st.wallet && !(c && c.status !== "failed") ? ["Open Handle", "handle"] : null,
     },
   ];
+  // Drawn again only when a step changes (the page refreshes every few seconds; typed words
+  // in the restore box must stay).
+  const sig = JSON.stringify(steps);
+  if (sig === drawStart.sig) return;
+  drawStart.sig = sig;
   $("h-steps").replaceChildren(...steps.map((x, i) => h("li", { class: x.done ? "done" : "" },
     h("span", { class: "n" }, x.done ? "✓" : String(i + 1)),
     h("div", {}, h("b", {}, x.title), h("div", { class: "hint" }, x.text),
-      x.go ? h("button", { class: "primary", onclick: () => goTab(x.go[1]) }, x.go[0]) : null))));
+      x.go ? h("button", { class: "primary", onclick: () => goTab(x.go[1]) }, x.go[0]) : null,
+      x.restore ? restoreBox() : null))));
+}
+
+// Restore a wallet from its words right on Home (the same as the Wallet tab's Restore).
+let restoring = false;
+function restoreBox() {
+  const ta = h("textarea", { rows: "2", placeholder: "your 12 words, separated by spaces", autocomplete: "off", spellcheck: "false", class: "start-words" });
+  const m = h("p", { class: "msg" });
+  const b = h("button", { onclick: async () => {
+    if (restoring) return;
+    restoring = true; b.disabled = true; msg(m, "Restoring…");
+    try {
+      await api("wallet.create", { phrase: ta.value.trim().toLowerCase().split(/\s+/).join(" ") });
+      ta.value = "";
+      msg(m, "Restored. Your addresses, @handle and coins show up as the chain is read.", "ok");
+      refresh();
+    } catch (e) { msg(m, e.message, "bad"); }
+    finally { restoring = false; b.disabled = false; }
+  } }, "Restore my wallet");
+  return h("div", { class: "start-restore" }, ta, h("div", { class: "row" }, b), m);
 }
 
 // Home: every arcade linked or heard lately, who runs it, and what it offers per chain.
