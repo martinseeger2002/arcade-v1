@@ -192,8 +192,9 @@ fn handle(node: &Node, mut s: TcpStream, site: Option<&PathBuf>) {
         }
         return core_rpc(node, &mut s, &r);
     }
-    // The original's room door for programs (the ASHVALE Bank): hello, join by a signed
-    // certificate, send, leave, and a server-sent event stream. This computer only.
+    // The original's room door for programs (a service that sits in a room as its address):
+    // hello, join by a signed certificate, send, leave, and a server-sent event stream. This
+    // computer only.
     if let Some(what) = path.strip_prefix("/realtime/") {
         if !is_local {
             return json_out(&mut s, 403, &json!({"ok": false, "error": "the room door answers only this computer"}));
@@ -217,7 +218,7 @@ fn handle(node: &Node, mut s: TcpStream, site: Option<&PathBuf>) {
     }
     let p = node.params;
     // The original's full-page view of an inscription (/inscriptions/<id>/full): the same
-    // sandboxed page as /app/<home chain>/<id> (the ASHVALE Bank renders item icons from it).
+    // sandboxed page as /app/<home chain>/<id> (programs render inscriptions from it).
     if let Some(id) = path.strip_prefix("/inscriptions/").and_then(|r| r.strip_suffix("/full")) {
         let to = format!("/app/{}/{}", node.params.key, id);
         return respond(&mut s, "302 Found", "text/plain", &[("Location", to)], b"");
