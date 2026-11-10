@@ -61,3 +61,30 @@ async function loadHome() {
   return HOME;
 }
 loadHome();
+
+// "/content/<id>" in a feed post or a message (the original arcade's links): the inscription itself, from the
+// home chain's arcade ledger, else its ord index. Looked up once per id.
+const CONTENT_CACHE = new Map();
+const CONTENT_RE = /\/content\/([0-9a-f]{64}(?:i\d+)?)/gi;
+function contentOf(id) {
+  if (!CONTENT_CACHE.has(id)) {
+    CONTENT_CACHE.set(id, api("explorer.ledger_inscription", { chain: HOME.key, id })
+      .catch(() => api("explorer.inscription", { chain: HOME.key, id }))
+      .then((r) => r.content || null).catch(() => null));
+  }
+  return CONTENT_CACHE.get(id);
+}
+function contentEmbeds(text) {
+  const ids = [...new Set([...(text || "").matchAll(CONTENT_RE)].map((m) => m[1].toLowerCase()))].slice(0, 4);
+  return ids.map((id) => {
+    const box = h("div", { class: "fd-file fd-embed" });
+    contentOf(id).then((c) => {
+      if (!c) return;
+      if (c.kind === "image" && c.data) box.append(h("img", { src: c.data, alt: "inscription " + id.slice(0, 12), loading: "lazy" }));
+      else if (c.kind === "text" && c.text) box.append(h("pre", { class: "fd-embed-text" }, c.text.slice(0, 2000)));
+      else box.append(h("span", { class: "s" }, `Inscription ${id.slice(0, 12)}… (${c.type || "file"})`));
+    });
+    return box;
+  });
+}
+

@@ -108,7 +108,7 @@
       if (pin) pin.onclick = async () => { await api("group.update", { id, changes: { pinned: m.id } }); note("Pinned."); draw(); };
       rows.push(h("div", { class: "mx-msg " + (mine ? "mine" : "theirs") },
         mine ? "" : h("div", { class: "mx-who" }, who ? (who.tag ? "@" + who.tag : who.address) : m.peer_address),
-        m.text ? h("div", { class: "mx-text" }, m.text) : "", f,
+        m.text ? h("div", { class: "mx-text" }, m.text) : "", ...contentEmbeds(m.text), f,
         h("div", { class: "mx-meta" }, when(m.at), m.height ? "" : " · waiting for a block", " ", pin)));
     }
     body.replaceChildren(...(rows.length ? rows : [h("div", { class: "mx-empty" }, "No messages in this group yet.")]));
@@ -196,7 +196,7 @@
       const mine = m.dir !== "in";
       const f = await fileView(m);
       rows.push(h("div", { class: "mx-msg " + (mine ? "mine" : "theirs") },
-        m.text ? h("div", { class: "mx-text" }, m.text) : "", f,
+        m.text ? h("div", { class: "mx-text" }, m.text) : "", ...contentEmbeds(m.text), f,
         h("div", { class: "mx-meta" }, when(m.at), m.height ? "" : " · waiting for a block", m.fee ? ` · fee ${PEP(m.fee)}` : "")));
     }
     body.replaceChildren(...(rows.length ? rows : [h("div", { class: "mx-empty" }, "No messages yet.")]));
