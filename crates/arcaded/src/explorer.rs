@@ -194,7 +194,13 @@ fn handle_here(node: &Node, cmd: &str, req: &Value) -> R {
             x.need("ord")?;
             let total = ord::count(&x.node.chain, x.c());
             let before = req["before"].as_u64().unwrap_or(total).min(total);
-            Ok(json!({"total": total, "items": latest(&x, before, n(24, 100))}))
+            match s("type").filter(|t| !t.is_empty() && t != "all") {
+                None => Ok(json!({"total": total, "items": latest(&x, before, n(24, 100))})),
+                Some(ty) => {
+                    let (items, next, scanned) = latest_typed(&x, before, n(24, 100), &ty);
+                    Ok(json!({"total": total, "type": ty, "items": items, "next_before": next, "scanned": scanned}))
+                }
+            }
         }
         "explorer.inscription" => {
             x.need("ord")?;
@@ -476,6 +482,59 @@ fn content_of(x: &Ctx, id: &str, meta: Option<&Value>, cap: usize) -> Value {
         }
         Err(err) => json!({"kind": "missing", "error": err}),
     }
+}
+
+/// Content-type groups for the inscription filter ("image", "svg", "text", "html", "json",
+/// "audio", "video", "model", "other"), or an exact type ("image/png").
+pub fn type_matches(ct: &str, ty: &str) -> bool {
+    let base = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let group = |b: &str| -> &'static str {
+        if b == "image/svg+xml" {
+            "svg"
+        } else if b.starts_with("image/") {
+            "image"
+        } else if b == "text/html" {
+            "html"
+        } else if b == "application/json" || b.ends_with("+json") {
+            "json"
+        } else if b.starts_with("text/") {
+            "text"
+        } else if b.starts_with("audio/") {
+            "audio"
+        } else if b.starts_with("video/") {
+            "video"
+        } else if b.starts_with("model/") {
+            "model"
+        } else {
+            "other"
+        }
+    };
+    let ty = ty.trim().to_ascii_lowercase();
+    if ty.contains('/') { base == ty } else { group(&base) == ty }
+}
+
+/// Newest inscriptions below `before` of one content type: (items, where to go on from,
+/// numbers looked at). Inscriptions are kept by number, so this looks back at most SCAN
+/// numbers per call; `next_before` (None at inscription 0) continues the search.
+fn latest_typed(x: &Ctx, before: u64, n: u64, ty: &str) -> (Vec<Value>, Option<u64>, u64) {
+    const SCAN: u64 = 20_000;
+    let (mut out, mut num, mut scanned) = (Vec::new(), before, 0u64);
+    while num > 0 && (out.len() as u64) < n && scanned < SCAN {
+        num -= 1;
+        scanned += 1;
+        // Only records kept here (a Shared-storage arcade asks others for the rest unfiltered).
+        let Some(mut v) = ord::inscription(&x.node.chain, x.p, &num.to_string()) else { continue };
+        if !type_matches(v["ct"].as_str().unwrap_or(""), ty) {
+            continue;
+        }
+        let id = v["id"].as_str().unwrap_or("").to_string();
+        v["content"] = content(x, &id, 96 << 10);
+        if let Some(o) = v.as_object_mut() {
+            o.remove("txs");
+        }
+        out.push(v);
+    }
+    (out, (num > 0).then_some(num), scanned)
 }
 
 fn latest(x: &Ctx, before: u64, n: u64) -> Vec<Value> {
@@ -860,4 +919,18 @@ fn search(x: &Ctx, q: &str) -> R {
         return Ok(json!({"kind": items[0]["kind"], "id": items[0]["id"]}));
     }
     Ok(json!({"kind": "results", "id": q, "items": items}))
+}
+
+#[cfg(test)]
+mod type_tests {
+    use super::type_matches;
+
+    #[test]
+    fn content_type_groups() {
+        assert!(type_matches("image/png", "image") && !type_matches("image/svg+xml", "image") && type_matches("image/svg+xml", "svg"));
+        assert!(type_matches("text/plain;charset=utf-8", "text") && !type_matches("text/html;charset=utf-8", "text") && type_matches("text/html", "html"));
+        assert!(type_matches("application/json", "json") && type_matches("application/ld+json", "json"));
+        assert!(type_matches("model/gltf-binary", "model") && type_matches("application/pdf", "other") && type_matches("", "other"));
+        assert!(type_matches("image/PNG", "image/png") && !type_matches("image/png", "image/webp"));
+    }
 }
