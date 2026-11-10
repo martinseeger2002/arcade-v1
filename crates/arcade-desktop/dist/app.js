@@ -51,10 +51,15 @@ async function drawStart() {
   const coinsHere = st.balance > 0;
   // Redrawn only when something a step shows changes (typing must survive the 4 s refresh);
   // the "asked … ago" line is updated in place.
-  const sig = JSON.stringify([st.wallet, !!START.phrase, START.saved, coinsHere, !!st.faucet, c && [c.tag, c.status, c.note], failed && failed.tag, START.checked, START.busy, START.msg]);
+  const sig = JSON.stringify([st.wallet, !!START.phrase, START.saved, coinsHere, !!st.faucet, st.faucet && st.faucet.status, c && [c.tag, c.status, c.note], failed && failed.tag, START.checked, START.busy, START.msg]);
+  // A fresh install reads the chain first; a coin paid in a recent block shows once it's there.
+  const catchUp = () => st.height != null && st.best != null && st.best > st.height + 2
+    ? `Your arcade is still reading the ${HOME.name} chain (block ${num(st.height)} of ${num(st.best)}, ${Math.floor(st.height * 100 / st.best)}%); the coin shows once it gets there.`
+    : "";
   const askedText = () => !st.wallet ? `It's asked for by itself as soon as your wallet exists.`
     : coinsHere ? `Here: ${homeCoins(st.balance)}. That pays for publishing your @handle.`
-    : st.faucet ? `Asked the arcade mesh for it ${ago(st.faucet.at) === "just now" ? "just now" : ago(st.faucet.at) + " ago"}; another arcade sends it, usually within a minute or two. Nothing to do: it's used as soon as it arrives, even before a block confirms it.`
+    : st.faucet && st.faucet.status === "paid" ? `Sent to you by another arcade${st.faucet.txid ? ` (transaction ${st.faucet.txid.slice(0, 12)}…)` : ""}. ${catchUp() || "It shows here in a moment."}`
+    : st.faucet ? `Asked the arcade mesh for it ${ago(st.faucet.at) === "just now" ? "just now" : ago(st.faucet.at) + " ago"}; another arcade sends it, usually within a minute or two. Nothing to do: it's used as soon as it arrives, even before a block confirms it.${catchUp() ? " " + catchUp() : ""}`
     : `It's asked for by itself in a moment.`;
   if (sig === drawStart.sig) {
     const el = $("h-asked");
