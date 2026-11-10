@@ -56,7 +56,9 @@ async function drawStart() {
   const catchUp = () => st.height != null && st.best != null && st.best > st.height + 2
     ? `Your arcade is still reading the ${HOME.name} chain (block ${num(st.height)} of ${num(st.best)}, ${Math.floor(st.height * 100 / st.best)}%); the coin shows once it gets there.`
     : "";
+  const used = !!c && (c.status === "sent" || c.status === "confirmed");
   const askedText = () => !st.wallet ? `It's asked for by itself as soon as your wallet exists.`
+    : used ? `Received, and used to publish your @handle.`
     : coinsHere ? `Here: ${homeCoins(st.balance)}. That pays for publishing your @handle.`
     : st.faucet && st.faucet.status === "paid" ? `Sent to you by another arcade${st.faucet.txid ? ` (transaction ${st.faucet.txid.slice(0, 12)}…)` : ""}. ${catchUp() || "It shows here in a moment."}`
     : st.faucet ? `Asked the arcade mesh for it ${ago(st.faucet.at) === "just now" ? "just now" : ago(st.faucet.at) + " ago"}; another arcade sends it, usually within a minute or two. Nothing to do: it's used as soon as it arrives, even before a block confirms it.${catchUp() ? " " + catchUp() : ""}`
@@ -90,7 +92,7 @@ async function drawStart() {
 
   // 2. One test coin.
   const s2 = [h("div", { class: "hint", id: "h-asked" }, askedText()),
-    !coinsHere ? h("div", { class: "hint" }, `Why: your @handle is published on the ${HOME.name} chain, and publishing pays a small network fee. ${coin} is the test coin of that chain; it has no money value.`) : null];
+    !coinsHere && !used ? h("div", { class: "hint" }, `Why: your @handle is published on the ${HOME.name} chain, and publishing pays a small network fee. ${coin} is the test coin of that chain; it has no money value.`) : null];
 
   // 3. The @handle, claimed here.
   let s3;
@@ -120,7 +122,7 @@ async function drawStart() {
 
   const steps = [
     { done: walletDone, title: START.phrase ? "Your 12 words" : st.wallet ? "Your wallet" : "Make your wallet, or restore yours", body: s1 },
-    { done: coinsHere || (!!c && c.status === "sent"), title: coinsHere || (c && c.status === "sent") ? `1 ${coin} for your @handle` : `Waiting for 1 ${coin}`, body: s2 },
+    { done: coinsHere || used, title: coinsHere || used ? `1 ${coin} for your @handle` : `Waiting for 1 ${coin}`, body: s2 },
     { done: false, title: "Claim your @handle", body: s3 },
   ];
   $("h-steps").replaceChildren(...steps.map((x, i) => h("li", { class: x.done ? "done" : "" },

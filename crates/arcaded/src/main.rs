@@ -157,10 +157,49 @@ fn stop_cleanly_on_signal(node: Arc<Node>) {
         .unwrap();
 }
 
+const USAGE: &str = "arcaded: the Arcade V1.0 service (normally started by the installer's service).
+
+usage: arcaded [options]
+  --home DIR            the arcade's folder (default ~/.local/share/arcade)
+  --home-mode shared    keep the home chain in shared storage (default full)
+  --http-port N|0       local web port for the app (0: none)
+  --http-bind ADDR      address the web port listens on
+  --site DIR            serve this folder as the app
+  --mesh-port N|0       mesh port (default 8421; 0: none)
+  --mesh-peer HOST:PORT also link to this arcade (repeatable)
+  --no-mesh             no mesh links at all
+  --no-seeds            don't dial the seed arcades
+  --p2p-only            sync from coin peers only, no mesh bootstrap
+  --stun-port N|0       STUN port (0: none)
+  --help, --version     print this or the version and exit
+";
+
+/// Hold an exclusive lock on DIR/arcaded.lock for the life of the process (released by the
+/// kernel when it exits, crashes included).
+fn lock_home(home: &std::path::Path) -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    let path = home.join("arcaded.lock");
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(format!("another arcaded is already running in {}", home.display()));
+    }
+    Ok(f)
+}
+
 fn main() {
     tame_malloc();
     be_polite();
     let args: Vec<String> = std::env::args().collect();
+    // Asking what it is never starts one (a bare run starts the service in the default home).
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{USAGE}");
+        return;
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        // The release tag when built by the release workflow, else a local build of the crate.
+        println!("arcaded {}", option_env!("ARCADE_VERSION").unwrap_or(concat!(env!("CARGO_PKG_VERSION"), " (local build)")));
+        return;
+    }
     let home = args
         .iter()
         .position(|a| a == "--home")
@@ -178,6 +217,14 @@ fn main() {
         args.iter().enumerate().filter(|(_, a)| *a == "--mesh-peer").filter_map(|(i, _)| args.get(i + 1).cloned()).collect();
     let no_seeds = args.iter().any(|a| a == "--no-seeds");
     std::fs::create_dir_all(&home).expect("create home");
+    // One arcaded per home: a second one would fight over the databases and the socket.
+    let _lock = match lock_home(&home) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("arcaded: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let app = arcade_app::AppDb::open(&home).expect("open arcade.mdbx");
     let chain = arcade_chaindb::ChainDb::open(home.join("chain.mdbx")).expect("open chain.mdbx");
