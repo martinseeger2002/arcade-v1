@@ -396,3 +396,13 @@ button.linkish { border: 0; background: none; padding: 0; font-size: 11px; color
 .wl-hint { color: var(--muted); font-size: 13px; }
 #w-pick { font: inherit; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink); }
 #w-asset, #w-ikind { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+
+/* Home: getting started, until the owner has a handle. */
+.start { background: var(--panel); border: 1px solid var(--accent); border-radius: 16px; padding: 4px 20px 16px; margin-bottom: 18px; }
+.start .hint { color: var(--muted); font-size: 13px; }
+.start-steps { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-direction: column; gap: 12px; }
+.start-steps li { display: flex; gap: 12px; align-items: flex-start; }
+.start-steps .n { flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; background: var(--panel-2); color: var(--muted); }
+.start-steps li.done .n { background: var(--accent); color: var(--accent-ink); }
+.start-steps li.done b { color: var(--muted); }
+.start-steps button { margin-top: 6px; }
