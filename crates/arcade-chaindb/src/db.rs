@@ -490,6 +490,8 @@ pub struct ChainDb {
     caches: std::sync::Mutex<std::collections::HashMap<u16, CoinCache>>,
     /// Coin cache budget in bytes (0 = no cache): ARCADE_COIN_CACHE_MB, or set_coin_cache_mb.
     cache_bytes: std::sync::atomic::AtomicUsize,
+    /// Address builds running now: per chain, each step's progress (addrbuild).
+    pub(crate) addr_progress: std::sync::Mutex<std::collections::HashMap<u16, [crate::addrbuild::StepProgress; 6]>>,
 }
 
 fn ix_key(c: u16, name: &str) -> Vec<u8> {
@@ -512,6 +514,7 @@ impl ChainDb {
             indexers: Default::default(),
             caches: Default::default(),
             cache_bytes: std::sync::atomic::AtomicUsize::new(cache_budget()),
+            addr_progress: Default::default(),
         };
         for c in 0..=255u16 {
             db.recover_coins(c)?;
@@ -539,6 +542,7 @@ impl ChainDb {
             indexers: Default::default(),
             caches: Default::default(),
             cache_bytes: std::sync::atomic::AtomicUsize::new(0),
+            addr_progress: Default::default(),
         };
         db.load_runs()?;
         Ok(db)
@@ -1181,6 +1185,11 @@ impl ChainDb {
             .into_iter()
             .map(|(_, v)| (u64::from_le_bytes(v[..8].try_into().unwrap()), v[8..].to_vec()))
             .collect())
+    }
+
+    /// A pooled transaction's raw bytes by txid.
+    pub fn mempool_tx(&self, c: u16, txid: &Hash256) -> Result<Option<Vec<u8>>> {
+        Ok(self.store.read(|r| r.get(MEMPOOL, &k_txs(c, &txid.t12())))?.map(|v| v[8..].to_vec()))
     }
 
     /// The pooled transaction spending an outpoint, if any.

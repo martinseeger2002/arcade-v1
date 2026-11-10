@@ -447,7 +447,7 @@ fn build(node: &Node, r: &Value, send: bool) -> Result<(String, u64, Vec<Value>)
         .collect();
     let fee = ins.saturating_sub(tx.outputs.iter().map(|o| o.value).sum());
     if send {
-        if !node.chain.mempool_add(p, &tx, arcade_app::now()).map_err(|e| e.to_string())? {
+        if !crate::mempoolshare::add(node, p, &tx) {
             return Err("the transaction was refused: its coins are spent by another waiting transaction".into());
         }
         crate::claims::mark_spent(node, &tx);

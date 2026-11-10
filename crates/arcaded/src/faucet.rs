@@ -123,6 +123,9 @@ pub fn on_welcome(node: &Node, head: &Value) {
 pub const MIN_GIFT: u64 = 10_000_000;
 /// Kept back for the payment's own fee when sending what is left.
 const FEE_MARGIN: u64 = 1_000_000;
+/// Never given away: a payer keeps this much for its own posts, messages and groups (a fresh
+/// arcade handed its one test coin straight on to the next ask before, 2026-11-10).
+pub const KEEP: u64 = 2 * 100_000_000;
 
 /// Most asks this arcade pays per UTC day.
 pub const DAILY_CAP: usize = 20;
@@ -172,8 +175,11 @@ pub fn pay_asks(node: &Node) {
         let coins = crate::claims::spendable(node, &script);
         // 1 test PEP, or what this arcade can spare down to MIN_GIFT (enough for a @handle
         // claim): a payer running low still helps instead of skipping every ask.
-        let have: u64 = coins.iter().map(|u| u.value).sum();
-        let mut amount = AMOUNT;
+        let have: u64 = coins.iter().map(|u| u.value).sum::<u64>().saturating_sub(KEEP);
+        if have < MIN_GIFT + FEE_MARGIN {
+            return; // nothing to spare beyond what we keep: someone else will pay
+        }
+        let mut amount = AMOUNT.min(have - FEE_MARGIN);
         let tx = loop {
             match arcade_wallet::tx::build_send(p, &to, amount, &sk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST, now as u32) {
                 Ok(t) => break t,
@@ -186,7 +192,12 @@ pub fn pay_asks(node: &Node) {
                 }
             }
         };
-        crate::claims::mark_spent(node, &tx);
+        // The change must still cover what we keep.
+        let change: u64 = tx.outputs.iter().filter(|o| o.script_pubkey == script).map(|o| o.value).sum();
+        if change < KEEP {
+            return;
+        }
+        crate::claims::mark_spent(node, &tx); // (pools it, so the mesh hears it at once)
         node.tx_outbox.lock().unwrap().push(tx.raw.clone());
         let sent = arcade_mesh::welcome::sign(
             serde_json::json!({"a": me, "ask": asker, "at": now, "k": "sent", "tag": ask["tag"], "txid": tx.txid.to_hex()}),

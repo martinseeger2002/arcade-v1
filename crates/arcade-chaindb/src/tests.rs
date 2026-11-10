@@ -582,3 +582,54 @@ fn failed_cached_batch_winds_back_and_reconnects_the_same() {
     want[2] = got[2].clone();
     assert_eq!(got, want, "failed batch, wound back, reconnected = direct");
 }
+
+/// docs/ADDRBUILD.md: a build stopped in step 1 or step 3 goes on at the next start (its run
+/// files and the record kept), to the same address tables as one that ran straight through;
+/// the progress of each step goes from 0 to its total.
+#[test]
+fn address_build_resumes_and_reports_steps() {
+    let live = fixture();
+    let blocks = busy_chain(&live.g, 40);
+    live.db.connect_blocks(live.p, &blocks).unwrap();
+    let want = address_tables(&live.db);
+    let c = live.p.chain_no;
+
+    for stop_in in ["step 1 of 6", "step 3 of 6"] {
+        let f = fixture();
+        f.db.connect_blocks_with(f.p, &blocks, true, true).unwrap();
+        let tmp = f._dir.path().join("tmp");
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let mut seen = 0;
+        // Stopped the second time that step reports progress.
+        let r = f.db.build_addresses(f.p, &tmp, &stop, &mut |s| {
+            if s.contains(stop_in) {
+                seen += 1;
+                if seen == 2 {
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        });
+        assert!(!r.unwrap(), "{stop_in}: stopped part way");
+        assert!(f.db.store.read(|r| r.get(STATE, &k_state(c, crate::addrbuild::RUNS_STATE))).unwrap().is_some(), "{stop_in}: record kept");
+        let files = f.db.addr_resume_files();
+        assert!(!files.is_empty() && files.iter().all(|p| p.exists()), "{stop_in}: run files kept");
+        // The next start goes on; every step's progress ends at its total.
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let mut resumed = false;
+        let mut last: Option<[crate::addrbuild::StepProgress; 6]> = None;
+        assert!(f.db.build_addresses(f.p, &tmp, &stop, &mut |s| {
+            resumed |= s.contains("going on where the last build stopped");
+            last = f.db.build_progress(c).or(last.clone());
+        }).unwrap());
+        assert!(resumed, "{stop_in}: resumed");
+        let steps = last.expect("progress reported");
+        assert!(steps[..5].iter().all(|s| s.state == 2 && s.done == s.total), "{stop_in}: steps 1-5 done: {steps:?}");
+        assert!(f.db.build_progress(c).is_none(), "progress cleared at the end");
+        assert!(f.db.store.read(|r| r.get(STATE, &k_state(c, crate::addrbuild::RUNS_STATE))).unwrap().is_none(), "record gone");
+        assert!(files.iter().all(|p| !p.exists()), "run files deleted");
+        let mut got = address_tables(&f.db);
+        // OUTPUTS and the log compare as for an uninterrupted build (see addresses_built_later_match_live).
+        got[3] = want[3].clone();
+        assert_eq!(got, want, "{stop_in}: resumed build = live");
+    }
+}

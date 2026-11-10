@@ -285,7 +285,10 @@ fn block_time(node: &Node, h: u32) -> u64 {
     node.chain.hash_at(c, h).ok().flatten().and_then(|hash| node.chain.header(c, &hash).ok().flatten()).map(|r| r.header.time as u64).unwrap_or_else(arcade_app::now)
 }
 
-/// Background: scan for new messages every 15 seconds.
+/// Set when a home-chain transaction arrives in the pool: the scan runs at once.
+pub static WAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Background: scan for new messages every 15 seconds, or at once when woken.
 pub fn run(node: std::sync::Arc<Node>) {
     loop {
         if let Err(e) = announce_if_needed(&node) {
@@ -295,7 +298,12 @@ pub fn run(node: std::sync::Arc<Node>) {
             let _ = node.app.event("messages", &format!("scan stopped: {e}"));
             std::thread::sleep(Duration::from_secs(300));
         }
-        std::thread::sleep(Duration::from_secs(15));
+        for _ in 0..60 {
+            if WAKE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 }
 
@@ -352,10 +360,11 @@ fn person(node: &Node, key: &str, fallback_address: &str, profiles: &BTreeMap<St
 pub fn who(node: &Node, name: &str) -> Result<Value, String> {
     let c = node.params.chain_no;
     let n = name.trim();
-    let address = if let Some(t) = n.strip_prefix('@') {
-        arcade_ledger::index::tag_row(&node.chain, c, &t.to_lowercase()).map_err(|e| e.to_string())?.ok_or_else(|| format!("{n} is not claimed"))?.address
-    } else {
-        n.to_string()
+    // "@name", or a bare name that isn't an address (people type handles without the @).
+    let tag = n.strip_prefix('@').or_else(|| arcade_ledger::address::p2pkh_hash_of(node.params, n).is_none().then_some(n));
+    let address = match tag {
+        Some(t) => arcade_ledger::index::tag_row(&node.chain, c, &t.to_lowercase()).map_err(|e| e.to_string())?.ok_or_else(|| format!("@{t} is not claimed"))?.address,
+        None => n.to_string(),
     };
     let prof = arcade_ledger::index::profile(&node.chain, c, &address).map_err(|e| e.to_string())?;
     let Some(prof) = prof.filter(|p| p["stated"] == true || p["address"] == address.as_str()) else {
@@ -564,7 +573,7 @@ pub fn send_payloads_with(node: &Node, payloads: &[Vec<u8>], mut extra: Vec<arca
         let outs: u64 = tx.outputs.iter().map(|o| o.value).sum();
         fees += ins.saturating_sub(outs);
         // Our own pool must take it (no coin spent twice), or nobody else will.
-        if !node.chain.mempool_add(p, &tx, arcade_app::now()).map_err(|e| e.to_string())? {
+        if !crate::mempoolshare::add(node, p, &tx) {
             return Err(if txids.is_empty() {
                 "the message transaction was refused (its coins are spent by another waiting transaction); nothing was sent".into()
             } else {

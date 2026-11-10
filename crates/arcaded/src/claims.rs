@@ -116,6 +116,14 @@ pub fn start(node: &Node, tag: &str) -> Result<Claim, String> {
     if !node.app.has_wallet().map_err(|e| e.to_string())? {
         return Err("create a wallet first (arcade wallet create)".into());
     }
+    // One @handle per wallet (Martin 2026-11-10: no claiming more than one).
+    let p = node.params;
+    if let Some(t) = node.app.tag_keys(p.chain_no).unwrap_or_default().into_iter().find_map(|k| k.tag) {
+        return Err(format!("this wallet already has @{t}; one @handle per wallet"));
+    }
+    if let Some(c) = node.app.claims().unwrap_or_default().into_iter().find(|c| c.chain == p.chain_no && c.status != ClaimStatus::Failed) {
+        return Err(format!("this wallet already has a claim for @{} in progress", c.tag));
+    }
     let index = node.app.free_tag_index(node.params.chain_no).map_err(|e| e.to_string())?;
     let now = arcade_app::now();
     let claim = Claim {
@@ -179,10 +187,16 @@ fn advance_one(node: &Node, mut c: Claim) -> Result<Claim, String> {
             }
         }
         ClaimStatus::Sent => {
-            let confirmed = arcade_ledger::index::tag_row(&node.chain, p.chain_no, &c.tag).ok().flatten().map(|r| r.address == key.address);
+            let local = arcade_ledger::index::tag_row(&node.chain, p.chain_no, &c.tag).ok().flatten().map(|r| r.address == key.address);
+            // This arcade's own tag index still catching up: the mesh's word decides
+            // (ThinkPad 2026-11-09: @test14 was claimed on chain, but the local index was at
+            // block 54,000, so the card waited for the test coin for good).
+            let lagging = local.is_none() && (crate::borrow::is_borrowed(p.key) || crate::borrow::home_lag(node).0 > 10);
+            let mesh = if lagging { mesh_owner(node, &c.tag) } else { None };
+            let confirmed = local.or(mesh.as_ref().map(|a| *a == key.address));
             match confirmed {
                 Some(true) => {
-                    set(&mut c, ClaimStatus::Confirmed, "confirmed on chain");
+                    set(&mut c, ClaimStatus::Confirmed, if local.is_some() { "confirmed on chain" } else { "confirmed on chain (seen by the mesh; this arcade is still catching up)" });
                     let mut k = key.clone();
                     k.tag = Some(c.tag.clone());
                     node.app.put_tag_key(&k).ok();
@@ -196,7 +210,8 @@ fn advance_one(node: &Node, mut c: Claim) -> Result<Claim, String> {
                     let pooled = node.chain.mempool(p.chain_no).unwrap_or_default().iter()
                         .any(|(_, raw)| arcade_chain::Tx::parse_with(raw, &p.format).map(|t| t.txid == txid).unwrap_or(false));
                     let mined = node.chain.tx_raw(p, &txid).ok().flatten().is_some();
-                    if !pooled && !mined && c.updated + 600 < arcade_app::now() {
+                    // Only rebuilt when this arcade can tell (a lagging one may not hold the block yet).
+                    if !pooled && !mined && !lagging && c.updated + 600 < arcade_app::now() {
                         c.txid = None;
                         set(&mut c, ClaimStatus::Checking, "the claim's transaction dropped out; building it again");
                     }
@@ -207,6 +222,25 @@ fn advance_one(node: &Node, mut c: Claim) -> Result<Claim, String> {
     }
     node.app.put_claim(&c).map_err(|e| e.to_string())?;
     Ok(c)
+}
+
+/// Who holds `tag` according to an arcade on the mesh (its explorer.tag answer), asked at
+/// most every 30 s per tag.
+fn mesh_owner(node: &Node, tag: &str) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static LAST: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+    let now = arcade_app::now();
+    {
+        let mut g = LAST.lock().unwrap();
+        let m = g.get_or_insert_with(HashMap::new);
+        if m.get(tag).is_some_and(|t| t + 30 > now) {
+            return None;
+        }
+        m.insert(tag.to_string(), now);
+    }
+    let v = crate::explorer::handle(node, "explorer.tag", &serde_json::json!({"chain": node.params.key, "tag": tag})).ok()?;
+    v["_mesh"].is_object().then(|| v["home_address"].as_str().map(String::from)).flatten()
 }
 
 /// A wallet with no @handle and no claim yet keeps asking for test coins while it has none
@@ -240,7 +274,7 @@ pub fn advance_all(node: &Node) {
 
 /// Remember the coins a transaction we just built spends, until a block settles them.
 pub fn mark_spent(node: &Node, tx: &arcade_chain::Tx) {
-    let _ = node.chain.mempool_add(node.params, tx, arcade_app::now());
+    let _ = crate::mempoolshare::add(node, node.params, tx);
     let mut ps = node.pending_spent.lock().unwrap();
     for i in &tx.inputs {
         ps.insert(i.prevout);

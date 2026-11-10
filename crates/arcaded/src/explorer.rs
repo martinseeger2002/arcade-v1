@@ -90,6 +90,73 @@ pub const FORWARDABLE: &[&str] = &[
     "explorer.ledger_inscriptions", "explorer.ledger_inscription", "explorer.tag", "explorer.search",
 ];
 
+/// Mesh answers kept a short while: the Explorer asks the same things again and again
+/// (switching coins and back, the overview's 30 s refresh). A failure is kept too, so a
+/// holder that can't be reached costs one wait, not one per page.
+fn mesh_ask(node: &Node, p: &'static ChainParams, ix: &str, cmd: &str, q: &Value) -> Result<(Value, String), String> {
+    type Cache = std::collections::HashMap<String, (std::time::Instant, Result<(Value, String), String>)>;
+    static C: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
+    let c = C.get_or_init(Default::default);
+    let key = format!("{}|{ix}|{cmd}|{q}", p.key);
+    if let Some((at, r)) = c.lock().unwrap().get(&key) {
+        let ttl = if r.is_ok() { 30 } else { 20 };
+        if at.elapsed().as_secs() < ttl {
+            return r.clone();
+        }
+    }
+    let r = crate::shares::ask_explorer(node, p, ix, cmd, q);
+    let mut g = c.lock().unwrap();
+    g.retain(|_, (at, _)| at.elapsed().as_secs() < 60);
+    if g.len() < 2000 {
+        g.insert(key, (std::time::Instant::now(), r.clone()));
+    }
+    r
+}
+
+/// mesh_ask, waiting at most `ms`: None when the answer isn't in yet (it lands in the cache
+/// for the next ask).
+fn mesh_ask_within(node: &Node, p: &'static ChainParams, ix: &str, cmd: &str, q: &Value, ms: u64) -> Option<Result<(Value, String), String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let n = node.self_arc();
+    let (ix, cmd, q) = (ix.to_string(), cmd.to_string(), q.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(mesh_ask(&n, p, &ix, &cmd, &q));
+    });
+    rx.recv_timeout(std::time::Duration::from_millis(ms)).ok()
+}
+
+/// A borrowed chain's mempool: the lender's whole pool merged with the shared pool of a
+/// V1.0 arcade keeping the chain (V1.0 arcades share their pools over the mesh; one that only
+/// borrows can't check those transactions itself).
+fn shared_pool(node: &Node, p: &'static ChainParams, lent: Option<Value>, wait_ms: u64) -> Value {
+    let mut v = lent.unwrap_or_else(|| json!({"count": 0, "txs": [], "pending_tags": [], "unit": unit(p)}));
+    let q = json!({"chain": p.key, "local": true});
+    if let Some(Ok((m, id))) = mesh_ask_within(node, p, "", "explorer.mempool", &q, wait_ms) {
+        let mut txs: Vec<Value> = v["txs"].as_array().cloned().unwrap_or_default();
+        for t in m["txs"].as_array().into_iter().flatten() {
+            match txs.iter_mut().find(|x| x["txid"] == t["txid"]) {
+                Some(x) => {
+                    for k in ["out", "kind", "rbf", "size"] {
+                        if x[k].is_null() {
+                            x[k] = t[k].clone();
+                        }
+                    }
+                }
+                None => txs.push(t.clone()),
+            }
+        }
+        let n = txs.len() as u64;
+        v["count"] = json!(v["count"].as_u64().unwrap_or(0).max(n));
+        v["txs"] = json!(txs);
+        if v["pending_tags"].as_array().is_none_or(|a| a.is_empty()) {
+            v["pending_tags"] = m["pending_tags"].clone();
+        }
+        v["shared_from"] = mesh_from(&id);
+        v["note"] = json!("Borrowed: the lender's mempool and the V1.0 arcades' shared mempool, together.");
+    }
+    v
+}
+
 /// Who answered from the mesh: {node, tag}.
 fn mesh_from(id: &str) -> Value {
     json!({"node": &id[..id.len().min(16)], "tag": crate::meshview::tag_of(id)})
@@ -138,7 +205,11 @@ pub fn handle(node: &Node, cmd: &str, req: &Value) -> R {
                 if let Some((first, _)) = parts.iter().find(|(ix, _)| more.iter().any(|m| m == ix)) {
                     let mut q = req.clone();
                     q["chain"] = json!(p.key);
-                    if let Ok((r, id)) = crate::shares::ask_explorer(node, p, first, cmd, &q) {
+                    // Waited on briefly: the overview shows at once, the rest on the next ask.
+                    match mesh_ask_within(node, p, first, cmd, &q, 1500) {
+                        None => v["mesh_pending"] = json!(true),
+                        Some(Err(_)) => {}
+                        Some(Ok((r, id))) => {
                         for (ix, keys) in parts {
                             if more.iter().any(|m| m == ix) && r[keys[0]].is_null() == false {
                                 for k in *keys {
@@ -146,6 +217,7 @@ pub fn handle(node: &Node, cmd: &str, req: &Value) -> R {
                                 }
                                 v["mesh_parts"][*ix] = mesh_from(&id);
                             }
+                        }
                         }
                     }
                 }
@@ -157,7 +229,7 @@ pub fn handle(node: &Node, cmd: &str, req: &Value) -> R {
                     if v.get(keys[0]).is_none() {
                         let mut q = req.clone();
                         q["chain"] = json!(p.key);
-                        if let Ok((r, id)) = crate::shares::ask_explorer(node, p, ix, cmd, &q) {
+                        if let Ok((r, id)) = mesh_ask(node, p, ix, cmd, &q) {
                             for k in keys {
                                 if !r[*k].is_null() {
                                     v[*k] = r[*k].clone();
@@ -180,7 +252,7 @@ pub fn handle(node: &Node, cmd: &str, req: &Value) -> R {
             }
             let mut q = req.clone();
             q["chain"] = json!(p.key);
-            match crate::shares::ask_explorer(node, p, &ix, cmd, &q) {
+            match mesh_ask(node, p, &ix, cmd, &q) {
                 Ok((mut v, id)) => {
                     if v.is_object() {
                         v["_mesh"] = mesh_from(&id);
@@ -195,9 +267,49 @@ pub fn handle(node: &Node, cmd: &str, req: &Value) -> R {
 
 fn handle_here(node: &Node, cmd: &str, req: &Value) -> R {
     let x = ctx(node, req)?;
-    if x.p.chain_no != node.params.chain_no && !node.extra.lock().unwrap().contains_key(x.p.key) {
+    // Not kept here, or kept but still catching up (borrowed meanwhile, the home chain
+    // included): the borrowed chain answers what it can; indexes still come from here or
+    // the mesh.
+    let kept = x.p.chain_no == node.params.chain_no || node.extra.lock().unwrap().contains_key(x.p.key);
+    if !kept || crate::borrow::is_borrowed(x.p.key) {
+        if cmd == "explorer.mempool" {
+            return Ok(shared_pool(node, x.p, crate::borrow::explorer(node, cmd, req, x.p).and_then(|r| r.ok()), 2500));
+        }
+    }
+    if !kept {
         if let Some(r) = crate::borrow::explorer(node, cmd, req, x.p) {
             return r;
+        }
+    } else if crate::borrow::is_borrowed(x.p.key) {
+        match cmd {
+            "explorer.blocks" | "explorer.block" | "explorer.tx" | "explorer.address" | "explorer.mempool" => {
+                // Answered by the borrowed chain; where it can't (an old block below its
+                // floor), this arcade's own copy may already have it.
+                if let Some(Ok(v)) = crate::borrow::explorer(node, cmd, req, x.p) {
+                    return Ok(v);
+                }
+            }
+            "explorer.summary" => {
+                // This arcade's own overview (its indexes), with the newest blocks and the
+                // mempool from the borrowed chain while it catches up.
+                let mut v = summary(&x)?;
+                // (Only once the borrowed chain is ahead of our own copy.)
+                if let Some(Ok(b)) = crate::borrow::explorer(node, cmd, req, x.p).filter(|b| b.as_ref().is_ok_and(|b| b["tip"].as_u64() > v["tip"].as_u64())) {
+                    v["syncing_at"] = v["tip"].clone();
+                    for k in ["tip", "tip_time", "blocks", "mempool"] {
+                        if !b[k].is_null() {
+                            v[k] = b[k].clone();
+                        }
+                    }
+                    v["borrowed"] = json!(true);
+                }
+                let pool = shared_pool(node, x.p, None, 300);
+                if pool["count"].as_u64() > v["mempool"]["count"].as_u64() {
+                    v["mempool"]["count"] = pool["count"].clone();
+                }
+                return Ok(v);
+            }
+            _ => {}
         }
     }
     let s = |k: &str| req[k].as_str().map(String::from);
@@ -218,6 +330,13 @@ fn handle_here(node: &Node, cmd: &str, req: &Value) -> R {
             let before = req["before"].as_u64().unwrap_or(total).min(total);
             match s("type").filter(|t| !t.is_empty() && t != "all") {
                 None => Ok(json!({"total": total, "items": latest(&x, before, n(24, 100))})),
+                // Paged like the full list: offset from the newest, with the group's total.
+                Some(ty) if req["offset"].is_u64() && crate::ordtypes::group_index(&ty).is_some() => {
+                    let g = crate::ordtypes::group_index(&ty).unwrap();
+                    let pg = crate::ordtypes::page(x.node, x.p, g, req["offset"].as_u64().unwrap(), n(24, 100));
+                    let items: Vec<Value> = pg.numbers.iter().flat_map(|num| latest(&x, num + 1, 1)).collect();
+                    Ok(json!({"total": total, "type": ty, "type_total": pg.total, "counting": pg.counting, "offset": req["offset"], "items": items}))
+                }
                 Some(ty) => {
                     let (items, next, scanned) = latest_typed(&x, before, n(24, 100), &ty);
                     Ok(json!({"total": total, "type": ty, "items": items, "next_before": next, "scanned": scanned}))
@@ -298,9 +417,15 @@ fn handle_here(node: &Node, cmd: &str, req: &Value) -> R {
         }
         "explorer.names" => {
             x.need("names")?;
+            // Offset paging (names in alphabetical order) with the total, as tokens.
             let pre = KeyBuf::new().u16(x.c()).u8(0).done();
-            let rows = scan_after(&x, names::WIN, pre.clone(), s("after"), n(50, 200) as usize);
-            Ok(json!({"counts": names::counts(&x.node.chain, x.c()), "items": rows.iter().map(|(k, v)| name_row(pre.len(), k, v)).collect::<Vec<_>>()}))
+            let counts = names::counts(&x.node.chain, x.c());
+            let (off, want) = (req["offset"].as_u64().unwrap_or(0) as usize, n(50, 200) as usize);
+            let rows = match s("after") {
+                Some(a) => scan_after(&x, names::WIN, pre.clone(), Some(a), want),
+                None => x.node.chain.store.read(|r| r.scan_prefix_limit(names::WIN, &pre, off + want)).map_err(e)?.into_iter().skip(off).collect(),
+            };
+            Ok(json!({"counts": counts, "total": counts[0], "offset": off, "items": rows.iter().map(|(k, v)| name_row(pre.len(), k, v)).collect::<Vec<_>>()}))
         }
         "explorer.name" => {
             x.need("names")?;
@@ -316,8 +441,14 @@ fn handle_here(node: &Node, cmd: &str, req: &Value) -> R {
         }
         "explorer.maps" => {
             x.need("maps")?;
-            let rows = scan_after(&x, maps::MAP, KeyBuf::new().u16(x.c()).done(), s("after"), n(50, 200) as usize);
-            Ok(json!({"items": rows.iter().map(|(k, v)| map_row(k, v)).collect::<Vec<_>>()}))
+            let pre = KeyBuf::new().u16(x.c()).done();
+            let total: u64 = maps::counts(&x.node.chain, x.c()).iter().map(|c| c.1).sum();
+            let (off, want) = (req["offset"].as_u64().unwrap_or(0) as usize, n(50, 200) as usize);
+            let rows = match s("after") {
+                Some(a) => scan_after(&x, maps::MAP, pre, Some(a), want),
+                None => x.node.chain.store.read(|r| r.scan_prefix_limit(maps::MAP, &pre, off + want)).map_err(e)?.into_iter().skip(off).collect(),
+            };
+            Ok(json!({"total": total, "offset": off, "items": rows.iter().map(|(k, v)| map_row(k, v)).collect::<Vec<_>>()}))
         }
         "explorer.map" => {
             x.need("maps")?;
@@ -510,6 +641,13 @@ fn content_of(x: &Ctx, id: &str, meta: Option<&Value>, cap: usize) -> Value {
 /// "audio", "video", "model", "other"), or an exact type ("image/png").
 pub fn type_matches(ct: &str, ty: &str) -> bool {
     let base = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let ty = ty.trim().to_ascii_lowercase();
+    if ty.contains('/') { base == ty } else { type_group(ct) == ty }
+}
+
+/// The content-type group of `ct` (see [`type_matches`]).
+pub fn type_group(ct: &str) -> &'static str {
+    let base = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
     let group = |b: &str| -> &'static str {
         if b == "image/svg+xml" {
             "svg"
@@ -531,8 +669,7 @@ pub fn type_matches(ct: &str, ty: &str) -> bool {
             "other"
         }
     };
-    let ty = ty.trim().to_ascii_lowercase();
-    if ty.contains('/') { base == ty } else { group(&base) == ty }
+    group(&base)
 }
 
 /// Newest inscriptions below `before` of one content type: (items, where to go on from,

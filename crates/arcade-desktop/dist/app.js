@@ -56,7 +56,9 @@ async function drawStart() {
   const catchUp = () => st.height != null && st.best != null && st.best > st.height + 2
     ? `Your arcade is still reading the ${HOME.name} chain (block ${num(st.height)} of ${num(st.best)}, ${Math.floor(st.height * 100 / st.best)}%); the coin shows once it gets there.`
     : "";
+  const used = !!c && (c.status === "sent" || c.status === "confirmed");
   const askedText = () => !st.wallet ? `It's asked for by itself as soon as your wallet exists.`
+    : used ? `Received, and used to publish your @handle.`
     : coinsHere ? `Here: ${homeCoins(st.balance)}. That pays for publishing your @handle.`
     : st.faucet && st.faucet.status === "paid" ? `Sent to you by another arcade${st.faucet.txid ? ` (transaction ${st.faucet.txid.slice(0, 12)}…)` : ""}. ${catchUp() || "It shows here in a moment."}`
     : st.faucet ? `Asked the arcade mesh for it ${ago(st.faucet.at) === "just now" ? "just now" : ago(st.faucet.at) + " ago"}; another arcade sends it, usually within a minute or two. Nothing to do: it's used as soon as it arrives, even before a block confirms it.${catchUp() ? " " + catchUp() : ""}`
@@ -90,7 +92,7 @@ async function drawStart() {
 
   // 2. One test coin.
   const s2 = [h("div", { class: "hint", id: "h-asked" }, askedText()),
-    !coinsHere ? h("div", { class: "hint" }, `Why: your @handle is published on the ${HOME.name} chain, and publishing pays a small network fee. ${coin} is the test coin of that chain; it has no money value.`) : null];
+    !coinsHere && !used ? h("div", { class: "hint" }, `Why: your @handle is published on the ${HOME.name} chain, and publishing pays a small network fee. ${coin} is the test coin of that chain; it has no money value.`) : null];
 
   // 3. The @handle, claimed here.
   let s3;
@@ -120,7 +122,7 @@ async function drawStart() {
 
   const steps = [
     { done: walletDone, title: START.phrase ? "Your 12 words" : st.wallet ? "Your wallet" : "Make your wallet, or restore yours", body: s1 },
-    { done: coinsHere || (!!c && c.status === "sent"), title: coinsHere || (c && c.status === "sent") ? `1 ${coin} for your @handle` : `Waiting for 1 ${coin}`, body: s2 },
+    { done: coinsHere || used, title: coinsHere || used ? `1 ${coin} for your @handle` : `Waiting for 1 ${coin}`, body: s2 },
     { done: false, title: "Claim your @handle", body: s3 },
   ];
   $("h-steps").replaceChildren(...steps.map((x, i) => h("li", { class: x.done ? "done" : "" },
@@ -155,6 +157,7 @@ const gb = (b) => (b ? `${(b / 1e9).toFixed(b < 1e10 ? 1 : 0)} GB` : "");
 function chip(text, kind = "", tip) { return h("span", { class: "chip " + kind, title: tip }, text); }
 function chainChips(c) {
   const out = [];
+  if (c.holds) out.push(chip(`block ${num(c.holds.h)}`), ...(c.holds.ix || []).map((x) => chip(IX_NAMES[x] || x, "on")));
   if (c.lends != null) out.push(chip(`lends its Core · block ${num(c.lends)}`, "on"));
   if (c.blocks != null) out.push(chip(`serves blocks to ${num(c.blocks)}`));
   const cc = c.chain_copy;
@@ -171,14 +174,44 @@ function chainChips(c) {
   if (x) out.push(x.same === true ? chip(`ledger matches ours to ${num(x.at)}`, "on") : x.same === false ? chip(`ledger differs from ours at ${num(x.at)}`, "bad") : chip(`ledger at ${num(x.h)}`));
   return out;
 }
+const IX_NAMES = { addresses: "addresses", ord: "inscriptions", tokens: "tokens", names: "names", maps: "maps", ledger: "arcade ledger", profiles: "profiles", messages: "messages" };
 function drawMesh(ov) {
   const all = ov.arcades || [];
   const linked = all.filter((a) => a.linked).length;
-  const lend = new Set(all.flatMap((a) => (a.chains || []).filter((c) => c.lends != null).map((c) => c.key)));
-  const copy = new Set(all.flatMap((a) => (a.chains || []).filter((c) => c.chain_copy && (c.chain_copy.can || c.chain_copy.ready)).map((c) => c.key)));
-  $("h-sum").textContent = `This arcade (node ${short(ov.me.node, 12)}) is linked to ${linked} arcade${linked === 1 ? "" : "s"}` +
-    (all.length > linked ? ` and has heard from ${all.length - linked} more` : "") +
-    `. Cores lent: ${lend.size ? [...lend].map((k) => TICKERS[k] || k).join(", ") : "none"}. Chain copies on offer: ${copy.size ? [...copy].map((k) => TICKERS[k] || k).join(", ") : "none"}.`;
+  // 1. This arcade: its chains and the indexes it shares. 2. The mesh at a glance.
+  const me = ov.me || {}, mesh = ov.mesh || { linked, heard: all.length - linked, chains: [] };
+  const ixChips = (ix) => (ix || []).map((x) => chip(IX_NAMES[x] || x, "on"));
+  const meCard = h("div", { class: "arcade me" },
+    h("div", { class: "top" },
+      h("span", { class: "who" }, me.tag ? "@" + me.tag : "This arcade"),
+      h("span", { class: "pill ok" }, "this arcade"),
+      me.version ? h("span", { class: "pill" }, me.version) : null),
+    h("div", { class: "meta" }, `node ${short(me.node || "", 16)} · ${me.links ?? 0} link${me.links === 1 ? "" : "s"}`),
+    (me.chains || []).length
+      ? h("div", { class: "lines" }, ...me.chains.map((c) => h("div", { class: "line" },
+          coinLogo(c.key, c.name, "span", "logo"), h("span", { class: "cn" }, c.name),
+          h("span", { class: "chips" },
+            c.home ? chip("home chain") : null,
+            c.borrowed ? chip("syncing; borrowed meanwhile", "off") : chip(`block ${num(c.tip)}`),
+            c.mode === "shared" ? chip("shared storage") : null,
+            ...ixChips(c.indexes),
+            ...(c.copies || []).map((k) => chip(`copy: ${k.fam} · block ${num(k.cp)}${k.bytes ? " · " + gb(k.bytes) : ""}`, "on"))))))
+      : h("div", { class: "meta" }, "No chains yet."));
+  const meshCard = h("div", { class: "arcade" },
+    h("div", { class: "top" },
+      h("span", { class: "who" }, "The mesh"),
+      h("span", { class: "pill " + (mesh.linked ? "ok" : "") }, `${mesh.linked} linked arcade${mesh.linked === 1 ? "" : "s"}`),
+      mesh.heard ? h("span", { class: "pill" }, `${mesh.heard} more heard`) : null),
+    h("div", { class: "meta" }, "Coins and indexes other arcades share; the Explorer and Chains & Coins use them."),
+    (mesh.chains || []).length
+      ? h("div", { class: "lines" }, ...mesh.chains.map((c) => h("div", { class: "line" },
+          coinLogo(c.key, c.name, "span", "logo"), h("span", { class: "cn" }, c.name),
+          h("span", { class: "chips" },
+            c.arcades ? chip(`kept by ${c.arcades} arcade${c.arcades === 1 ? "" : "s"}`) : null,
+            c.lends ? chip("lends blocks") : null,
+            ...ixChips(c.indexes)))))
+      : h("div", { class: "meta" }, "Nothing shared yet."));
+  $("h-top").replaceChildren(meCard, meshCard);
   $("h-arcades").replaceChildren(...all.map((a) => {
     const who = a.tag ? "@" + a.tag : "arcade " + short(a.node, 8);
     const chains = (a.chains || []).filter((c) => chainChips(c).length);
@@ -407,15 +440,6 @@ function copyText(text, btn) {
   navigator.clipboard.writeText(text).then(() => { const o = btn.textContent; btn.textContent = "Copied"; setTimeout(() => { btn.textContent = o; }, 1200); }).catch(() => {});
 }
 
-async function refreshHandle() {
-  const ch = picked();
-  // @tags are claimed on Pepecoin testnet, whichever chain is picked.
-  $("t-note").hidden = ch.home; $("t-body").hidden = !ch.home;
-  $("t-note").textContent = ch.home ? "" : `@handles live on Pepecoin testnet, so they're the same on every chain. Pick Pepecoin testnet at the top to claim or check one.`;
-  if (!ch.home) return;
-  rows($("t-rows"), state.claims.slice().reverse(), (c) => [["@" + c.tag], [c.status], [c.note]]);
-}
-
 async function refreshMine() {
   const ch = picked();
   $("m-note").hidden = ch.home; $("m-body").hidden = !ch.home;
@@ -454,7 +478,6 @@ async function refresh() {
     await refreshHome();
     const tab = document.querySelector(".tab.on").id;
     if (tab === "wallet") await refreshWallet();
-    if (tab === "handle") await refreshHandle();
     if (tab === "mine") await refreshMine();
     if (tab === "activity") await refreshActivity();
   } catch (e) {
@@ -591,24 +614,6 @@ $("w-sendnow").addEventListener("click", async () => {
     W.viewAt = 0; W.ddAt = 0; refreshWallet();
   } catch (e) { msg($("w-send-msg"), e.message, "bad"); }
   finally { b.disabled = false; }
-});
-
-// Handle actions
-$("t-tag").addEventListener("input", () => { $("t-claim").disabled = true; msg($("t-msg"), ""); });
-$("t-check").addEventListener("click", async () => {
-  try {
-    const r = await api("tag.check", { tag: $("t-tag").value });
-    $("t-claim").disabled = !r.available;
-    msg($("t-msg"), r.available ? `@${r.tag} is free.` : `@${r.tag} is not available: ${r.reason}`, r.available ? "ok" : "bad");
-  } catch (e) { msg($("t-msg"), e.message, "bad"); }
-});
-$("t-claim").addEventListener("click", async () => {
-  try {
-    const c = await api("tag.claim", { tag: $("t-tag").value });
-    $("t-claim").disabled = true;
-    msg($("t-msg"), `Claim for @${c.tag}: ${c.note}`, "ok");
-    refresh();
-  } catch (e) { msg($("t-msg"), e.message, "bad"); }
 });
 
 // Mining

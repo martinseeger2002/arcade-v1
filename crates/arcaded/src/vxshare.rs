@@ -558,6 +558,15 @@ pub fn alive(jk: &str) -> bool {
     st().jobs.contains_key(jk)
 }
 
+/// Does any arcade still announce the copy this job fetches?
+pub fn offered(jk: &str) -> bool {
+    let (net, fam, id) = match st().jobs.get(jk) {
+        Some(j) => (j.net.clone(), j.fam.clone(), j.id.clone()),
+        None => return false,
+    };
+    offers(&net, &fam).get(&id).is_some_and(|o| !o.1.is_empty())
+}
+
 /// An import is done with its fetch: the job and its folder go.
 pub fn finish(jk: &str) {
     if let Some(j) = st().jobs.remove(jk) {

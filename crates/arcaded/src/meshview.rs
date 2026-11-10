@@ -124,6 +124,16 @@ pub fn overview(node: &Node) -> Value {
                 put(&key_of_net(net), "ledger_check", json!({"h": t["h"], "at": at, "same": Some(mine.as_str()) == t["d"].as_str()}));
             }
         }
+        // V1.0: the chains it keeps and the indexes it answers from (its "sh hold").
+        if let Some((at, h)) = node.holds.lock().unwrap().get(&id).cloned().filter(|(at, _)| *at + 600 >= now) {
+            let _ = at;
+            for (net, v) in h.as_object().into_iter().flatten() {
+                if !v.is_object() || by_net(net).is_none() || v["mode"] == "borrowed" {
+                    continue;
+                }
+                put(&key_of_net(net), "holds", json!({"mode": v["mode"], "h": v["h"], "ix": v["ix"]}));
+            }
+        }
         // A Core lent without chain copies: say why, as far as the arcade's own words tell
         // (old arcades only: V1.0 makes no chain copies).
         let v1 = op["version"] == "V1.0";
@@ -157,17 +167,37 @@ pub fn overview(node: &Node) -> Value {
     // Linked first, then by how much they offer.
     arcades.sort_by_key(|a| (a["linked"] != true, std::cmp::Reverse(a["chains"].as_array().map(|c| c.len()).unwrap_or(0))));
 
+    // This arcade: what it keeps and shares, as the mesh hears it (our own "sh hold"), plus
+    // the copies it holds for others.
+    let held = crate::v1copy::held_list(node);
+    let hold = crate::shares::hold_frame(node).head;
     let mut mine = Vec::new();
-    let mut keys = vec![node.params.key.to_string()];
-    keys.extend(node.extra.lock().unwrap().keys().cloned());
-    for k in keys {
-        let Some(p) = by_key(&k) else { continue };
-        let tip = node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height);
-        mine.push(json!({"key": p.key, "name": p.name, "tip": tip, "home": p.chain_no == node.params.chain_no,
-                         "indexes": node.chain.indexers_for(p.chain_no)}));
+    for (net, v) in hold["chains"].as_object().into_iter().flatten() {
+        let Some(p) = by_net(net) else { continue };
+        let copies: Vec<Value> = held.iter().filter(|c| c["net"] == *net).map(|c| json!({"fam": c["fam"], "cp": c["cp"], "bytes": c["bytes"]})).collect();
+        mine.push(json!({"key": p.key, "name": p.name, "tip": v["h"], "mode": v["mode"], "home": p.chain_no == node.params.chain_no,
+                         "indexes": v["ix"], "borrowed": crate::borrow::is_borrowed(p.key), "copies": copies}));
     }
+    // The mesh at a glance: per chain, which indexes other arcades answer from, and who lends.
+    let mut avail: BTreeMap<String, (BTreeSet<String>, usize, bool)> = BTreeMap::new();
+    for a in &arcades {
+        for c in a["chains"].as_array().into_iter().flatten() {
+            let k = c["key"].as_str().unwrap_or("").to_string();
+            let e = avail.entry(k).or_default();
+            if let Some(h) = c.get("holds") {
+                e.1 += 1;
+                e.0.extend(h["ix"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)));
+            }
+            if c.get("lends").is_some() || c.get("blocks").is_some() {
+                e.2 = true;
+            }
+        }
+    }
+    let avail: Vec<Value> = avail.into_iter().map(|(k, (ix, n, lends))| json!({"key": k, "name": name_of(&k), "indexes": ix, "arcades": n, "lends": lends})).collect();
+    let tag = node.app.tag_keys(node.params.chain_no).unwrap_or_default().into_iter().find_map(|k| k.tag);
     json!({
-        "me": {"node": node.id_hex(), "links": links.len(), "chains": mine},
+        "me": {"node": node.id_hex(), "tag": tag, "version": option_env!("ARCADE_VERSION"), "links": links.len(), "chains": mine},
+        "mesh": {"linked": arcades.iter().filter(|a| a["linked"] == true).count(), "heard": arcades.iter().filter(|a| a["linked"] != true).count(), "chains": avail},
         "arcades": arcades,
     })
 }

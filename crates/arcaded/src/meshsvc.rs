@@ -304,6 +304,7 @@ fn serve_loop(
         crate::coreboot::tick(node, link)?;
         crate::vxshare::tick(node, link)?;
         crate::shares::tick(link)?;
+        crate::mempoolshare::tick(node, peer, link)?;
         #[cfg(feature = "oldimport")]
         crate::lxfetch::tick(link)?;
         #[cfg(feature = "oldimport")]
@@ -370,6 +371,7 @@ fn serve_loop(
             "addrs" => on_addrs(node, &f.head),
             "pp" => on_coin_peers(node, &f.head),
             "sz" => crate::sizes::on_sz(node, &link.peer_id, &f.head),
+            "mp" => crate::mempoolshare::on_frame(node, &f.head),
             "sh" if f.head["op"] == "hold" => crate::shares::on_hold(node, &link.peer_id, &f.head),
             "sh" if f.head["op"] == "q" => crate::shares::answer(node, link, &f.head)?,
             "sh" if f.head["op"] == "a" => crate::shares::on_answer(&link.peer_id, &f),

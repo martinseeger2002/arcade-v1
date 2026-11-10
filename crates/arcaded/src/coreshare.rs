@@ -132,7 +132,7 @@ pub fn handle(node: &Node, link: &mut Link, reqs: &mut Requests, f: &Frame) -> R
         "tx" if lent_net(node, &h["net"]).is_some() => {
             let p = lent_net(node, &h["net"]).unwrap();
             if let Ok(tx) = arcade_chain::Tx::parse_with(&f.blob, &p.format) {
-                let _ = node.chain.mempool_add(p, &tx, arcade_app::now());
+                let _ = crate::mempoolshare::add(node, p, &tx);
                 if p.chain_no == node.params.chain_no {
                     node.tx_outbox.lock().unwrap().push(f.blob.clone());
                 }

@@ -1521,13 +1521,31 @@ fn x_addr(node: &Node, p: &'static ChainParams, a: &str) -> R {
     Ok(v)
 }
 
+/// The whole mempool, from a lender's Core (getrawmempool, verbose): newest first, up to
+/// 500, with ours (pushed to us in full) first.
 fn x_mempool(node: &Node, p: &'static ChainParams) -> R {
     let pool: Vec<(Hash256, Vec<u8>, u64)> = ST.pool.lock().unwrap().get(p.key).map(|m| m.iter().map(|(k, v)| (*k, v.0.clone(), v.1)).collect()).unwrap_or_default();
-    let txs: Vec<Value> = pool.iter().filter_map(|(_, raw, seen)| Tx::parse_with(raw, &p.format).ok().map(|t| json!({"txid": t.txid.to_hex(), "seen": seen, "size": t.raw.len(),
-        "out": t.outputs.iter().map(|o| o.value).sum::<u64>(), "rbf": t.inputs.iter().any(|i| i.sequence < 0xffff_fffe), "kind": "payment"}))).collect();
-    let info = call_any(node, p, json!([["getmempoolinfo", []]])).ok().and_then(|(_, a)| r(&a[0]).ok().cloned()).unwrap_or(Value::Null);
-    Ok(json!({"count": txs.len(), "txs": txs, "pending_tags": [], "unit": crate::explorer::unit(p), "lender_pool": info,
-              "note": "Borrowed: only waiting transactions that touch this wallet are listed; lender_pool is the lender's whole mempool."}))
+    let mut txs: Vec<Value> = pool.iter().filter_map(|(_, raw, seen)| Tx::parse_with(raw, &p.format).ok().map(|t| json!({"txid": t.txid.to_hex(), "seen": seen, "size": t.raw.len(),
+        "out": t.outputs.iter().map(|o| o.value).sum::<u64>(), "rbf": t.inputs.iter().any(|i| i.sequence < 0xffff_fffe), "kind": "payment", "mine": true}))).collect();
+    let ans = call_any(node, p, json!([["getmempoolinfo", []], ["getrawmempool", [true]]])).ok();
+    let info = ans.as_ref().and_then(|(_, a)| r(&a[0]).ok().cloned()).unwrap_or(Value::Null);
+    let mut whole: Vec<Value> = ans.as_ref().and_then(|(_, a)| r(&a[1]).ok().cloned()).and_then(|v| v.as_object().cloned()).map(|m| {
+        m.into_iter().map(|(txid, e)| {
+            let fee = e["fees"]["base"].as_f64().or_else(|| e["fee"].as_f64()).map(|f| (f * 1e8).round() as u64);
+            json!({"txid": txid, "seen": e["time"], "size": e["vsize"].as_u64().or_else(|| e["size"].as_u64()), "fee": fee, "out": null, "kind": "payment"})
+        }).collect()
+    }).unwrap_or_default();
+    whole.retain(|w| !txs.iter().any(|t| t["txid"] == w["txid"]));
+    whole.sort_by_key(|w| std::cmp::Reverse(w["seen"].as_u64().unwrap_or(0)));
+    let total = info["size"].as_u64().unwrap_or((txs.len() + whole.len()) as u64);
+    txs.extend(whole.into_iter().take(500));
+    Ok(json!({"count": total, "txs": txs, "pending_tags": [], "unit": crate::explorer::unit(p), "lender_pool": info,
+              "note": "Borrowed: the lender's whole mempool (newest 500 shown)."}))
+}
+
+/// The borrow state line of a chain being borrowed ("Borrowed · at block …").
+pub fn state_text(key: &str) -> Option<String> {
+    ST.runs.lock().unwrap().get(key).map(|r| r.state.lock().unwrap().clone())
 }
 
 #[cfg(test)]
