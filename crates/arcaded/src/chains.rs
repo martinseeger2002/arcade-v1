@@ -745,8 +745,12 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
         }
         None => node.sync_state.lock().unwrap().clone(),
     };
+    // Borrowed while it catches up (from copies or syncing), so balances and the Explorer
+    // work meanwhile.
+    let borrowed = crate::borrow::is_borrowed(p.key);
     Ok(json!({"key": key, "name": p.name, "installed": true, "home": home, "mode": mode, "indexes": indexes,
-              "state": state, "overall": overall, "stages": stages, "tip": tip, "copy": copy}))
+              "state": state, "overall": overall, "stages": stages, "tip": tip, "copy": copy, "borrowed": borrowed,
+              "borrow_state": if borrowed { crate::borrow::state_text(p.key) } else { None }}))
 }
 
 pub fn list(node: &Node) -> Value {

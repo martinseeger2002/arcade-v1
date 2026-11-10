@@ -35,7 +35,7 @@ use arcade_mesh::link::{Frame, Link, LinkError};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const RANGE: u32 = 10_000;
 pub const GROUPS: u8 = 64;
@@ -520,8 +520,28 @@ pub fn prepare_backfill(node: &Node, p: &'static ChainParams, name: &str, max: u
 // ---------------- asking other arcades ----------------
 
 /// A V1.0 arcade's answer to one question about a chain.
+/// Addresses whose dial failed in the last 5 minutes.
+fn dial_fails() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, Instant>> {
+    static F: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Instant>>> = std::sync::OnceLock::new();
+    F.get_or_init(Default::default).lock().unwrap()
+}
+
+fn dial_failed_lately(addr: &str) -> bool {
+    dial_fails().get(addr).is_some_and(|t| t.elapsed() < Duration::from_secs(300))
+}
+
+fn note_dial_failed(addr: &str) {
+    let mut f = dial_fails();
+    f.retain(|_, t| t.elapsed() < Duration::from_secs(300));
+    f.insert(addr.to_string(), Instant::now());
+}
+
 fn ask(node: &Node, addr: &str, q: Value) -> Result<(Value, Vec<u8>), String> {
-    let mut link = Link::dial_asking(addr, crate::meshsvc::NET, &node.identity, node.mesh_port, Duration::from_secs(20))?;
+    ask_with(node, addr, q, Duration::from_secs(20))
+}
+
+fn ask_with(node: &Node, addr: &str, q: Value, dial: Duration) -> Result<(Value, Vec<u8>), String> {
+    let mut link = Link::dial_asking(addr, crate::meshsvc::NET, &node.identity, node.mesh_port, dial)?;
     let mut q = q;
     q["t"] = json!("sh");
     q["op"] = json!("q");
@@ -808,9 +828,17 @@ pub fn ask_explorer(node: &Node, p: &ChainParams, ix: &str, cmd: &str, req: &Val
         let r = if is_linked(node, &id) {
             ask_linked(&id, q)
         } else {
+            // Not linked: dial it, unless dialing it failed lately (then only the introduction
+            // asked for above helps; waiting out a dial on every page made the Explorer slow).
             match addr_of(node, &id) {
-                Some(addr) => ask(node, &addr, q).map(|(v, _)| v),
-                None => continue,
+                Some(addr) if !dial_failed_lately(&addr) => {
+                    let r = ask_with(node, &addr, q, Duration::from_secs(4)).map(|(v, _)| v);
+                    if r.is_err() {
+                        note_dial_failed(&addr);
+                    }
+                    r
+                }
+                _ => continue,
             }
         };
         match r {
