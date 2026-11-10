@@ -157,6 +157,7 @@ const gb = (b) => (b ? `${(b / 1e9).toFixed(b < 1e10 ? 1 : 0)} GB` : "");
 function chip(text, kind = "", tip) { return h("span", { class: "chip " + kind, title: tip }, text); }
 function chainChips(c) {
   const out = [];
+  if (c.holds) out.push(chip(`block ${num(c.holds.h)}`), ...(c.holds.ix || []).map((x) => chip(IX_NAMES[x] || x, "on")));
   if (c.lends != null) out.push(chip(`lends its Core · block ${num(c.lends)}`, "on"));
   if (c.blocks != null) out.push(chip(`serves blocks to ${num(c.blocks)}`));
   const cc = c.chain_copy;
@@ -173,14 +174,44 @@ function chainChips(c) {
   if (x) out.push(x.same === true ? chip(`ledger matches ours to ${num(x.at)}`, "on") : x.same === false ? chip(`ledger differs from ours at ${num(x.at)}`, "bad") : chip(`ledger at ${num(x.h)}`));
   return out;
 }
+const IX_NAMES = { addresses: "addresses", ord: "inscriptions", tokens: "tokens", names: "names", maps: "maps", ledger: "arcade ledger", profiles: "profiles", messages: "messages" };
 function drawMesh(ov) {
   const all = ov.arcades || [];
   const linked = all.filter((a) => a.linked).length;
-  const lend = new Set(all.flatMap((a) => (a.chains || []).filter((c) => c.lends != null).map((c) => c.key)));
-  const copy = new Set(all.flatMap((a) => (a.chains || []).filter((c) => c.chain_copy && (c.chain_copy.can || c.chain_copy.ready)).map((c) => c.key)));
-  $("h-sum").textContent = `This arcade (node ${short(ov.me.node, 12)}) is linked to ${linked} arcade${linked === 1 ? "" : "s"}` +
-    (all.length > linked ? ` and has heard from ${all.length - linked} more` : "") +
-    `. Cores lent: ${lend.size ? [...lend].map((k) => TICKERS[k] || k).join(", ") : "none"}. Chain copies on offer: ${copy.size ? [...copy].map((k) => TICKERS[k] || k).join(", ") : "none"}.`;
+  // 1. This arcade: its chains and the indexes it shares. 2. The mesh at a glance.
+  const me = ov.me || {}, mesh = ov.mesh || { linked, heard: all.length - linked, chains: [] };
+  const ixChips = (ix) => (ix || []).map((x) => chip(IX_NAMES[x] || x, "on"));
+  const meCard = h("div", { class: "arcade me" },
+    h("div", { class: "top" },
+      h("span", { class: "who" }, me.tag ? "@" + me.tag : "This arcade"),
+      h("span", { class: "pill ok" }, "this arcade"),
+      me.version ? h("span", { class: "pill" }, me.version) : null),
+    h("div", { class: "meta" }, `node ${short(me.node || "", 16)} · ${me.links ?? 0} link${me.links === 1 ? "" : "s"}`),
+    (me.chains || []).length
+      ? h("div", { class: "lines" }, ...me.chains.map((c) => h("div", { class: "line" },
+          coinLogo(c.key, c.name, "span", "logo"), h("span", { class: "cn" }, c.name),
+          h("span", { class: "chips" },
+            c.home ? chip("home chain") : null,
+            c.borrowed ? chip("syncing; borrowed meanwhile", "off") : chip(`block ${num(c.tip)}`),
+            c.mode === "shared" ? chip("shared storage") : null,
+            ...ixChips(c.indexes),
+            ...(c.copies || []).map((k) => chip(`copy: ${k.fam} · block ${num(k.cp)}${k.bytes ? " · " + gb(k.bytes) : ""}`, "on"))))))
+      : h("div", { class: "meta" }, "No chains yet."));
+  const meshCard = h("div", { class: "arcade" },
+    h("div", { class: "top" },
+      h("span", { class: "who" }, "The mesh"),
+      h("span", { class: "pill " + (mesh.linked ? "ok" : "") }, `${mesh.linked} linked arcade${mesh.linked === 1 ? "" : "s"}`),
+      mesh.heard ? h("span", { class: "pill" }, `${mesh.heard} more heard`) : null),
+    h("div", { class: "meta" }, "Coins and indexes other arcades share; the Explorer and Chains & Coins use them."),
+    (mesh.chains || []).length
+      ? h("div", { class: "lines" }, ...mesh.chains.map((c) => h("div", { class: "line" },
+          coinLogo(c.key, c.name, "span", "logo"), h("span", { class: "cn" }, c.name),
+          h("span", { class: "chips" },
+            c.arcades ? chip(`kept by ${c.arcades} arcade${c.arcades === 1 ? "" : "s"}`) : null,
+            c.lends ? chip("lends blocks") : null,
+            ...ixChips(c.indexes)))))
+      : h("div", { class: "meta" }, "Nothing shared yet."));
+  $("h-top").replaceChildren(meCard, meshCard);
   $("h-arcades").replaceChildren(...all.map((a) => {
     const who = a.tag ? "@" + a.tag : "arcade " + short(a.node, 8);
     const chains = (a.chains || []).filter((c) => chainChips(c).length);
@@ -409,15 +440,6 @@ function copyText(text, btn) {
   navigator.clipboard.writeText(text).then(() => { const o = btn.textContent; btn.textContent = "Copied"; setTimeout(() => { btn.textContent = o; }, 1200); }).catch(() => {});
 }
 
-async function refreshHandle() {
-  const ch = picked();
-  // @tags are claimed on Pepecoin testnet, whichever chain is picked.
-  $("t-note").hidden = ch.home; $("t-body").hidden = !ch.home;
-  $("t-note").textContent = ch.home ? "" : `@handles live on Pepecoin testnet, so they're the same on every chain. Pick Pepecoin testnet at the top to claim or check one.`;
-  if (!ch.home) return;
-  rows($("t-rows"), state.claims.slice().reverse(), (c) => [["@" + c.tag], [c.status], [c.note]]);
-}
-
 async function refreshMine() {
   const ch = picked();
   $("m-note").hidden = ch.home; $("m-body").hidden = !ch.home;
@@ -456,7 +478,6 @@ async function refresh() {
     await refreshHome();
     const tab = document.querySelector(".tab.on").id;
     if (tab === "wallet") await refreshWallet();
-    if (tab === "handle") await refreshHandle();
     if (tab === "mine") await refreshMine();
     if (tab === "activity") await refreshActivity();
   } catch (e) {
@@ -593,24 +614,6 @@ $("w-sendnow").addEventListener("click", async () => {
     W.viewAt = 0; W.ddAt = 0; refreshWallet();
   } catch (e) { msg($("w-send-msg"), e.message, "bad"); }
   finally { b.disabled = false; }
-});
-
-// Handle actions
-$("t-tag").addEventListener("input", () => { $("t-claim").disabled = true; msg($("t-msg"), ""); });
-$("t-check").addEventListener("click", async () => {
-  try {
-    const r = await api("tag.check", { tag: $("t-tag").value });
-    $("t-claim").disabled = !r.available;
-    msg($("t-msg"), r.available ? `@${r.tag} is free.` : `@${r.tag} is not available: ${r.reason}`, r.available ? "ok" : "bad");
-  } catch (e) { msg($("t-msg"), e.message, "bad"); }
-});
-$("t-claim").addEventListener("click", async () => {
-  try {
-    const c = await api("tag.claim", { tag: $("t-tag").value });
-    $("t-claim").disabled = true;
-    msg($("t-msg"), `Claim for @${c.tag}: ${c.note}`, "ok");
-    refresh();
-  } catch (e) { msg($("t-msg"), e.message, "bad"); }
 });
 
 // Mining

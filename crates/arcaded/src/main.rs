@@ -40,6 +40,7 @@ mod miner;
 mod meshsvc;
 mod meshview;
 mod msgsvc;
+mod ordtypes;
 mod sitesvc;
 mod grpsvc;
 mod feedsvc;
@@ -265,6 +266,7 @@ fn main() {
     chains::start_home(&node).expect("home indexes");
     chains::start_saved(&node);
     borrow::start(node.clone());
+    ordtypes::init(&node);
     // A home chain far behind (a fresh install): installed from copies when the mesh has them.
     v1import::auto_home(node.clone());
     sizes::load(&node);

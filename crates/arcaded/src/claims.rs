@@ -116,6 +116,14 @@ pub fn start(node: &Node, tag: &str) -> Result<Claim, String> {
     if !node.app.has_wallet().map_err(|e| e.to_string())? {
         return Err("create a wallet first (arcade wallet create)".into());
     }
+    // One @handle per wallet (Martin 2026-11-10: no claiming more than one).
+    let p = node.params;
+    if let Some(t) = node.app.tag_keys(p.chain_no).unwrap_or_default().into_iter().find_map(|k| k.tag) {
+        return Err(format!("this wallet already has @{t}; one @handle per wallet"));
+    }
+    if let Some(c) = node.app.claims().unwrap_or_default().into_iter().find(|c| c.chain == p.chain_no && c.status != ClaimStatus::Failed) {
+        return Err(format!("this wallet already has a claim for @{} in progress", c.tag));
+    }
     let index = node.app.free_tag_index(node.params.chain_no).map_err(|e| e.to_string())?;
     let now = arcade_app::now();
     let claim = Claim {

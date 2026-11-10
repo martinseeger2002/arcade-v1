@@ -352,10 +352,11 @@ fn person(node: &Node, key: &str, fallback_address: &str, profiles: &BTreeMap<St
 pub fn who(node: &Node, name: &str) -> Result<Value, String> {
     let c = node.params.chain_no;
     let n = name.trim();
-    let address = if let Some(t) = n.strip_prefix('@') {
-        arcade_ledger::index::tag_row(&node.chain, c, &t.to_lowercase()).map_err(|e| e.to_string())?.ok_or_else(|| format!("{n} is not claimed"))?.address
-    } else {
-        n.to_string()
+    // "@name", or a bare name that isn't an address (people type handles without the @).
+    let tag = n.strip_prefix('@').or_else(|| arcade_ledger::address::p2pkh_hash_of(node.params, n).is_none().then_some(n));
+    let address = match tag {
+        Some(t) => arcade_ledger::index::tag_row(&node.chain, c, &t.to_lowercase()).map_err(|e| e.to_string())?.ok_or_else(|| format!("@{t} is not claimed"))?.address,
+        None => n.to_string(),
     };
     let prof = arcade_ledger::index::profile(&node.chain, c, &address).map_err(|e| e.to_string())?;
     let Some(prof) = prof.filter(|p| p["stated"] == true || p["address"] == address.as_str()) else {
