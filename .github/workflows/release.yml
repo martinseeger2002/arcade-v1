@@ -57,6 +57,7 @@ jobs:
         run: |
           export LIBCLANG_PATH="$(dirname "$(ls /usr/lib/llvm-*/lib/libclang.so* | head -1)")"
           export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"
+          export ARCADE_VERSION="${{ github.event.inputs.version || github.ref_name }}"
           cargo build --release --locked -p arcaded -p arcade-cli -p arcade-desktop
 
       - name: Package
