@@ -114,9 +114,16 @@ fn our_nets(node: &Node) -> Value {
 
 fn read_nets(node: &Node) -> Value {
     let mut nets = json!({});
-    for h in v1copy::held_list(node) {
+    // The newest copy per part; older ones still held (being fetched) are listed in "also".
+    let mut list = v1copy::held_list(node);
+    list.sort_by_key(|h| h["cp"].as_u64().unwrap_or(0));
+    for h in list {
         let (Some(net), Some(fam)) = (h["net"].as_str(), h["fam"].as_str()) else { continue };
-        nets[net][fam] = json!({"id": h["id"], "cp": h["cp"], "hash": h["hash"], "bytes": h["bytes"], "n": h["n"], "made": h["made"], "fmt": h["fmt"]});
+        let mut also: Vec<Value> = nets[net][fam]["also"].as_array().cloned().unwrap_or_default();
+        if let Some(prev) = nets[net][fam]["id"].as_str() {
+            also.push(json!(prev));
+        }
+        nets[net][fam] = json!({"id": h["id"], "cp": h["cp"], "hash": h["hash"], "bytes": h["bytes"], "n": h["n"], "made": h["made"], "fmt": h["fmt"], "also": also});
     }
     nets
 }
@@ -353,7 +360,9 @@ fn schedule(s: &mut State, peer: &str) {
         {
             let next_id = &mut s.next_id;
             let Some(j) = s.jobs.get_mut(&jk) else { continue };
-            if j.phase != "fetching" || nets[&j.net][&j.fam]["id"].as_str() != Some(j.id.as_str()) {
+            let held = &nets[&j.net][&j.fam];
+            let has = held["id"].as_str() == Some(j.id.as_str()) || held["also"].as_array().is_some_and(|a| a.iter().any(|x| x.as_str() == Some(j.id.as_str())));
+            if j.phase != "fetching" || !has {
                 continue;
             }
             let now = Instant::now();

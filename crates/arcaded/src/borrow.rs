@@ -705,14 +705,38 @@ pub fn installed_ready(node: &Node, p: &ChainParams) -> bool {
     tip > 0 && tip + 10 >= top && addresses_ready
 }
 
+/// How far the home chain is behind the best height anyone tells us (headers, arcades on the
+/// mesh, lenders), and whether its address rows are built.
+pub(crate) fn home_lag(node: &Node) -> (u32, bool) {
+    let p = node.params;
+    let c = p.chain_no;
+    let tip = node.chain.tip(c).ok().flatten().map(|t| t.height).unwrap_or(0);
+    let best = node.chain.best_header(c).ok().flatten().and_then(|h| node.chain.header(c, &h).ok().flatten()).map(|r| r.height).unwrap_or(0);
+    let mesh = node.mesh_tips.lock().unwrap().values().map(|t| t.height as u32).max().unwrap_or(0);
+    let bk = node.bk_peers.lock().unwrap().values().map(|h| *h as u32).max().unwrap_or(0);
+    let lent = node.offers_for(p.key).iter().map(|o| o.3 as u32).max().unwrap_or(0);
+    let top = best.max(mesh).max(bk).max(lent);
+    let addresses_ready = !node.chain.addresses_on(c).unwrap_or(true) || !node.chain.addresses_pending(c).unwrap_or(true);
+    (top.saturating_sub(tip), addresses_ready)
+}
+
 /// Start, keep and stop borrowing per chain (called every 20 s and on every switch).
+/// Any chain is borrowed while it is being synced or taken in from copies, the home chain
+/// included (Martin: balances, the test coin and the @handle claim work at once on a fresh
+/// install); its own copy takes over once it has caught up.
 pub fn manage(node: &Node) {
     let c = cfg(node);
     let installed: BTreeSet<String> = node.extra.lock().unwrap().keys().cloned().collect();
     for p in ALL_CHAINS.iter().copied() {
         let home = p.chain_no == node.params.chain_no;
-        let on = chain_on(&c, p.key) && !home && !(installed.contains(p.key) && installed_ready(node, p));
         let running = ST.runs.lock().unwrap().get(p.key).cloned();
+        let on = if home {
+            // Home: start when 100+ blocks behind, stop once within 10 with addresses built.
+            let (lag, addr_ready) = home_lag(node);
+            chain_on(&c, p.key) && if running.is_some() { !(lag <= 10 && addr_ready) } else { lag > 100 }
+        } else {
+            chain_on(&c, p.key) && !(installed.contains(p.key) && installed_ready(node, p))
+        };
         match (on, running) {
             (true, None) => {
                 // Only once an arcade lends it (or we borrowed it before).
@@ -729,7 +753,7 @@ pub fn manage(node: &Node) {
             (false, Some(run)) => {
                 run.stop.store(true, Ordering::Relaxed);
                 ST.runs.lock().unwrap().remove(p.key);
-                let why = if installed.contains(p.key) { "its installed copy has caught up" } else { "switched off" };
+                let why = if installed.contains(p.key) || home { "its own copy has caught up" } else { "switched off" };
                 let _ = node.app.event("borrow", &format!("stopped borrowing {} ({why}); its borrowed data is removed", p.name));
                 let n = node.self_arc();
                 let key = p.key;

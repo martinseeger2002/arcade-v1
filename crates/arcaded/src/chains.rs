@@ -200,6 +200,7 @@ pub fn reregister(node: &Node, p: &'static ChainParams) -> Result<(), String> {
 
 /// Start every chain the user installed earlier.
 pub fn start_saved(node: &Arc<Node>) {
+    run_queue(node.clone());
     for c in saved(node) {
         let (Some(key), Some(mode)) = (c["key"].as_str(), c["mode"].as_str()) else { continue };
         let indexes: Vec<String> = c["indexes"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
@@ -241,7 +242,95 @@ fn launch(node: &Arc<Node>, key: &str, mode: &str, mut indexes: Vec<String>, add
 }
 
 /// Install a chain (by hand only), with the indexes the user opted into.
+// ---------------- one install at a time (Martin): the others wait in a queue ----------------
+
+const QUEUE: &[u8] = b"install_queue";
+
+fn queue(node: &Node) -> Vec<Value> {
+    node.app.store.read(|r| r.get(arcade_app::META, QUEUE)).ok().flatten().and_then(|v| serde_json::from_slice(&v).ok()).unwrap_or_default()
+}
+
+fn save_queue(node: &Node, q: &[Value]) {
+    let _ = node.app.store.write(|w| w.put(arcade_app::META, QUEUE, &serde_json::to_vec(q).unwrap()));
+}
+
+/// The installed chain still being synced or taken in (not caught up yet), if any.
+pub fn installing_now(node: &Node) -> Option<&'static ChainParams> {
+    let runs: Vec<Arc<ChainRun>> = node.extra.lock().unwrap().values().cloned().collect();
+    runs.into_iter().filter(|r| !r.paused.load(Ordering::Relaxed)).map(|r| r.params).find(|p| !crate::borrow::installed_ready(node, p))
+}
+
+/// Position (1 = next) of a chain waiting to be installed.
+pub fn queued_at(node: &Node, key: &str) -> Option<usize> {
+    queue(node).iter().position(|e| e["key"] == key).map(|i| i + 1)
+}
+
+/// chains.unqueue: take a chain out of the install queue.
+pub fn unqueue(node: &Node, key: &str) -> Result<Value, String> {
+    let mut q = queue(node);
+    let n = q.len();
+    q.retain(|e| e["key"] != key);
+    if q.len() == n {
+        return Err(format!("{key} isn't waiting to be installed"));
+    }
+    save_queue(node, &q);
+    Ok(json!({"unqueued": key}))
+}
+
+/// Every 20 s: when no chain is being installed, the next one in the queue starts.
+pub fn run_queue(node: Arc<Node>) {
+    std::thread::Builder::new()
+        .name("install-queue".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(20));
+            if installing_now(&node).is_some() {
+                continue;
+            }
+            let mut q = queue(&node);
+            if q.is_empty() {
+                continue;
+            }
+            let e = q.remove(0);
+            save_queue(&node, &q);
+            let key = e["key"].as_str().unwrap_or("").to_string();
+            let with: Vec<String> = e["with"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+            match add_now(&node, &key, e["mode"].as_str().unwrap_or("full"), with) {
+                Ok(_) => {
+                    let _ = node.app.event("chains", &format!("installing {key} (its turn in the queue)"));
+                }
+                Err(err) => {
+                    let _ = node.app.event("chains", &format!("could not install {key} from the queue: {err}"));
+                }
+            }
+        })
+        .unwrap();
+}
+
+/// chains.add: install a chain now, or, while another chain is still being installed, put it
+/// in the queue (one install at a time: each gets the disk and network to itself).
 pub fn add(node: &Arc<Node>, key: &str, mode: &str, indexes: Vec<String>) -> Result<Value, String> {
+    let key = by_key(key).map(|p| p.key).unwrap_or(key);
+    let p = by_key(key).ok_or_else(|| format!("unknown chain {key}; see  arcade chain list"))?;
+    if let Some(busy) = installing_now(node).filter(|b| b.key != p.key) {
+        if node.extra.lock().unwrap().contains_key(p.key) {
+            return Err(format!("{} is already installed", p.name));
+        }
+        if p.chain_no == node.params.chain_no {
+            return Err(format!("{} is this arcade's home chain and is always installed", p.name));
+        }
+        let mut q = queue(node);
+        if let Some(i) = q.iter().position(|e| e["key"] == p.key) {
+            return Ok(json!({"queued": true, "key": p.key, "position": i + 1, "behind": busy.key}));
+        }
+        q.push(json!({"key": p.key, "mode": mode, "with": indexes, "at": arcade_app::now()}));
+        save_queue(node, &q);
+        let _ = node.app.event("chains", &format!("{} waits to be installed (#{} after {})", p.name, q.len(), busy.name));
+        return Ok(json!({"queued": true, "key": p.key, "position": q.len(), "behind": busy.key}));
+    }
+    add_now(node, key, mode, indexes)
+}
+
+fn add_now(node: &Arc<Node>, key: &str, mode: &str, indexes: Vec<String>) -> Result<Value, String> {
     // Any capitalisation (DOGE, PEPtest) and the old mesh names map to the chain's key.
     let key = by_key(key).map(|p| p.key).unwrap_or(key);
     let p = by_key(key).ok_or_else(|| format!("unknown chain {key}; see  arcade chain list"))?;
@@ -650,7 +739,8 @@ pub fn list(node: &Node) -> Value {
                    "ord": ord_start(p).is_some(), "tokens": arcade_ledger::tokens::protocol(p).map(|x| x.0.to_uppercase()),
                    "dunes": p.key == "doge", "runes": p.key == "btc", "sizes": crate::sizes::for_chain(node, p.key),
                    "offers": node.offers_for(p.key).len(),
-                   "borrowed": st["borrowed"] == true, "lenders": st["lenders"], "tip": st["tip"], "floor": st["floor"], "mismatch": st["mismatch"]})
+                   "borrowed": st["borrowed"] == true, "lenders": st["lenders"], "tip": st["tip"], "floor": st["floor"], "mismatch": st["mismatch"],
+                   "queued": queued_at(node, p.key)})
         })
         .collect::<Vec<_>>())
 }
