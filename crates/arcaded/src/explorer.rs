@@ -82,7 +82,96 @@ fn ctx<'a>(node: &'a Node, req: &Value) -> Result<Ctx<'a>, String> {
     Ok(Ctx { node, p, indexes })
 }
 
+/// Explorer questions another arcade may answer for us (all public, read-only).
+pub const FORWARDABLE: &[&str] = &[
+    "explorer.summary", "explorer.blocks", "explorer.block", "explorer.tx", "explorer.address", "explorer.inscriptions",
+    "explorer.inscription", "explorer.tokens", "explorer.token", "explorer.names", "explorer.name", "explorer.maps",
+    "explorer.map", "explorer.mempool", "explorer.ledger", "explorer.ledger_tokens", "explorer.ledger_token",
+    "explorer.ledger_inscriptions", "explorer.ledger_inscription", "explorer.tag", "explorer.search",
+];
+
+/// Who answered from the mesh: {node, tag}.
+fn mesh_from(id: &str) -> Value {
+    json!({"node": &id[..id.len().min(16)], "tag": crate::meshview::tag_of(id)})
+}
+
+/// The index an error says is missing here ("the ord index is not on ...").
+fn missing_index(e: &str) -> Option<String> {
+    let rest = e.strip_prefix("the ")?;
+    let (ix, tail) = rest.split_once(' ')?;
+    tail.starts_with("index is not on").then(|| ix.to_string())
+}
+
+/// An Explorer question: answered here, or, for a chain or an index this arcade doesn't keep,
+/// by an arcade on the mesh that does (Martin: any index stored by any participant of the
+/// mesh should be available in the explorer). Such answers carry "_mesh": {node, tag}; they
+/// are that arcade's word, not checked here.
 pub fn handle(node: &Node, cmd: &str, req: &Value) -> R {
+    let local = handle_here(node, cmd, req);
+    if req["local"] == true || !FORWARDABLE.contains(&cmd) {
+        return local;
+    }
+    let Some(p) = (match req["chain"].as_str() { Some(k) => by_key(k), None => Some(node.params) }) else { return local };
+    match local {
+        Ok(mut v) => {
+            if cmd == "explorer.summary" {
+                // Indexes other arcades answer for this chain, beyond ours.
+                let ours: Vec<String> = v["indexes"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+                let mut more: Vec<String> = Vec::new();
+                for (id, _) in crate::shares::index_holders(node, p.net, "") {
+                    if let Some(c) = node.holds.lock().unwrap().get(&id).map(|x| x.1[p.net]["ix"].clone()) {
+                        for ix in c.as_array().into_iter().flatten().filter_map(|x| x.as_str()) {
+                            if !ours.iter().any(|o| o == ix) && !more.iter().any(|m| m == ix) {
+                                more.push(ix.to_string());
+                            }
+                        }
+                    }
+                }
+                v["mesh_indexes"] = json!(more);
+            }
+            if cmd == "explorer.address" && v.is_object() {
+                // NFTs and tokens of the address from an arcade that keeps them.
+                for (ix, keys) in [("ord", &["inscriptions", "inscription_count"][..]), ("tokens", &["tokens"][..])] {
+                    if v.get(keys[0]).is_none() {
+                        let mut q = req.clone();
+                        q["chain"] = json!(p.key);
+                        if let Ok((r, id)) = crate::shares::ask_explorer(node, p, ix, cmd, &q) {
+                            for k in keys {
+                                if !r[*k].is_null() {
+                                    v[*k] = r[*k].clone();
+                                }
+                            }
+                            v["mesh_parts"][ix] = mesh_from(&id);
+                        }
+                    }
+                }
+            }
+            Ok(v)
+        }
+        Err(e) => {
+            // A missing index, or a chain not kept here at all.
+            // (Any other failure, e.g. a chain only borrowed here or not kept at all: any
+            // arcade keeping the chain may know.)
+            let ix = missing_index(&e).unwrap_or_default();
+            if crate::shares::index_holders(node, p.net, &ix).is_empty() {
+                return Err(e);
+            }
+            let mut q = req.clone();
+            q["chain"] = json!(p.key);
+            match crate::shares::ask_explorer(node, p, &ix, cmd, &q) {
+                Ok((mut v, id)) => {
+                    if v.is_object() {
+                        v["_mesh"] = mesh_from(&id);
+                    }
+                    Ok(v)
+                }
+                Err(_) => Err(e),
+            }
+        }
+    }
+}
+
+fn handle_here(node: &Node, cmd: &str, req: &Value) -> R {
     let x = ctx(node, req)?;
     if x.p.chain_no != node.params.chain_no && !node.extra.lock().unwrap().contains_key(x.p.key) {
         if let Some(r) = crate::borrow::explorer(node, cmd, req, x.p) {

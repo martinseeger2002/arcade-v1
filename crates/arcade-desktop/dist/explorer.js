@@ -30,7 +30,16 @@
       return w.toLocaleString("en-US") + (f ? "." + f.slice(0, 8) : "");
     } catch { return String(v); }
   };
-  const has = (ix) => !!sum && sum.indexes.includes(ix);
+  // Indexes kept here, or by another arcade on the mesh that answers for them.
+  const has = (ix) => !!sum && (sum.indexes.includes(ix) || (sum.mesh_indexes || []).includes(ix));
+  // Pages (or parts) answered by another arcade say so.
+  let meshFrom = null;
+  const xapi = async (cmd, args) => {
+    const r = await api(cmd, args);
+    if (r && r._mesh) meshFrom = r._mesh;
+    else if (r && r.mesh_parts) meshFrom = Object.values(r.mesh_parts)[0];
+    return r;
+  };
   const link = (text, p, a, extra) => h("span", { class: "link" + (extra ? " " + extra : ""), onclick: (ev) => { ev.stopPropagation(); go(p, a); } }, text);
   const addrLink = (a, tag) => a ? h("span", {}, link(short(a, 10, 6), "address", a, "mono"), tag ? h("span", { class: "chip arc" }, "@" + tag) : "") : h("span", { class: "faint" }, "no address");
 
@@ -127,7 +136,7 @@
 
   // ---------- views ----------
   async function vHome() {
-    sum = await api("explorer.summary", { chain: chain.key });
+    sum = await xapi("explorer.summary", { chain: chain.key });
     const tok = sum.protocol ? sum.protocol.toUpperCase() : "Token";
     const st = [
       ["Height", fmt(sum.tip), sum.tip_time ? `last block ${ago(sum.tip_time)}` : ""],
@@ -159,13 +168,13 @@
   async function vBlocks() {
     const size = 25, total = (sum?.tip ?? 0) + 1, page = pageOf();
     const before = Math.max(0, total - (page - 1) * size);
-    const list = await api("explorer.blocks", { chain: chain.key, before, n: size });
+    const list = await xapi("explorer.blocks", { chain: chain.key, before, n: size });
     // Jump to a height: the page that holds it (page 1 = newest).
     const toPage = (height) => Math.floor((total - 1 - height) / size) + 1;
     return sect("Blocks", null, h("div", {}, pager(total, size, page, "blocks", "block height", toPage), blockRows(list), pager(total, size, page, "blocks", "block height", toPage)));
   }
   async function vMempool() {
-    const m = await api("explorer.mempool", { chain: chain.key });
+    const m = await xapi("explorer.mempool", { chain: chain.key });
     const body = m.txs.length ? table([["Txid"], ["Out", 1], ["Size", 1], ["Kind"]], m.txs.map((t) => ({ go: () => go("tx", t.txid),
       cells: [[h("span", { class: "mono" }, short(t.txid, 16, 8))], [coins(t.out), 1], [`${fmt(t.size)} B`, 1], [h("span", { class: "chip" + (t.kind === "inscription" ? " ins" : "") }, t.kind + (t.rbf ? " · RBF" : ""))]] })))
       : h("div", { class: "x-empty" }, "No unconfirmed transactions right now.");
@@ -175,25 +184,25 @@
   }
   async function vInscriptions() {
     const size = 36, page = pageOf();
-    const first = await api("explorer.inscriptions", { chain: chain.key, n: 1 });
+    const first = await xapi("explorer.inscriptions", { chain: chain.key, n: 1 });
     const total = first.total;
-    const r = await api("explorer.inscriptions", { chain: chain.key, before: Math.max(0, total - (page - 1) * size), n: size });
+    const r = await xapi("explorer.inscriptions", { chain: chain.key, before: Math.max(0, total - (page - 1) * size), n: size });
     const toPage = (num) => Math.floor((total - 1 - num) / size) + 1;
     return sect(`Inscriptions · ${fmt(total)}`, null, h("div", {}, pager(total, size, page, "inscriptions", "inscription #", toPage), insGrid(r.items), pager(total, size, page, "inscriptions", "inscription #", toPage)));
   }
   async function vTokens() {
     const size = 50, page = pageOf();
-    const r = await api("explorer.tokens", { chain: chain.key, offset: (page - 1) * size, n: size });
+    const r = await xapi("explorer.tokens", { chain: chain.key, offset: (page - 1) * size, n: size });
     return sect(`${r.protocol.toUpperCase()} tokens · ${fmt(r.total)}`, null, h("div", {}, pager(r.total, size, page, "tokens"), tokTable(r.items), pager(r.total, size, page, "tokens")));
   }
   async function vNames() {
-    const r = await api("explorer.names", { chain: chain.key, after: arg || undefined, n: 50 });
+    const r = await xapi("explorer.names", { chain: chain.key, after: arg || undefined, n: 50 });
     const last = r.items[r.items.length - 1];
     return sect(`Names · ${fmt(r.counts[0])}`, null, h("div", {}, r.items.length ? table([["Name"], ["Winning inscription", 1]], r.items.map((x) => ({ go: () => go("name", x.name), cells: [[h("span", { class: "mono" }, x.name)], [`#${fmt(x.number)}`, 1]] })))
       : h("div", { class: "x-empty" }, "No names claimed yet."), r.items.length === 50 && last ? h("div", { class: "row" }, h("button", { onclick: () => go("names", last.name) }, "More")) : ""));
   }
   async function vMaps() {
-    const r = await api("explorer.maps", { chain: chain.key, n: 50 });
+    const r = await xapi("explorer.maps", { chain: chain.key, n: 50 });
     return sect("Maps", null, h("div", {}, r.items.length ? table([["Claim"], ["Winning inscription", 1]], r.items.map((x) => ({ go: () => go("map", x.claim), cells: [[h("span", { class: "mono" }, x.claim)], [`#${fmt(x.number)}`, 1]] })))
       : h("div", { class: "x-empty" }, "No block maps claimed yet."),
       h("p", { class: "x-note" }, "A map claim is an inscription whose whole text is <block>.<name>map (pepemap, dogemap, bitmap, …). The block can't be above the one it was inscribed in, and the first claim wins.")));
@@ -210,7 +219,7 @@
       cells: [[h("b", {}, t.name || "(no name)")], [String(t.id), 1], [t.managed ? "managed" : t.total_shown, 1], [addrLink(t.issuer, t.issuer_tag)]] })));
   }
   async function vLedger() {
-    const L = await api("explorer.ledger", { chain: chain.key });
+    const L = await xapi("explorer.ledger", { chain: chain.key });
     const st = [["Arcade tokens", fmt(L.tokens)], ["Arcade inscriptions", fmt(L.inscriptions)], ["Collections", fmt(L.collections)],
       ["@tags", fmt(L.tags)], ["Book orders", fmt(L.orders)], ["Trades", fmt(L.trades)]];
     return h("div", {},
@@ -222,19 +231,19 @@
   }
   async function vLTokens() {
     const size = 50, page = pageOf();
-    const r = await api("explorer.ledger_tokens", { chain: chain.key, offset: (page - 1) * size, n: size });
+    const r = await xapi("explorer.ledger_tokens", { chain: chain.key, offset: (page - 1) * size, n: size });
     return sect(`Arcade tokens · ${fmt(r.total)}`, null, h("div", {}, pager(r.total, size, page, "ltokens"), ledgerTokens(r.items), pager(r.total, size, page, "ltokens")));
   }
   async function vLInscs() {
     const size = 36, page = pageOf();
-    const first = await api("explorer.ledger_inscriptions", { chain: chain.key, n: 1 });
+    const first = await xapi("explorer.ledger_inscriptions", { chain: chain.key, n: 1 });
     const total = first.total;
-    const r = await api("explorer.ledger_inscriptions", { chain: chain.key, before: Math.max(0, total - (page - 1) * size), n: size });
+    const r = await xapi("explorer.ledger_inscriptions", { chain: chain.key, before: Math.max(0, total - (page - 1) * size), n: size });
     const toPage = (num) => Math.floor((total - 1 - num) / size) + 1;
     return sect(`Arcade inscriptions · ${fmt(total)}`, null, h("div", {}, pager(total, size, page, "linscs", "inscription #", toPage), ledgerGrid(r.items), pager(total, size, page, "linscs", "inscription #", toPage)));
   }
   async function vLToken() {
-    const t = await api("explorer.ledger_token", { chain: chain.key, id: arg });
+    const t = await xapi("explorer.ledger_token", { chain: chain.key, id: arg });
     return h("div", {}, crumbs(link("Arcade ledger", "ledger"), link("Tokens", "ltokens"), t.name || `#${t.id}`),
       head(t.name || `Token ${t.id}`, h("span", { class: "chip arc" }, t.type === 2 ? "divisible" : "indivisible"), t.managed ? pill("managed", true) : pill("fixed supply", true)),
       kv([["Id", String(t.id)], ["Supply", t.total_shown], ["Issuer", addrLink(t.issuer, t.issuer_tag)], ["Category", [t.category, t.subcategory].filter(Boolean).join(" · ") || "—"],
@@ -243,7 +252,7 @@
       t.top.length ? table([["Holder"], ["Balance", 1]], t.top.map((x) => ({ go: () => go("address", x.address), cells: [[addrLink(x.address, x.tag)], [x.balance, 1]] }))) : h("div", { class: "x-empty" }, "Nobody holds any."));
   }
   async function vLInsc() {
-    const i = await api("explorer.ledger_inscription", { chain: chain.key, id: arg });
+    const i = await xapi("explorer.ledger_inscription", { chain: chain.key, id: arg });
     return h("div", {}, crumbs(link("Arcade ledger", "ledger"), link("Inscriptions", "linscs"), `#${fmt(i.number)}`),
       head(`Arcade inscription #${fmt(i.number)}`, h("span", { class: "chip arc" }, (i.content_type || "").split(";")[0] || "no type")),
       h("div", { class: "x-split" }, preview({ content: i.content, ct: i.content_type, n: i.number }, true),
@@ -252,7 +261,7 @@
           ["sha256", h("span", { class: "mono" }, i.sha256 || "")], i.json && ["JSON", h("span", { class: "mono" }, JSON.stringify(i.json).slice(0, 300))]])));
   }
   async function vBlock() {
-    const b = await api("explorer.block", { chain: chain.key, id: arg });
+    const b = await xapi("explorer.block", { chain: chain.key, id: arg });
     return h("div", {}, crumbs(link("Blocks", "blocks"), fmt(b.height)),
       head(`Block ${fmt(b.height)}`, pill(b.best ? `${fmt(b.confirmations)} confirmations` : "not on the best chain", b.best)),
       kv([["Hash", h("span", { class: "mono" }, b.hash)], ["Time", `${new Date(b.time * 1000).toLocaleString()} · ${ago(b.time)}`],
@@ -265,7 +274,7 @@
       b.tx_count > b.txs.length ? h("p", { class: "x-note" }, `Showing the first ${b.txs.length} of ${fmt(b.tx_count)} transactions.`) : "");
   }
   async function vTx() {
-    const t = await api("explorer.tx", { chain: chain.key, txid: arg });
+    const t = await xapi("explorer.tx", { chain: chain.key, txid: arg });
     const io = (rows) => h("div", { class: "x-io" }, rows);
     return h("div", {}, crumbs(link("Blocks", "blocks"), t.height != null ? link(fmt(t.height), "block", String(t.height)) : "mempool", "transaction"),
       head("Transaction", pill(t.height != null ? `${fmt(t.confirmations)} confirmation${t.confirmations === 1 ? "" : "s"}` : "unconfirmed", t.height != null), pill(t.rbf ? "signals RBF" : "no RBF", !t.rbf),
@@ -280,7 +289,7 @@
             o.spent_by ? link("spent", "tx", o.spent_by.txid, "faint") : h("span", { class: "faint" }, o.op_return ? "" : "unspent")))))));
   }
   async function vAddress() {
-    const a = await api("explorer.address", { chain: chain.key, address: arg });
+    const a = await xapi("explorer.address", { chain: chain.key, address: arg });
     return h("div", {}, crumbs("Address"),
       head(short(a.address, 14, 8), a.tag ? h("span", { class: "chip arc" }, "@" + a.tag) : ""),
       a.note ? h("p", { class: "note" }, a.note) : "",
@@ -295,7 +304,7 @@
         : h("div", { class: "x-empty" }, "No transactions."));
   }
   async function vInscription() {
-    const i = await api("explorer.inscription", { chain: chain.key, id: arg });
+    const i = await xapi("explorer.inscription", { chain: chain.key, id: arg });
     const ct = (i.ct || "").split(";")[0];
     return h("div", {}, crumbs(link("Inscriptions", "inscriptions"), `#${fmt(i.n)}`),
       head(`Inscription #${fmt(i.n)}`, h("span", { class: "chip ins" }, ct || "no type"), i.burned != null ? pill("burned", false) : ""),
@@ -307,7 +316,7 @@
           i.re && ["Reinscription", "yes"], ["Reveal", link(short(i.txs?.[i.txs.length - 1] || "", 12, 8), "tx", i.txs?.[i.txs.length - 1], "mono")]])));
   }
   async function vToken() {
-    const t = await api("explorer.token", { chain: chain.key, tick: arg });
+    const t = await xapi("explorer.token", { chain: chain.key, tick: arg });
     const pct = Number(BigInt(t.minted || "0") * 1000n / (BigInt(t.supply || "1") || 1n)) / 10;
     return h("div", {}, crumbs(link("Tokens", "tokens"), t.shown || t.tick),
       head(t.shown || t.tick, pct >= 100 ? pill("minted out") : pill(`${pct}% minted`, true)),
@@ -319,13 +328,13 @@
   }
   let lastResults = null;
   async function vResults() {
-    const r = lastResults && lastResults.id === arg ? lastResults : await api("explorer.search", { chain: chain.key, q: arg });
+    const r = lastResults && lastResults.id === arg ? lastResults : await xapi("explorer.search", { chain: chain.key, q: arg });
     if (r.kind !== "results") { go(r.kind, r.id); return h("div"); }
     return sect(`Results for "${r.id}" on ${chain.name}`, null, table([["Match"], ["What"]], r.items.map((it) => ({ go: () => go(it.kind, it.id),
       cells: [[h("span", { class: "mono" }, it.label)], [it.what]] }))));
   }
   async function vTag() {
-    const t = await api("explorer.tag", { chain: chain.key, tag: arg });
+    const t = await xapi("explorer.tag", { chain: chain.key, tag: arg });
     const body = t.addresses.length
       ? table([["Address"], ["Why"], ["Balance", 1]], t.addresses.map((a) => ({ go: () => go("address", a.address),
           cells: [[h("span", { class: "mono" }, a.address)], [a.why], [a.balance == null ? "—" : coins(a.balance), 1]] })))
@@ -335,13 +344,13 @@
       h("h2", { class: "x-h2" }, `Addresses on ${chain.name}`), body);
   }
   async function vName() {
-    const n = await api("explorer.name", { chain: chain.key, name: arg });
+    const n = await xapi("explorer.name", { chain: chain.key, name: arg });
     return h("div", {}, crumbs(link("Names", "names"), n.name), head(n.name),
       table([["Reading"], ["Winning inscription"], ["Holder"]], n.readings.map((r) => ({ cells: [[r.rule], [link(`#${fmt(r.number)}`, "inscription", r.id)], [r.owner ? addrLink(r.owner, r.owner_tag) : "—"]] }))),
       h("p", { class: "x-note" }, "Each reading has its own winner: the lowest inscription number with that name. The holder is whoever holds the claim inscription now."));
   }
   async function vMap() {
-    const m = await api("explorer.map", { chain: chain.key, claim: arg });
+    const m = await xapi("explorer.map", { chain: chain.key, claim: arg });
     return h("div", {}, crumbs(link("Maps", "maps"), m.claim), head(m.claim),
       kv([["Winning inscription", link(`#${fmt(m.number)}`, "inscription", m.id)], ["Holder", m.owner ? addrLink(m.owner, m.owner_tag) : "—"], ["Block", link(m.claim.split(".")[0], "block", m.claim.split(".")[0])]]));
   }
@@ -366,13 +375,17 @@
     const my = ++seq;
     paintNav();
     try {
-      if (!sum || sum.chain !== chain.key) sum = await api("explorer.summary", { chain: chain.key });
+      if (!sum || sum.chain !== chain.key) sum = await xapi("explorer.summary", { chain: chain.key });
       // A page whose index is off on this chain isn't available: back to the overview.
       if (NEEDS[page] && !has(NEEDS[page])) { page = "home"; arg = null; }
       if (!VIEWS[page]) { page = "home"; arg = null; }
+      meshFrom = null;
       const v = await VIEWS[page]();
       if (my !== seq) return;
-      $("x-view").replaceChildren(v);
+      const from = meshFrom && page !== "home"
+        ? h("div", { class: "x-mesh" }, `Answered by ${meshFrom.tag ? "@" + meshFrom.tag + "'s arcade" : "arcade " + meshFrom.node.slice(0, 8)} on the mesh: this arcade doesn't keep that ${chain.name} index, so it's their word, not checked here.`)
+        : null;
+      $("x-view").replaceChildren(...[from, v].filter(Boolean));
       paintNav();
     } catch (e) {
       if (my !== seq) return;
@@ -386,7 +399,7 @@
     const q = ev.target.value.trim();
     if (!q || !chain) return;
     try {
-      const r = await api("explorer.search", { chain: chain.key, q });
+      const r = await xapi("explorer.search", { chain: chain.key, q });
       if (NEEDS[r.kind] && !has(NEEDS[r.kind])) throw new Error(`Turn on the ${NEEDS[r.kind]} index for ${chain.name} in Chains & Coins to look up ${q}.`);
       if (r.kind === "results") { lastResults = r; go("results", r.id); return; }
       go(r.kind, r.id);

@@ -396,3 +396,4 @@ button.linkish { border: 0; background: none; padding: 0; font-size: 11px; color
 .wl-hint { color: var(--muted); font-size: 13px; }
 #w-pick { font: inherit; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink); }
 #w-asset, #w-ikind { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+.x-mesh { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 10px; padding: 8px 12px; font-size: 13px; margin-bottom: 12px; }
