@@ -102,7 +102,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
                 let bal = |sc: &[u8]| if installed { node.chain.balance_for_script(cp.chain_no, sc).ok() } else { crate::borrow::balance(node, cp, sc) };
                 let balance = scripts.iter().map(|(_, sc)| bal(sc)).try_fold(0u64, |a, b| b.map(|x| a + x));
                 // Home chain: coins still waiting in the mempool, spendable already.
-                let pending: u64 = if cp.chain_no == p.chain_no { scripts.iter().flat_map(|(_, sc)| crate::claims::unconfirmed_coins(node, sc)).map(|u| u.value).sum() } else { 0 };
+                let pending: u64 = if cp.chain_no == p.chain_no && !crate::borrow::is_borrowed(cp.key) { scripts.iter().flat_map(|(_, sc)| crate::claims::unconfirmed_coins(node, sc)).map(|u| u.value).sum() } else { 0 };
                 json!({"index": k.index, "address": scripts[0].0, "legacy": scripts.get(1).map(|x| x.0.clone()), "pending": pending,
                        "tag": if cp.chain_no == p.chain_no { k.tag.clone() } else { None },
                        "balance": balance, "borrowed": !installed && crate::borrow::is_borrowed(cp.key)})
@@ -475,6 +475,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             let with: Vec<String> = req["with"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
             crate::chains::add(&node.self_arc(), &s("key").ok_or("key required")?, &s("mode").unwrap_or_else(|| "full".into()), with)
         }
+        "chains.unqueue" => crate::chains::unqueue(node, &s("key").ok_or("key required")?),
         "chains.pause" => crate::chains::set_paused(node, &s("key").ok_or("key required")?, true),
         "chains.resume" => crate::chains::set_paused(node, &s("key").ok_or("key required")?, false),
         "chains.index_add" => crate::chains::add_index(&node.self_arc(), &s("key").ok_or("key required")?, &s("index").ok_or("index required")?),

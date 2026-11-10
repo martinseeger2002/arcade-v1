@@ -193,11 +193,14 @@ pub fn make_in(node: &Node, p: &'static ChainParams, fam: &str, r: &arcade_store
     let dir = base.join(&id);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::rename(&tmp, &dir).map_err(|e| e.to_string())?;
-    // One copy per family: the older ones go.
+    // One copy per family: the older ones go, except one that is being fetched (served in
+    // the last 30 minutes): deleting it would strand whoever is taking it in.
     if let Ok(rd) = std::fs::read_dir(&base) {
+        let now = arcade_app::now();
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().to_string();
-            if n != id && !n.starts_with('.') {
+            let in_use = last_used().get(&n).is_some_and(|t| *t + 1800 > now);
+            if n != id && !n.starts_with('.') && !in_use {
                 let _ = std::fs::remove_dir_all(e.path());
             }
         }
@@ -324,13 +327,55 @@ pub fn request(node: &Node, net: &str, h: u32, fams: std::collections::BTreeSet<
     if h <= tip || h > tip + 100 {
         return false;
     }
-    let mut r = requests();
-    let e = r.entry(net.to_string()).or_insert((h, Default::default(), arcade_app::now()));
-    if e.0 != h {
-        *e = (h, Default::default(), arcade_app::now());
+    {
+        let mut r = requests();
+        let e = r.entry(net.to_string()).or_insert((h, Default::default(), arcade_app::now()));
+        if e.0 != h {
+            *e = (h, Default::default(), arcade_app::now());
+        }
+        e.1.extend(fams);
     }
-    e.1.extend(fams);
+    watch_for(node.self_arc(), p);
     true
+}
+
+/// Watch the chain's tip for an asked height and make the copies the moment it is there,
+/// whichever way the block came in (a follower's hook alone can miss it). One watcher per
+/// chain; a block takes about a minute, the tip is looked at every 200 ms.
+fn watch_for(node: std::sync::Arc<Node>, p: &'static ChainParams) {
+    static WATCHING: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<&'static str>>> = std::sync::OnceLock::new();
+    if !WATCHING.get_or_init(Default::default).lock().unwrap().insert(p.net) {
+        return;
+    }
+    let _ = std::thread::Builder::new().name(format!("copy-watch-{}", p.net)).spawn(move || {
+        let t0 = std::time::Instant::now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let Some(want) = requests().get(p.net).map(|x| x.0) else { break };
+            let tip = node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height).unwrap_or(0);
+            if tip > want || t0.elapsed() > std::time::Duration::from_secs(1800) {
+                requests().remove(p.net);
+                let _ = node.app.event("chain", &format!("the {} copies asked for at block {want} weren't made: the chain was past it before they could be", p.name));
+                break;
+            }
+            if tip == want {
+                let fams: Vec<String> = if p.chain_no == node.params.chain_no {
+                    let ix = crate::chains::home_indexes(&node);
+                    families_of(&node.home_mode, &ix)
+                } else {
+                    match node.extra.lock().unwrap().get(p.key) {
+                        Some(r) => families_of(&r.mode, &r.indexes),
+                        None => break,
+                    }
+                };
+                checkpoint(&node, p, tip, fams);
+                if requests().get(p.net).is_some_and(|x| x.0 == want) {
+                    continue; // (checkpoint takes the request; another height may come next)
+                }
+            }
+        }
+        WATCHING.get().unwrap().lock().unwrap().remove(p.net);
+    });
 }
 
 pub fn requested() -> Value {

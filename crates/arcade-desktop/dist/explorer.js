@@ -406,13 +406,7 @@
       meshFrom = page === "home" ? sumFrom : null;
       const v = await VIEWS[page]();
       if (my !== seq) return;
-      const who = meshFrom ? (meshFrom.tag ? "@" + meshFrom.tag + "'s arcade" : "arcade " + meshFrom.node.slice(0, 8)) : "";
-      const from = meshFrom
-        ? h("div", { class: "x-mesh" }, page === "home"
-            ? `Inscriptions, tokens and names below come from ${who} on the mesh: this arcade doesn't keep those ${chain.name} indexes, so they're their word, not checked here.`
-            : `Answered by ${who} on the mesh: this arcade doesn't keep that ${chain.name} index, so it's their word, not checked here.`)
-        : null;
-      $("x-view").replaceChildren(...[from, v].filter(Boolean));
+      $("x-view").replaceChildren(v);
       paintNav();
     } catch (e) {
       if (my !== seq) return;
