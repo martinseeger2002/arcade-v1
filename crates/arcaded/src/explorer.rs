@@ -165,7 +165,7 @@ pub fn handle(node: &Node, cmd: &str, req: &Value) -> R {
                     }
                     Ok(v)
                 }
-                Err(_) => Err(e),
+                Err(why) => Err(format!("{e} (asked the mesh too: {why})")),
             }
         }
     }

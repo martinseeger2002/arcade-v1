@@ -283,7 +283,8 @@ pub fn hold_frame(node: &Node) -> Frame {
         };
         chains.insert(p.net.into(), v);
     }
-    Frame::new(json!({"t": "sh", "op": "hold", "chains": chains}))
+    // o/at: whose hold this is and when, so it can be passed on across the mesh (on_hold).
+    Frame::new(json!({"t": "sh", "op": "hold", "chains": chains, "o": node.id_hex(), "at": arcade_app::now()}))
 }
 
 /// Groups to keep when a chain is installed in shared mode: the least-held first, until we
@@ -628,15 +629,37 @@ pub fn answer(node: &Node, link: &mut Link, h: &Value) -> Result<(), LinkError> 
     }
 }
 
-/// Another arcade's hold announcement.
+/// Another arcade's hold announcement, from a link or passed on by one: kept under its
+/// origin, and passed on once more when it is newer than what we had (so every arcade knows
+/// which indexes each V1.0 arcade keeps, linked or not; the mesh explorer uses it).
 pub fn on_hold(node: &Node, from: &str, h: &Value) {
     let Some(c) = h["chains"].as_object() else { return };
+    let origin = h["o"].as_str().filter(|o| crate::udpsvc::is_hex(o, 64)).unwrap_or(from).to_string();
+    if origin == node.id_hex() {
+        return;
+    }
+    let at = h["at"].as_u64().unwrap_or(0);
+    let now = arcade_app::now();
+    if at > 0 {
+        if at > now + 600 || at + 900 < now {
+            return; // stale or from the future
+        }
+        let seen = node.holds.lock().unwrap().get(&origin).and_then(|(_, v)| v["_at"].as_u64()).unwrap_or(0);
+        if at <= seen {
+            return;
+        }
+        node.mesh_outbox.lock().unwrap().push(h.clone());
+    }
+    let from = origin.as_str();
     let mut clean = Map::new();
     for (k, v) in c.iter().take(32) {
         if arcade_chain::params::by_net(k).is_some() {
             let ix: Vec<Value> = v["ix"].as_array().map(|a| a.iter().take(16).filter(|x| x.as_str().is_some_and(|s| s.len() <= 16)).cloned().collect()).unwrap_or_default();
             clean.insert(k.clone(), json!({"mode": v["mode"], "h": v["h"], "blocks": v["blocks"], "ord": v["ord"], "tok": v["tok"], "lane": v["lane"], "pos": v["pos"], "ix": ix}));
         }
+    }
+    if at > 0 {
+        clean.insert("_at".into(), json!(at));
     }
     node.holds.lock().unwrap().insert(from.to_string(), (arcade_app::now(), Value::Object(clean)));
 }
@@ -766,13 +789,122 @@ pub fn index_holders(node: &Node, net: &str, ix: &str) -> Vec<(String, u64)> {
 /// (answer, arcade's node id).
 pub fn ask_explorer(node: &Node, p: &ChainParams, ix: &str, cmd: &str, req: &Value) -> Result<(Value, String), String> {
     let mut last = format!("no arcade on the mesh offers {}{} right now", if ix.is_empty() { String::new() } else { format!("the {ix} index of ") }, p.name);
+    // None of them linked: ask for introductions to them (next round), so the next question
+    // goes over a link (dialing a home arcade's public address often fails from its own network).
+    let all = index_holders(node, p.net, ix);
+    if !all.is_empty() && !all.iter().any(|(id, _)| is_linked(node, id)) {
+        for (id, _) in all.iter().take(2) {
+            crate::udpsvc::want(id);
+        }
+        let names: Vec<String> = all.iter().take(2).map(|(id, _)| crate::meshview::tag_of(id).map(|t| format!("@{t}")).unwrap_or_else(|| id[..8].to_string())).collect();
+        last = format!("linking to {}'s arcade, which keeps it; try again in a minute", names.join(" or "));
+    }
     let q = json!({"cmd": cmd, "req": req}).to_string();
-    for (id, _) in index_holders(node, p.net, ix).into_iter().take(4) {
-        let Some(addr) = addr_of(node, &id) else { continue };
-        match ask(node, &addr, json!({"net": p.net, "what": "x", "arg": q})) {
-            Ok((v, _)) => return Ok((v, id)),
-            Err(e) => last = format!("arcade {}: {e}", &id[..id.len().min(8)]),
+    // Linked holders first (their link is up; dialing may not work from the same network).
+    let mut holders = index_holders(node, p.net, ix);
+    holders.sort_by_key(|(id, _)| !is_linked(node, id));
+    for (id, _) in holders.into_iter().take(4) {
+        let q = json!({"net": p.net, "what": "x", "arg": q});
+        let r = if is_linked(node, &id) {
+            ask_linked(&id, q)
+        } else {
+            match addr_of(node, &id) {
+                Some(addr) => ask(node, &addr, q).map(|(v, _)| v),
+                None => continue,
+            }
+        };
+        match r {
+            Ok(v) => return Ok((v, id)),
+            Err(e) if is_linked(node, &id) => last = format!("arcade {}: {e}", &id[..id.len().min(8)]),
+            Err(_) => {} // dialing failed: the introduction asked for above makes a link
         }
     }
     Err(last)
+}
+
+// ---------------- questions over the links already open ----------------
+//
+// A holder behind the same router as us (a home network) often can't be dialed at its
+// public address, though a mesh link to it is up. Questions to a linked arcade go over that
+// link: queued here, sent by its serve loop (tick), the answer handed back by on_answer.
+
+type Waiter = std::sync::mpsc::Sender<Result<Value, String>>;
+
+#[derive(Default)]
+struct Linked {
+    outq: std::collections::HashMap<String, Vec<Frame>>,
+    waiting: std::collections::HashMap<u64, (String, Waiter, u64, Vec<u8>)>,
+    next: u64,
+}
+
+fn linked() -> std::sync::MutexGuard<'static, Linked> {
+    static L: std::sync::OnceLock<std::sync::Mutex<Linked>> = std::sync::OnceLock::new();
+    L.get_or_init(Default::default).lock().unwrap()
+}
+
+/// Whether a mesh link to that arcade is up now.
+pub fn is_linked(node: &Node, id: &str) -> bool {
+    node.links.lock().unwrap().values().any(|l| l.node_id == id)
+}
+
+/// Ask a linked arcade over its link (up to 30 s).
+fn ask_linked(peer: &str, q: Value) -> Result<Value, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let id = {
+        let mut l = linked();
+        l.next += 1;
+        let id = 1_000_000 + l.next;
+        let mut q = q;
+        q["t"] = json!("sh");
+        q["op"] = json!("q");
+        q["id"] = json!(id);
+        l.outq.entry(peer.to_string()).or_default().push(Frame::new(q));
+        l.waiting.insert(id, (peer.to_string(), tx, 0, Vec::new()));
+        id
+    };
+    let r = rx.recv_timeout(Duration::from_secs(30)).map_err(|_| "no answer within 30 s".to_string());
+    linked().waiting.remove(&id);
+    r?
+}
+
+/// Per link, often: send the questions queued for it.
+pub fn tick(link: &mut Link) -> Result<(), LinkError> {
+    let out = linked().outq.remove(&link.peer_id).unwrap_or_default();
+    for f in out {
+        link.send(&f)?;
+    }
+    Ok(())
+}
+
+/// An answer (sh a) on a link: hand it to whoever waits for it.
+pub fn on_answer(peer: &str, f: &Frame) {
+    let Some(id) = f.head["id"].as_u64() else { return };
+    let mut l = linked();
+    let Some(w) = l.waiting.get_mut(&id) else { return };
+    if w.0 != peer {
+        return;
+    }
+    let done: Option<Result<Value, String>> = if let Some(e) = f.head["err"].as_str() {
+        Some(Err(e.to_string()))
+    } else if f.head["seq"].is_u64() {
+        if f.head["seq"].as_u64() != Some(w.2) || w.3.len() + f.blob.len() > 32 << 20 {
+            Some(Err("a broken answer".into()))
+        } else {
+            w.2 += 1;
+            w.3.extend_from_slice(&f.blob);
+            (f.head["end"] == true).then(|| {
+                let mut raw = Vec::new();
+                std::io::Read::read_to_end(&mut std::io::Read::take(flate2::read::ZlibDecoder::new(&w.3[..]), 64 << 20), &mut raw)
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| serde_json::from_slice(&raw).map_err(|e| e.to_string()))
+            })
+        }
+    } else {
+        Some(Ok(f.head["result"].clone()))
+    };
+    if let Some(r) = done {
+        if let Some((_, tx, _, _)) = l.waiting.remove(&id) {
+            let _ = tx.send(r);
+        }
+    }
 }
