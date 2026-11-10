@@ -59,6 +59,26 @@ The standard fix for many random inserts into a big index (an "LSM tree"):
 
 **Expected:** a flush's tx-index part goes from ~217 s to the time it takes to write ~100 MB sequentially plus a share of the merges. That's seconds rather than minutes, so the ~25% of sync time spent flushing mostly goes away. Still to be measured.
 
+### Prototype measured (GX10, 2026-11-09)
+
+Branch `feat/tx-runs`.
+- **Full Pepecoin syncs** under a memory cap couldn't reproduce the JB20B. With 4 GB, Pepecoin's index still fit in memory: flushes wrote 3–7 M tx rows at 400,000–800,000 rows/s. A tighter cap killed the arcade itself, which peaks at ~2.6–3 GB around block 261,000 whatever the coin cache.
+- **So the flush's tx-index write was measured on its own** (`examples/txbench.rs`):
+  - a tx index of 150 M random txids (4.6 GB);
+  - the database file's cache dropped before each run;
+  - each run under a memory cap.
+
+| One flush's tx rows | Rows/s |
+|---|---|
+| Old way: sorted puts into `txs` (3 GB cap, 200,000 rows) | **32,000** (the JB20B measured 21,000) |
+| New way: one sorted run plus its filter (1 GB cap, 4,500,000 rows) | **2,400,000** |
+
+- **The old way also holds every page it changes in memory until the commit.** It touches about one page per row, so 4.5 M rows didn't fit in 1 GB, nor 500,000 rows in 3 GB: both were killed by the cap. The new way changes about one page per ~200 rows.
+- **Lookups** (a spend finding its coin's tx): ~205 µs each for a random seek in a 1 GB-capped index, the same for both. The runs add only the filter check, plus a seek on the ~1% of false positives per run.
+- **Not yet measured:**
+  - the level-0 merges (8 runs into 1, sequential, about 15 s per 8 flushes at Dogecoin's flush size);
+  - the existing sorted build of `txs` at the end of the catch-up, which now covers all rows instead of only fully spent ones.
+
 ### Steps (each a PR)
 1. **Prototype and measure** on the GX10 without touching the JB20B. Sync Pepecoin mainnet (real use, millions of txs) from zero twice, once with today's index and once with sorted runs, with `ARCADE_SYNC_TIMES=1`, and compare flush times.
 2. **The final build:** the result must equal a normal sync byte for byte. A V1.0 copy id comparison of blocks, coins and (new) the tx index shows it.
