@@ -303,6 +303,7 @@ fn serve_loop(
         crate::udpsvc::tick(node, link)?;
         crate::coreboot::tick(node, link)?;
         crate::vxshare::tick(node, link)?;
+        crate::shares::tick(link)?;
         #[cfg(feature = "oldimport")]
         crate::lxfetch::tick(link)?;
         #[cfg(feature = "oldimport")]
@@ -371,6 +372,7 @@ fn serve_loop(
             "sz" => crate::sizes::on_sz(node, &link.peer_id, &f.head),
             "sh" if f.head["op"] == "hold" => crate::shares::on_hold(node, &link.peer_id, &f.head),
             "sh" if f.head["op"] == "q" => crate::shares::answer(node, link, &f.head)?,
+            "sh" if f.head["op"] == "a" => crate::shares::on_answer(&link.peer_id, &f),
             "bk" => serve_bk(node, link, addr, &f.head)?,
             "pub" | "sub" => crate::realtime::on_frame(node, peer, &f),
             "ud" | "st" | "ui" => crate::udpsvc::on_frame(node, link, &f)?,

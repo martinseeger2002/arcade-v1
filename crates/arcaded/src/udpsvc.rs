@@ -1093,6 +1093,17 @@ fn on_ui(node: &Node, from_link: &str, h: &Value) {
     }
 }
 
+/// Arcades we want a link to soon (the mesh explorer needs an index they keep): tried first
+/// in the next introduction rounds, for 10 minutes.
+fn wanted() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, u64>> {
+    static W: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::OnceLock::new();
+    W.get_or_init(Default::default).lock().unwrap()
+}
+
+pub fn want(id: &str) {
+    wanted().insert(id.to_string(), now_s() + 600);
+}
+
 fn intro_round(node: &Node) {
     let links: Vec<LinkInfo> = node.links.lock().unwrap().values().cloned().collect();
     if links.is_empty() || links.len() >= crate::meshsvc::MAX_OUTBOUND || hub(node).is_none() {
@@ -1111,11 +1122,19 @@ fn intro_round(node: &Node) {
     // An arcade forwards at most one "ui" per sender per second (introduce.py RATE_EVERY):
     // each request of a round goes through a different relay, or the rest are dropped.
     let mut vias: BTreeSet<String> = BTreeSet::new();
-    for (origin, via) in crate::realtime::heard(INTRO_HEARD) {
+    // Wanted arcades first (see want()), then the others heard lately.
+    let want: BTreeSet<String> = {
+        let mut w = wanted();
+        w.retain(|_, until| *until > now);
+        w.keys().cloned().collect()
+    };
+    let mut heard = crate::realtime::heard(INTRO_HEARD);
+    heard.sort_by_key(|(o, _)| !want.contains(o));
+    for (origin, via) in heard {
         if picked == 2 {
             break;
         }
-        if origin == my || ids.contains(&origin) || st.shares.contains_key(&origin) || st.pend.contains_key(&origin) || st.cooling.get(&origin).is_some_and(|(u, _)| *u > now) {
+        if origin == my || ids.contains(&origin) || st.shares.contains_key(&origin) || st.pend.contains_key(&origin) || (!want.contains(&origin) && st.cooling.get(&origin).is_some_and(|(u, _)| *u > now)) {
             continue;
         }
         if !vias.insert(via.clone()) {
