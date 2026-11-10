@@ -394,7 +394,14 @@ pub fn touch(id: &str) {
 
 /// Copies nobody fetched for 2 hours are deleted (made on request, they would only take
 /// disk). Runs at most once a minute.
+/// When this arcade started (first call).
+fn started() -> u64 {
+    static S: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *S.get_or_init(arcade_app::now)
+}
+
 pub fn sweep(node: &Node) {
+    started();
     static LAST: std::sync::OnceLock<std::sync::Mutex<u64>> = std::sync::OnceLock::new();
     {
         let mut l = LAST.get_or_init(Default::default).lock().unwrap();
@@ -418,7 +425,9 @@ pub fn sweep(node: &Node) {
                 }
                 let made = std::fs::metadata(i.path().join("manifest.json")).and_then(|m| m.modified()).ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-                let used = last_used().get(&name).copied().unwrap_or(0).max(made);
+                // Who used it lately is known only since this start: a copy is never removed
+                // in the first 30 minutes after a restart (an arcade may be fetching it).
+                let used = last_used().get(&name).copied().unwrap_or(0).max(made).max(started() + 30 * 60 - 2 * 3600);
                 if used + 2 * 3600 < now {
                     let _ = std::fs::remove_dir_all(i.path());
                     last_used().remove(&name);

@@ -53,7 +53,7 @@ pub fn auto_home(node: Arc<Node>) {
         .spawn(move || {
             // Checked every minute, not once: the mesh may not have told us tips in the first
             // minute (links still forming), and an attempt can fail (no 2 makers linked yet,
-            // a maker restarted). Tried again 10 minutes after a failed attempt, for as long
+            // a maker restarted). Tried again 3 minutes after a failed attempt, for as long
             // as the home chain is far behind (ThinkPad 2026-11-10 synced from zero after one
             // early check).
             let mut last_try: Option<Instant> = None;
@@ -65,7 +65,7 @@ pub fn auto_home(node: Arc<Node>) {
                 if done {
                     return;
                 }
-                if running || lag < 50_000 || last_try.is_some_and(|t| t.elapsed() < Duration::from_secs(600)) {
+                if running || lag < 50_000 || last_try.is_some_and(|t| t.elapsed() < Duration::from_secs(180)) {
                     // Caught up the usual way (and tips known): nothing more to do.
                     if !running && lag < 1_000 && node.mesh_tips.lock().unwrap().len() > 0 {
                         return;
@@ -208,12 +208,18 @@ impl Stream {
             if self.next >= self.n {
                 return Ok(false);
             }
+            let waiting = Instant::now();
             let path = loop {
                 if let Some(p) = vxshare::piece_ready(&self.jk, self.next) {
                     break p;
                 }
                 if self.cancel.load(Ordering::Relaxed) || !vxshare::alive(&self.jk) {
                     return Err("cancelled".into());
+                }
+                // Nobody offers this copy any more (its maker removed it or restarted): give
+                // up, so the next attempt takes a newer copy instead of waiting for good.
+                if waiting.elapsed() > Duration::from_secs(180) && !vxshare::offered(&self.jk) {
+                    return Err(format!("the copy stopped being offered at piece {} of {} (its maker removed it); trying a newer one", self.next, self.n));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             };
