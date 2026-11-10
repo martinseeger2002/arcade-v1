@@ -209,8 +209,24 @@
   // Filter by content type (MIME type): groups, newest first; "Show older" goes on.
   const INS_TYPES = [["", "All"], ["image", "Images"], ["svg", "SVG"], ["text", "Text"], ["html", "HTML"], ["json", "JSON"], ["audio", "Audio"], ["video", "Video"], ["model", "3D"], ["other", "Other"]];
   let insType = "";
+  // Every type's total, counted ahead by the arcade keeping the ord index (kept a minute).
+  const TYPE_TOTALS = {};
   function typeChips() {
-    return h("div", { class: "x-types" }, INS_TYPES.map(([v, label]) => h("button", { class: "chip-btn" + (insType === v ? " on" : ""), onclick: () => { insType = v; oldKey = ""; go("inscriptions"); } }, label)));
+    const key = chain.key;
+    const box = h("div", { class: "x-types" }, INS_TYPES.map(([v, label]) => h("button", { class: "chip-btn" + (insType === v ? " on" : ""), "data-t": v || "all", onclick: () => { insType = v; oldKey = ""; go("inscriptions"); } }, label)));
+    const paint = (r) => {
+      for (const b of box.querySelectorAll("button")) {
+        const t = b.dataset.t, n = t === "all" ? r.total : r.types?.[t];
+        const label = INS_TYPES.find((x) => (x[0] || "all") === t)[1];
+        b.textContent = n != null ? `${label} · ${fmt(n)}${r.counting && t !== "all" ? "+" : ""}` : label;
+      }
+    };
+    const c = TYPE_TOTALS[key];
+    if (c) paint(c.r);
+    if (!c || Date.now() - c.at > 60000) {
+      xapi("explorer.inscription_types", { chain: key }).then((r) => { TYPE_TOTALS[key] = { r, at: Date.now() }; if (chain.key === key) paint(r); }).catch(() => {});
+    }
+    return box;
   }
   // An arcade on an older version answered: no per-type totals, only "newest first, looked
   // down to #N". Shown as before: a growing list with Show older.

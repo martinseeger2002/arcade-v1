@@ -209,3 +209,49 @@ pub fn page(node: &Node, p: &'static ChainParams, g: usize, offset: u64, n: u64)
     }
     Page { numbers: out, total, counting }
 }
+
+/// Every group's total on a chain: (all inscriptions, per group, still counting older ones).
+/// Counted chunks plus the newest part read live; chunks not counted yet are left out (and
+/// counted in the background).
+pub fn totals(node: &Node, p: &'static ChainParams) -> (u64, [u64; 9], bool) {
+    ensure(node, p);
+    let all = ord::count(&node.chain, p.chain_no);
+    let top = settled(all);
+    let mut t = [0u64; 9];
+    let missing = with_counts(node, p, |c| {
+        for (i, k) in c.iter() {
+            if *i < top {
+                for g in 0..9 {
+                    t[g] += k[g] as u64;
+                }
+            }
+        }
+        (0..top).filter(|i| !c.contains_key(i)).count()
+    });
+    for (_, ct) in ord::content_types(&node.chain, p.chain_no, top * chunk(), all) {
+        t[group_of(&ct)] += 1;
+    }
+    (all, t, missing > 0)
+}
+
+/// Keep every chain's counts current: each chain this arcade keeps an ord index for is
+/// counted in the background (after a start, and as new inscriptions come), so the Explorer's
+/// type filter has its totals and pages at once (Martin 2026-11-10: preload them).
+pub fn run(node: std::sync::Arc<Node>) {
+    std::thread::sleep(std::time::Duration::from_secs(30));
+    loop {
+        let mut chains: Vec<&'static ChainParams> = Vec::new();
+        if crate::chains::home_indexes(&node).iter().any(|i| i == "ord") {
+            chains.push(node.params);
+        }
+        for r in node.extra.lock().unwrap().values() {
+            if r.indexes.iter().any(|i| i == "ord") {
+                chains.push(r.params);
+            }
+        }
+        for p in chains {
+            ensure(&node, p);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(120));
+    }
+}

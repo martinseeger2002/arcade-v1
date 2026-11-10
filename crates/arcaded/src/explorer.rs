@@ -88,6 +88,7 @@ pub const FORWARDABLE: &[&str] = &[
     "explorer.inscription", "explorer.tokens", "explorer.token", "explorer.names", "explorer.name", "explorer.maps",
     "explorer.map", "explorer.mempool", "explorer.ledger", "explorer.ledger_tokens", "explorer.ledger_token",
     "explorer.ledger_inscriptions", "explorer.ledger_inscription", "explorer.tag", "explorer.search",
+    "explorer.inscription_types",
 ];
 
 /// Mesh answers kept a short while: the Explorer asks the same things again and again
@@ -342,6 +343,12 @@ fn handle_here(node: &Node, cmd: &str, req: &Value) -> R {
                     Ok(json!({"total": total, "type": ty, "items": items, "next_before": next, "scanned": scanned}))
                 }
             }
+        }
+        "explorer.inscription_types" => {
+            x.need("ord")?;
+            let (all, t, counting) = crate::ordtypes::totals(x.node, x.p);
+            let types: serde_json::Map<String, Value> = crate::ordtypes::GROUPS.iter().zip(t.iter()).map(|(g, n)| (g.to_string(), json!(n))).collect();
+            Ok(json!({"total": all, "types": types, "counting": counting}))
         }
         "explorer.inscription" => {
             x.need("ord")?;

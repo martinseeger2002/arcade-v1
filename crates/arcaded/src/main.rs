@@ -293,6 +293,10 @@ fn main() {
     }
     {
         let n = node.clone();
+        std::thread::Builder::new().name("ord types".into()).spawn(move || ordtypes::run(n)).unwrap();
+    }
+    {
+        let n = node.clone();
         std::thread::Builder::new().name("rooms".into()).spawn(move || realtime::run(n)).unwrap();
     }
     {
