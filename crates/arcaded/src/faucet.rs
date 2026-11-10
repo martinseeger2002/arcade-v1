@@ -43,6 +43,12 @@ pub fn last_ask(node: &Node, addr: &str) -> Option<(FaucetStatus, u64)> {
     node.app.faucet_requests().unwrap_or_default().into_iter().filter(|f| f.address == addr).max_by_key(|f| f.created).map(|f| (f.status, f.created))
 }
 
+/// Pass a signed welcome record on to every mesh link (each record once: callers relay only
+/// what they hadn't seen; the signature travels with it, so others check it as we did).
+fn relay(node: &Node, rec: &Value) {
+    node.mesh_outbox.lock().unwrap().push(arcade_mesh::welcome::frame(vec![rec.clone()]).head);
+}
+
 /// A `wl` frame arrived: remember asks and payments; if someone paid our ask, record it.
 pub fn on_welcome(node: &Node, head: &Value) {
     let me = node.id_hex();
@@ -54,16 +60,28 @@ pub fn on_welcome(node: &Node, head: &Value) {
         match r["k"].as_str() {
             Some("ask") => {
                 if let Some(a) = r["a"].as_str() {
-                    let mut asks = node.asks.lock().unwrap();
-                    let newer = asks.get(a).map(|o| o["at"].as_u64() < r["at"].as_u64()).unwrap_or(true);
-                    if newer {
-                        asks.insert(a.to_string(), r.clone());
+                    let fresh = r["at"].as_u64().is_some_and(|t| arcade_app::now().saturating_sub(t) < arcade_mesh::welcome::ASK_DAYS * 86_400);
+                    let newer = {
+                        let mut asks = node.asks.lock().unwrap();
+                        let newer = asks.get(a).map(|o| o["at"].as_u64() < r["at"].as_u64()).unwrap_or(true);
+                        if newer {
+                            asks.insert(a.to_string(), r.clone());
+                        }
+                        newer
+                    };
+                    // Passed on once to every link, so an ask reaches arcades with coins that
+                    // the asker isn't linked to (before, only its direct links heard it).
+                    if newer && fresh {
+                        relay(node, r);
                     }
                 }
             }
             Some("sent") => {
                 if let Some(a) = r["ask"].as_str() {
-                    node.asks_done.lock().unwrap().insert(a.to_string());
+                    let first = node.asks_done.lock().unwrap().insert(a.to_string());
+                    if first {
+                        relay(node, r);
+                    }
                 }
             }
             Some("closed") => {
