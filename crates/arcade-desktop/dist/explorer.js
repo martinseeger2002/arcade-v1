@@ -186,7 +186,23 @@
   const INS_TYPES = [["", "All"], ["image", "Images"], ["svg", "SVG"], ["text", "Text"], ["html", "HTML"], ["json", "JSON"], ["audio", "Audio"], ["video", "Video"], ["model", "3D"], ["other", "Other"]];
   let insType = "";
   function typeChips() {
-    return h("div", { class: "x-types" }, INS_TYPES.map(([v, label]) => h("button", { class: "chip-btn" + (insType === v ? " on" : ""), onclick: () => { insType = v; go("inscriptions"); } }, label)));
+    return h("div", { class: "x-types" }, INS_TYPES.map(([v, label]) => h("button", { class: "chip-btn" + (insType === v ? " on" : ""), onclick: () => { insType = v; oldKey = ""; go("inscriptions"); } }, label)));
+  }
+  // An arcade on an older version answered: no per-type totals, only "newest first, looked
+  // down to #N". Shown as before: a growing list with Show older.
+  let oldAcc = [], oldNext = null, oldKey = "";
+  function oldTyped(r, label) {
+    const key = `${chain.key}|${insType}`;
+    if (oldKey !== key) { oldKey = key; oldAcc = r.items; oldNext = r.next_before ?? null; }
+    const more = oldNext != null ? h("div", { class: "row" }, h("button", { onclick: async (ev) => {
+      ev.target.disabled = true; ev.target.textContent = "Looking…";
+      const rr = await xapi("explorer.inscriptions", { chain: chain.key, type: insType, before: oldNext, n: 36 });
+      oldAcc = oldAcc.concat(rr.items); oldNext = rr.next_before ?? null;
+      render();
+    } }, `Show older (looked down to #${fmt(oldNext)})`)) : h("p", { class: "x-note" }, "That's all of them.");
+    return sect(`${label} · ${fmt(oldAcc.length)} found so far, newest first`, null, h("div", {}, typeChips(),
+      h("p", { class: "x-note" }, "Answered by an arcade on an older version, which can't count them by type; it looks back a part at a time."),
+      oldAcc.length ? insGrid(oldAcc) : h("div", { class: "x-empty" }, oldNext != null ? "None in the newest ones looked at yet." : "None."), more));
   }
   async function vInscriptions() {
     const size = 36, page = pageOf();
@@ -196,7 +212,8 @@
       // Paged like the full list (newest first), with the type's own total.
       const r = await xapi("explorer.inscriptions", { chain: chain.key, type: insType, offset: (page - 1) * size, n: size });
       const label = INS_TYPES.find((t) => t[0] === insType)[1];
-      const tt = r.type_total ?? r.items.length;
+      if (r.type_total == null) return oldTyped(r, label);
+      const tt = r.type_total;
       const note = r.counting ? h("p", { class: "x-note" }, `Still counting the older ones: ${fmt(tt)} found so far; the total grows as it counts.`) : "";
       return sect(`${label} · ${fmt(tt)}${r.counting ? "+" : ""}`, null, h("div", {}, typeChips(), note, pager(tt, size, page, "inscriptions"),
         r.items.length ? insGrid(r.items) : h("div", { class: "x-empty" }, "None."), pager(tt, size, page, "inscriptions")));
