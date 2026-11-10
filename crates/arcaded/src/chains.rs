@@ -722,9 +722,12 @@ fn mesh_first(node: &Arc<Node>, run: &ChainRun, syncer: &Syncer) {
         };
         // Retry the parallel download after a hiccup (a source vanishing, a slow stretch);
         // only after three quick failures in a row fall back to one source at a time.
-        let mut quick_fails = 0;
-        while !run.stop.load(Ordering::Relaxed) && !crate::coreboot::held(p.key) && ours() + 2000 < top && quick_fails < 3 {
+        // (Rounds that connect nothing count too, however long they took: two in a row and the
+        // one-source-at-a-time path below takes over.)
+        let (mut quick_fails, mut idle) = (0, 0);
+        while !run.stop.load(Ordering::Relaxed) && !crate::coreboot::held(p.key) && ours() + 2000 < top && quick_fails < 3 && idle < 2 {
             let t = std::time::Instant::now();
+            let before = ours();
             match crate::psync::run(node, p, syncer, top as u32, &progress, &run.stop) {
                 Ok(n) => {
                     let _ = node.app.event("chains", &format!("{}: parallel download connected {n} blocks", p.name));
@@ -736,6 +739,7 @@ fn mesh_first(node: &Arc<Node>, run: &ChainRun, syncer: &Syncer) {
                     std::thread::sleep(Duration::from_secs(5));
                 }
             }
+            idle = if ours() > before { 0 } else { idle + 1 };
         }
     }
     for (id, addr, kind, their) in offers {

@@ -168,7 +168,7 @@ impl Prefetched<'_> {
                     fl.unwrap_or_else(|| "no".into()), st.ready.len(), first_ready, st.ready_bytes >> 20, st.queue.len(), st.queue.front().map(|j| j.start), st.workers, st.p2p
                 );
             }
-            if st.workers == 0 && Instant::now() + Duration::from_secs(150) > deadline {
+            if st.workers == 0 && Instant::now() + Duration::from_secs(360) > deadline {
                 // Nobody working for a while (the recruiter had 30 s to bring someone).
                 return Err("every source stopped".into());
             }
@@ -194,6 +194,14 @@ impl Prefetched<'_> {
 
 impl BlockSource for Prefetched<'_> {
     fn get_headers(&mut self, _locator: &[Hash256]) -> Result<Vec<HeaderEntry>, String> {
+        // Every job up to the top pulled already: nothing more is coming (the workers have
+        // stopped), and the blocks still in the cache are connected by sync_blocks. Pulling
+        // here would end the round with "every source stopped" and drop those blocks.
+        let exhausted = self.pool.s.lock().unwrap().want > self.pool.top;
+        if exhausted {
+            let n = self.heads.len().min(2000);
+            return Ok(self.heads.drain(..n).collect());
+        }
         if self.heads.is_empty() {
             self.pull(Duration::from_secs(420))?;
         }
@@ -211,6 +219,9 @@ impl BlockSource for Prefetched<'_> {
     fn get_blocks(&mut self, hashes: &[Hash256]) -> Result<Vec<Vec<u8>>, String> {
         let mut guard = 0;
         while hashes.iter().any(|h| !self.cache.contains_key(h)) {
+            if self.pool.s.lock().unwrap().want > self.pool.top {
+                return Err("blocks asked for are past what this round fetched".into());
+            }
             self.pull(Duration::from_secs(420))?;
             guard += 1;
             if guard > 200 {
