@@ -35,55 +35,98 @@ async function refreshHome() {
 
 // Home: a getting-started guide until this arcade's owner has a handle.
 const goTab = (t) => { const b = document.querySelector(`nav button[data-tab="${t}"]`); if (b) b.click(); };
+// Getting started, all on Home (Martin): make the wallet here (its 12 words shown here, with
+// "I wrote them down"), wait for 1 test coin (asked for by itself), claim the @handle here.
+// The card goes away once the handle is confirmed.
+const START = { phrase: null, saved: false, tag: "", checked: null, busy: false, msg: "" };
 async function drawStart() {
   const st = await api("start.status").catch(() => null);
   const box = $("h-start");
-  if (!st || st.tag) { box.hidden = true; drawStart.sig = null; return; }
+  if (!st || (st.tag && !START.phrase)) { box.hidden = true; drawStart.sig = null; return; }
   box.hidden = false;
-  const c = st.claim, f = st.faucet;
+  const c = st.claim && st.claim.status !== "failed" ? st.claim : null;
+  const failed = st.claim && st.claim.status === "failed" ? st.claim : null;
   const coin = homeTicker();
-  const steps = [
-    {
-      done: st.wallet,
-      title: "Make your wallet, or restore yours",
-      text: st.wallet ? "Done. Your wallet is a 12-word recovery phrase kept on this PC; it's the only backup, so keep the words safe."
-        : "New here: create a wallet on the Wallet tab and write its 12 words down. Had one before: type its 12 words below to restore it, your @handle and coins included.",
-      go: st.wallet ? null : ["Create a new wallet", "wallet"],
-      restore: !st.wallet,
-    },
-    {
-      done: !!st.wallet && (st.balance > 0 || (c && c.status !== "failed")),
-      title: "Test coins",
-      text: !st.wallet ? `A little ${coin} pays for claiming a handle. It's asked for by itself once your wallet exists.`
-        : st.balance > 0 ? `Here: ${homeCoins(st.balance)}.`
-        : f ? `Asked the mesh for ${coin} ${ago(f.at) === "just now" ? "just now" : ago(f.at) + " ago"}; another arcade sends them, usually within a few minutes. Nothing to do.`
-        : `${coin} is asked for by itself when you claim a handle.`,
-    },
-    {
-      done: false,
-      title: "Claim your @handle",
-      text: c && c.status !== "failed" ? `@${c.tag}: ${c.note || c.status}. It's yours once a block confirms it.`
-        : c ? `@${c.tag} didn't work (${c.note}). Pick another one on the Handle tab.`
-        : "Open the Handle tab, pick a name (2–24 characters: a–z, 0–9, _), Check, then Claim. It's published on the chain, so every arcade sees it.",
-      go: st.wallet && !(c && c.status !== "failed") ? ["Open Handle", "handle"] : null,
-    },
-  ];
-  // Drawn again only when a step changes (the page refreshes every few seconds; typed words
-  // in the restore box must stay).
-  const sig = JSON.stringify(steps);
-  if (sig === drawStart.sig) return;
+  const walletDone = st.wallet && !START.phrase;
+  const coinsHere = st.balance > 0;
+  // Redrawn only when something a step shows changes (typing must survive the 4 s refresh);
+  // the "asked … ago" line is updated in place.
+  const sig = JSON.stringify([st.wallet, !!START.phrase, START.saved, coinsHere, !!st.faucet, c && [c.tag, c.status, c.note], failed && failed.tag, START.checked, START.busy, START.msg]);
+  const askedText = () => !st.wallet ? `It's asked for by itself as soon as your wallet exists.`
+    : coinsHere ? `Here: ${homeCoins(st.balance)}. That pays for publishing your @handle.`
+    : st.faucet ? `Asked the arcade mesh for it ${ago(st.faucet.at) === "just now" ? "just now" : ago(st.faucet.at) + " ago"}; another arcade sends it, usually within a minute or two. Nothing to do: it's used as soon as it arrives, even before a block confirms it.`
+    : `It's asked for by itself in a moment.`;
+  if (sig === drawStart.sig) {
+    const el = $("h-asked");
+    if (el) el.textContent = askedText();
+    return;
+  }
   drawStart.sig = sig;
+
+  // 1. The wallet.
+  let s1;
+  if (START.phrase) {
+    const done = h("button", { class: "primary", disabled: !START.saved, onclick: () => { START.phrase = null; START.saved = false; drawStart.sig = null; refresh(); } }, "Done");
+    s1 = [h("div", { class: "hint" }, "Write these 12 words down, in order, and keep them somewhere safe. They are shown once, and they're the only way to get your wallet and @handle back."),
+      h("div", { class: "phrase start-phrase" }, START.phrase),
+      h("label", { class: "start-check" }, h("input", { type: "checkbox", checked: START.saved, onchange: (e) => { START.saved = e.target.checked; done.disabled = !START.saved; } }), " I wrote them down"),
+      h("div", { class: "row" }, done)];
+  } else if (st.wallet) {
+    s1 = [h("div", { class: "hint" }, "Done. Your wallet is kept on this PC; its 12 words are the only backup.")];
+  } else {
+    const make = h("button", { class: "primary", onclick: async () => {
+      make.disabled = true;
+      try { const r = await api("wallet.create"); START.phrase = r.phrase; START.saved = false; drawStart.sig = null; refresh(); }
+      catch (e) { make.disabled = false; alert(e.message); }
+    } }, "Create a new wallet");
+    s1 = [h("div", { class: "hint" }, "New here: create a wallet; you'll get 12 words to write down. Had one before: type its 12 words below instead to restore it, your @handle and coins included."),
+      h("div", { class: "row" }, make), restoreBox()];
+  }
+
+  // 2. One test coin.
+  const s2 = [h("div", { class: "hint", id: "h-asked" }, askedText()),
+    !coinsHere ? h("div", { class: "hint" }, `Why: your @handle is published on the ${HOME.name} chain, and publishing pays a small network fee. ${coin} is the test coin of that chain; it has no money value.`) : null];
+
+  // 3. The @handle, claimed here.
+  let s3;
+  if (c) {
+    const step = c.status === "sent" ? "published; it's yours once the next block confirms it (about a minute)" : c.status === "funding" ? `waiting for the test coin, then it's published by itself` : c.note || c.status;
+    s3 = [h("div", { class: "hint" }, `@${c.tag}: ${step}.`)];
+  } else if (!st.wallet || START.phrase) {
+    s3 = [h("div", { class: "hint" }, "Your name on the arcade (2–24 characters: a–z, 0–9 and _), seen by every arcade. Pick it here once your wallet is made.")];
+  } else {
+    const input = h("input", { placeholder: "yourname", maxlength: "24", autocomplete: "off", value: START.tag, oninput: (e) => { START.tag = e.target.value.toLowerCase(); if (START.checked) { START.checked = null; START.msg = ""; drawStart.sig = null; drawStart(); } } });
+    const check = h("button", { disabled: START.busy, onclick: async () => {
+      START.busy = true;
+      try { const r = await api("tag.check", { tag: START.tag }); START.checked = r.available ? r.tag : null; START.msg = r.available ? `@${r.tag} is free.` : `@${r.tag} isn't available: ${r.reason}`; }
+      catch (e) { START.checked = null; START.msg = e.message; }
+      START.busy = false; drawStart.sig = null; drawStart();
+    } }, "Check");
+    const claim = h("button", { class: "primary", disabled: !START.checked || START.busy, onclick: async () => {
+      START.busy = true; drawStart.sig = null; drawStart();
+      try { await api("tag.claim", { tag: START.checked }); START.msg = ""; START.checked = null; }
+      catch (e) { START.msg = e.message; }
+      START.busy = false; drawStart.sig = null; refresh();
+    } }, "Claim");
+    s3 = [h("div", { class: "hint" }, failed ? `@${failed.tag} didn't work (${failed.note}); pick another.` : "Your name on the arcade (2–24 characters: a–z, 0–9 and _). It's published on the chain, so every arcade sees it."),
+      h("div", { class: "row start-claim" }, h("span", { class: "at" }, "@"), input, check, claim),
+      START.msg ? h("p", { class: "msg " + (START.checked ? "ok" : "bad") }, START.msg) : null];
+  }
+
+  const steps = [
+    { done: walletDone, title: START.phrase ? "Your 12 words" : st.wallet ? "Your wallet" : "Make your wallet, or restore yours", body: s1 },
+    { done: coinsHere || (!!c && c.status === "sent"), title: coinsHere || (c && c.status === "sent") ? `1 ${coin} for your @handle` : `Waiting for 1 ${coin}`, body: s2 },
+    { done: false, title: "Claim your @handle", body: s3 },
+  ];
   $("h-steps").replaceChildren(...steps.map((x, i) => h("li", { class: x.done ? "done" : "" },
     h("span", { class: "n" }, x.done ? "✓" : String(i + 1)),
-    h("div", {}, h("b", {}, x.title), h("div", { class: "hint" }, x.text),
-      x.go ? h("button", { class: "primary", onclick: () => goTab(x.go[1]) }, x.go[0]) : null,
-      x.restore ? restoreBox() : null))));
+    h("div", { class: "start-body" }, h("b", {}, x.title), ...x.body))));
 }
 
 // Restore a wallet from its words right on Home (the same as the Wallet tab's Restore).
 let restoring = false;
 function restoreBox() {
-  const ta = h("textarea", { rows: "2", placeholder: "your 12 words, separated by spaces", autocomplete: "off", spellcheck: "false", class: "start-words" });
+  const ta = h("textarea", { rows: "2", placeholder: "or: your 12 words, separated by spaces", autocomplete: "off", spellcheck: "false", class: "start-words" });
   const m = h("p", { class: "msg" });
   const b = h("button", { onclick: async () => {
     if (restoring) return;
@@ -92,6 +135,7 @@ function restoreBox() {
       await api("wallet.create", { phrase: ta.value.trim().toLowerCase().split(/\s+/).join(" ") });
       ta.value = "";
       msg(m, "Restored. Your addresses, @handle and coins show up as the chain is read.", "ok");
+      drawStart.sig = null;
       refresh();
     } catch (e) { msg(m, e.message, "bad"); }
     finally { restoring = false; b.disabled = false; }
