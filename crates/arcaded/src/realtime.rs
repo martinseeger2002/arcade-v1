@@ -677,6 +677,11 @@ pub fn cert(node: &Node, address: &str) -> Result<Value, String> {
     Ok(json!({"words": cert_words(&me, address, x), "expires": x, "node": me, "address": address}))
 }
 
+/// GET /realtime/hello: what a program signs to join as its address (the original's door).
+pub fn hello(node: &Node) -> Value {
+    json!({"online": true, "cert": {"network": crate::meshsvc::NET, "node": my_id(node), "expires": cert_expiry()}})
+}
+
 /// Join as `who` = (member, cred) instead of this arcade's own player: a website's user, vouched
 /// by a cert their address signed for this arcade (`cert`), or a guest ("guest-" + 8 hex).
 pub fn join_as(node: &Node, page: &str, game: &str, room: &str, who_as: Option<(String, Option<Value>)>) -> Result<Value, String> {

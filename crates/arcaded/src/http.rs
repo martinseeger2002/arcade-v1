@@ -183,6 +183,23 @@ fn handle(node: &Node, mut s: TcpStream, site: Option<&PathBuf>) {
         return respond(&mut s, "204 No Content", "text/plain", &cors(), b"");
     }
     let path = r.path.clone();
+    // Core's JSON-RPC (what programs written for a coin node ask: getrawtransaction,
+    // listunspent, sendrawtransaction, ...), for the home chain or /chain/<key>. This computer
+    // only, with the cookie, as /rpc.
+    if r.method == "POST" && (path == "/" || path.starts_with("/chain/")) {
+        if !is_local {
+            return json_out(&mut s, 403, &json!({"error": "the RPC answers only this computer"}));
+        }
+        return core_rpc(node, &mut s, &r);
+    }
+    // The original's room door for programs (the ASHVALE Bank): hello, join by a signed
+    // certificate, send, leave, and a server-sent event stream. This computer only.
+    if let Some(what) = path.strip_prefix("/realtime/") {
+        if !is_local {
+            return json_out(&mut s, 403, &json!({"ok": false, "error": "the room door answers only this computer"}));
+        }
+        return realtime_door(node, &mut s, &r, what);
+    }
     if path == "/rpc" {
         if !is_local {
             return json_out(&mut s, 403, &json!({"error": "the RPC answers only this computer"}));
@@ -199,6 +216,12 @@ fn handle(node: &Node, mut s: TcpStream, site: Option<&PathBuf>) {
         return respond(&mut s, "405 Method Not Allowed", "text/plain", &[], b"GET only\n");
     }
     let p = node.params;
+    // The original's full-page view of an inscription (/inscriptions/<id>/full): the same
+    // sandboxed page as /app/<home chain>/<id> (the ASHVALE Bank renders item icons from it).
+    if let Some(id) = path.strip_prefix("/inscriptions/").and_then(|r| r.strip_suffix("/full")) {
+        let to = format!("/app/{}/{}", node.params.key, id);
+        return respond(&mut s, "302 Found", "text/plain", &[("Location", to)], b"");
+    }
     // An app (or its cover) from any chain's arcade ledger, sandboxed as the original serves apps:
     // an opaque origin with scripts, fetching only from this arcade.
     if let Some(rest) = path.strip_prefix("/app/") {
@@ -355,6 +378,110 @@ fn web_api(node: &Node, s: &mut TcpStream, r: &Req, rest: &str) {
 }
 
 /// JSON-RPC 2.0 (single or batch) with the cookie: every command, as on the local socket.
+fn cookie_ok(node: &Node, r: &Req) -> bool {
+    use base64::Engine;
+    let want = node.rpc_cookie.get().cloned().unwrap_or_default();
+    let got = r.headers.get("authorization").and_then(|v| v.as_str()).and_then(|v| v.strip_prefix("Basic "))
+        .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b.trim()).ok()).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    !want.is_empty() && got == want
+}
+
+fn core_rpc(node: &Node, s: &mut TcpStream, r: &Req) {
+    if !cookie_ok(node, r) {
+        return respond(s, "401 Unauthorized", "application/json", &[("WWW-Authenticate", "Basic realm=\"arcade\"".into())], br#"{"error":"use the cookie from <home>/.cookie as Basic auth (__cookie__:secret)"}"#);
+    }
+    let p = match r.path.strip_prefix("/chain/").map(|k| k.trim_end_matches('/')) {
+        Some(k) => match node.chain_params(k) {
+            Some(p) => p,
+            None => return json_out(s, 404, &json!({"result": null, "error": {"code": -1, "message": format!("{k} is not kept here")}, "id": null})),
+        },
+        None => node.params,
+    };
+    let one = |c: &Value| -> (bool, Value) {
+        let id = c.get("id").cloned().unwrap_or(Value::Null);
+        let params: Vec<Value> = c["params"].as_array().cloned().unwrap_or_default();
+        match crate::rpc::call_on(node, p, c["method"].as_str().unwrap_or(""), &params) {
+            Ok(v) => (true, json!({"result": v, "error": null, "id": id})),
+            Err((code, msg)) => (false, json!({"result": null, "error": {"code": code, "message": msg}, "id": id})),
+        }
+    };
+    let body: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
+    let (ok, out) = match &body {
+        Value::Array(calls) => (true, Value::Array(calls.iter().map(|c| one(c).1).collect())),
+        Value::Object(_) => one(&body),
+        _ => (false, json!({"result": null, "error": {"code": -32700, "message": "Parse error"}, "id": null})),
+    };
+    // Core answers errors with HTTP 500 (clients read the JSON either way).
+    respond(s, if ok { "200 OK" } else { "500 Internal Server Error" }, "application/json", &[], out.to_string().as_bytes());
+}
+
+fn realtime_door(node: &Node, s: &mut TcpStream, r: &Req, what: &str) {
+    let body: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
+    let st = |k: &str| body[k].as_str().unwrap_or("").to_string();
+    let done = |s: &mut TcpStream, res: Result<Value, String>| match res {
+        Ok(mut v) => {
+            v["ok"] = json!(true);
+            json_out(s, 200, &v)
+        }
+        Err(e) => json_out(s, 400, &json!({"ok": false, "error": e})),
+    };
+    match what {
+        "hello" => json_out(s, 200, &crate::realtime::hello(node)),
+        "join" => {
+            // A program joins as its address by a certificate it signed (hello's words).
+            let (address, game, room) = (st("address"), st("game"), st("room"));
+            let cred = json!({"a": address, "x": body["expires"].as_u64().unwrap_or(0), "s": st("sig")});
+            let who = if address.is_empty() { None } else { Some((address.clone(), Some(cred))) };
+            let who = who.or_else(|| Some((format!("guest-{}", &hex::encode(rand_bytes())[..8]), None)));
+            done(s, crate::realtime::join_as(node, &game, &game, &room, who))
+        }
+        "send" => done(s, crate::realtime::send(node, &st("token"), body["data"].as_str(), body["b64"].as_str())),
+        "leave" => done(s, crate::realtime::leave(node, &st("token"))),
+        "stream" => {
+            // Server-sent events: "data: <event>" lines, ": still here" every 15 s, and
+            // "event: closed" when the seat is gone.
+            let tok = query_fields(&r.query).get("token").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            // Chunked, so a client reading in blocks gets each event as it is sent.
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\nTransfer-Encoding: chunked\r\nX-Content-Type-Options: nosniff\r\n\r\n";
+            let chunk = |s: &mut TcpStream, t: &str| -> std::io::Result<()> {
+                s.write_all(format!("{:x}\r\n{t}\r\n", t.len()).as_bytes())?;
+                s.flush()
+            };
+            if s.write_all(head.as_bytes()).is_err() {
+                return;
+            }
+            loop {
+                let v = crate::realtime::poll(&tok, 15_000).unwrap_or_else(|_| json!({"gone": true, "events": []}));
+                let mut out = String::new();
+                if v["gone"] == true {
+                    out.push_str("event: closed\ndata: {\"why\":\"the seat is gone; join again\"}\n\n");
+                    let _ = chunk(s, &out);
+                    let _ = s.write_all(b"0\r\n\r\n");
+                    return;
+                }
+                let evs = v["events"].as_array().cloned().unwrap_or_default();
+                if evs.is_empty() {
+                    out.push_str(": still here\n\n");
+                }
+                for e in evs {
+                    out.push_str(&format!("data: {e}\n\n"));
+                }
+                if chunk(s, &out).is_err() {
+                    return;
+                }
+            }
+        }
+        _ => json_out(s, 404, &json!({"ok": false, "error": "hello, join, send, leave or stream"})),
+    }
+}
+
+fn rand_bytes() -> [u8; 8] {
+    let mut b = [0u8; 8];
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    b.copy_from_slice(&(t as u64 ^ std::process::id() as u64).to_le_bytes());
+    b
+}
+
 fn rpc(node: &Node, s: &mut TcpStream, r: &Req) {
     use base64::Engine;
     let want = node.rpc_cookie.get().cloned().unwrap_or_default();

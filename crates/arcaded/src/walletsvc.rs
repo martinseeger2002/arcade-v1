@@ -190,7 +190,31 @@ pub fn route(node: &Node, path: &str, q: &serde_json::Map<String, Value>) -> (u1
                 .collect();
             (200, text(&json!(rows)))
         }
-        ["balances", a] => (200, balance_rows(node, &holdings(node, a)).to_string()),
+        ["balances", a] => {
+            let mut rows = balance_rows(node, &holdings(node, a));
+            // pending=1 (as the original): `arriving` and `leaving` units per token from the
+            // mempool, and a row for a token only arriving; `units` stays what the blocks say.
+            if qs("pending").is_some_and(|v| v != "0" && !v.is_empty()) {
+                let (inc, out) = pending_moves(node, a);
+                let list = rows.as_array_mut().unwrap();
+                for (key, side) in [("arriving", &inc), ("leaving", &out)] {
+                    for m in side.iter().filter(|m| m["kind"] == "token") {
+                        let pid = m["property_id"].as_u64().unwrap_or(0);
+                        let i = match list.iter().position(|r| r["propertyid"].as_u64() == Some(pid)) {
+                            Some(i) => i,
+                            None => {
+                                let p = prop(node, pid as u32).unwrap_or(Value::Null);
+                                list.push(json!({"propertyid": pid, "name": p["name"], "balance": "0", "units": 0, "divisible": divisible(&p)}));
+                                list.len() - 1
+                            }
+                        };
+                        let have = list[i][key].as_u64().unwrap_or(0);
+                        list[i][key] = json!(have + m["units"].as_u64().unwrap_or(0));
+                    }
+                }
+            }
+            (200, rows.to_string())
+        }
         ["tag", name] => {
             let t = name.trim_start_matches('@').to_lowercase();
             let a = arcade_ledger::index::tag_row(&node.chain, cc, &t).ok().flatten().map(|r| r.address);
@@ -228,7 +252,10 @@ pub fn route(node: &Node, path: &str, q: &serde_json::Map<String, Value>) -> (u1
         ["collection-item", _, _] => missing("no collection this arcade knows names it"),
         ["state", piece] => (200, state_of(node, piece, None).to_string()),
         ["state", fam, piece] => (200, state_of(node, piece, Some(fam)).to_string()),
-        ["pending", a] => (200, json!({"address": a, "incoming": [], "outgoing": []}).to_string()),
+        ["pending", a] => {
+            let (inc, out) = pending_moves(node, a);
+            (200, json!({"address": a, "incoming": inc, "outgoing": out}).to_string())
+        }
         _ => missing("not a route of this arcade's page API"),
     }
 }
@@ -633,4 +660,27 @@ pub fn state_of(node: &Node, piece: &str, family: Option<&str>) -> Value {
         Some(_) => list.into_iter().next().unwrap_or(Value::Null),
         None => json!(list),
     }
+}
+
+/// Token transfers waiting in the mempool to and from an address: (incoming, outgoing), each
+/// {kind: "token", property_id, units, txid, from, to} (simple sends and grants).
+pub fn pending_moves(node: &Node, address: &str) -> (Vec<Value>, Vec<Value>) {
+    use arcade_ledger::payload::{decode, Msg};
+    let (mut inc, mut out) = (Vec::new(), Vec::new());
+    for (tx, atx) in crate::claims::pending_arcade(node) {
+        let Ok(d) = decode(&atx.payload) else { continue };
+        let (pid, units, to) = match d.msg {
+            Msg::SimpleSend { prop, amount } => (prop, amount, atx.reference.clone()),
+            Msg::Grant { prop, amount } => (prop, amount, atx.reference.clone().or_else(|| Some(atx.sender.clone()))),
+            _ => continue,
+        };
+        let m = json!({"kind": "token", "property_id": pid, "units": units, "txid": tx.txid.to_hex(), "from": atx.sender, "to": to});
+        if to.as_deref() == Some(address) {
+            inc.push(m.clone());
+        }
+        if atx.sender == address && !matches!(d.msg, Msg::Grant { .. }) {
+            out.push(m);
+        }
+    }
+    (inc, out)
 }
