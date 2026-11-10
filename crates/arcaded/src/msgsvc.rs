@@ -285,7 +285,10 @@ fn block_time(node: &Node, h: u32) -> u64 {
     node.chain.hash_at(c, h).ok().flatten().and_then(|hash| node.chain.header(c, &hash).ok().flatten()).map(|r| r.header.time as u64).unwrap_or_else(arcade_app::now)
 }
 
-/// Background: scan for new messages every 15 seconds.
+/// Set when a home-chain transaction arrives in the pool: the scan runs at once.
+pub static WAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Background: scan for new messages every 15 seconds, or at once when woken.
 pub fn run(node: std::sync::Arc<Node>) {
     loop {
         if let Err(e) = announce_if_needed(&node) {
@@ -295,7 +298,12 @@ pub fn run(node: std::sync::Arc<Node>) {
             let _ = node.app.event("messages", &format!("scan stopped: {e}"));
             std::thread::sleep(Duration::from_secs(300));
         }
-        std::thread::sleep(Duration::from_secs(15));
+        for _ in 0..60 {
+            if WAKE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 }
 
@@ -564,7 +572,7 @@ pub fn send_payloads_with(node: &Node, payloads: &[Vec<u8>], mut extra: Vec<arca
         let outs: u64 = tx.outputs.iter().map(|o| o.value).sum();
         fees += ins.saturating_sub(outs);
         // Our own pool must take it (no coin spent twice), or nobody else will.
-        if !node.chain.mempool_add(p, &tx, arcade_app::now()).map_err(|e| e.to_string())? {
+        if !crate::mempoolshare::add(node, p, &tx) {
             return Err(if txids.is_empty() {
                 "the message transaction was refused (its coins are spent by another waiting transaction); nothing was sent".into()
             } else {

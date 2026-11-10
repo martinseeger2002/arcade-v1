@@ -218,7 +218,7 @@ pub fn broadcast(node: &Node, req: &Value) -> R {
     if outs > ins {
         return Err(format!("the outputs ({outs}) are more than the coins spent ({ins})"));
     }
-    if !node.chain.mempool_add(p, &tx, arcade_app::now()).map_err(|e| e.to_string())? {
+    if !crate::mempoolshare::add(node, p, &tx) {
         return Err("refused: a waiting transaction already spends one of these coins".into());
     }
     if p.chain_no == node.params.chain_no {

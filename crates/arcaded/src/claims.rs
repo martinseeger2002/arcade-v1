@@ -266,7 +266,7 @@ pub fn advance_all(node: &Node) {
 
 /// Remember the coins a transaction we just built spends, until a block settles them.
 pub fn mark_spent(node: &Node, tx: &arcade_chain::Tx) {
-    let _ = node.chain.mempool_add(node.params, tx, arcade_app::now());
+    let _ = crate::mempoolshare::add(node, node.params, tx);
     let mut ps = node.pending_spent.lock().unwrap();
     for i in &tx.inputs {
         ps.insert(i.prevout);
