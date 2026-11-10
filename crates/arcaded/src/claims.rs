@@ -187,8 +187,28 @@ fn advance_one(node: &Node, mut c: Claim) -> Result<Claim, String> {
     Ok(c)
 }
 
+/// A wallet with no @handle and no claim yet keeps asking for test coins while it has none
+/// (an ask made when no arcade could pay is asked again after 15 minutes).
+fn ask_for_first_handle(node: &Node) {
+    let p = node.params;
+    if !node.app.has_wallet().unwrap_or(false) {
+        return;
+    }
+    if node.app.tag_keys(p.chain_no).unwrap_or_default().iter().any(|k| k.tag.is_some())
+        || node.app.claims().unwrap_or_default().iter().any(|c| c.chain == p.chain_no && c.status != ClaimStatus::Failed)
+    {
+        return;
+    }
+    let Ok((key, _)) = node.app.tag_key(p, 0) else { return };
+    let script = arcade_wallet::keys::p2pkh_script_for(&arcade_wallet::secp256k1::PublicKey::from_slice(&hex::decode(&key.pubkey).unwrap()).unwrap());
+    if coins(node, &script).is_empty() {
+        let _ = crate::faucet::ask_if_needed(node, &key.address, "");
+    }
+}
+
 /// Called after each sync round.
 pub fn advance_all(node: &Node) {
+    ask_for_first_handle(node);
     for c in node.app.claims().unwrap_or_default() {
         if !matches!(c.status, ClaimStatus::Confirmed | ClaimStatus::Failed) {
             let _ = advance_one(node, c);

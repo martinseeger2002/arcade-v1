@@ -78,18 +78,33 @@ pub fn on_welcome(node: &Node, head: &Value) {
         if r["k"] == "sent" && r["ask"] == me.as_str() && arcade_mesh::welcome::verify(r) {
             let txid = r["txid"].as_str().unwrap_or("").to_string();
             let paid_by = r["a"].as_str().unwrap_or("").to_string();
-            if let Ok(list) = node.app.faucet_requests() {
-                for mut f in list.into_iter().filter(|f| f.status == FaucetStatus::Asked) {
-                    f.status = FaucetStatus::Paid;
-                    f.txid = Some(txid.clone());
-                    f.paid_by = Some(paid_by.clone());
-                    let _ = node.app.put_faucet(&f);
-                }
+            let at = r["at"].as_u64().unwrap_or(0);
+            let list = node.app.faucet_requests().unwrap_or_default();
+            // Payment notices are passed around the mesh again and again: each counts once,
+            // and only for an ask made before it (an old notice can't pay a newer ask).
+            if list.iter().any(|f| f.txid.as_deref() == Some(txid.as_str())) {
+                continue;
             }
+            let Some(mut f) = list
+                .into_iter()
+                .filter(|f| f.status == FaucetStatus::Asked && f.created <= at + arcade_mesh::welcome::SKEW_SECS)
+                .max_by_key(|f| f.created)
+            else {
+                continue;
+            };
+            f.status = FaucetStatus::Paid;
+            f.txid = Some(txid.clone());
+            f.paid_by = Some(paid_by.clone());
+            let _ = node.app.put_faucet(&f);
             node.app.event("faucet", &format!("test coins sent by {} in {txid}", &paid_by[..16.min(paid_by.len())])).ok();
         }
     }
 }
+
+/// The least a payer sends when it can't spare a whole test coin (a @handle claim costs far less).
+pub const MIN_GIFT: u64 = 10_000_000;
+/// Kept back for the payment's own fee when sending what is left.
+const FEE_MARGIN: u64 = 1_000_000;
 
 /// Most asks this arcade pays per UTC day.
 pub const DAILY_CAP: usize = 20;
@@ -137,9 +152,21 @@ pub fn pay_asks(node: &Node) {
         let Ok((k, sk)) = node.app.tag_key(p, 0) else { return };
         let script = arcade_ledger::address::p2pkh_script_for_address(p, &k.address).expect("own address");
         let coins = crate::claims::spendable(node, &script);
-        let tx = match arcade_wallet::tx::build_send(p, &to, AMOUNT, &sk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST, now as u32) {
-            Ok(t) => t,
-            Err(_) => return, // no spare coins: someone else will pay
+        // 1 test PEP, or what this arcade can spare down to MIN_GIFT (enough for a @handle
+        // claim): a payer running low still helps instead of skipping every ask.
+        let have: u64 = coins.iter().map(|u| u.value).sum();
+        let mut amount = AMOUNT;
+        let tx = loop {
+            match arcade_wallet::tx::build_send(p, &to, amount, &sk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST, now as u32) {
+                Ok(t) => break t,
+                Err(_) => {
+                    let less = have.saturating_sub(FEE_MARGIN).min(amount.saturating_sub(1));
+                    if less < MIN_GIFT || less >= amount {
+                        return; // no spare coins: someone else will pay
+                    }
+                    amount = less;
+                }
+            }
         };
         crate::claims::mark_spent(node, &tx);
         node.tx_outbox.lock().unwrap().push(tx.raw.clone());
@@ -152,7 +179,7 @@ pub fn pay_asks(node: &Node) {
         let mut list = paid_today.clone();
         list.push(asker.to_string());
         let _ = node.app.store.write(|w| w.put(arcade_app::META, paid_key.as_bytes(), &serde_json::to_vec(&list).unwrap()));
-        let _ = node.app.event("faucet", &format!("paid 1 test PEP to {addr} for arcade {} in {}", &asker[..16.min(asker.len())], tx.txid));
+        let _ = node.app.event("faucet", &format!("paid {} test PEP to {addr} for arcade {} in {}", amount as f64 / 1e8, &asker[..16.min(asker.len())], tx.txid));
         return; // one per pass: the next pass sees the updated coins
     }
 }
