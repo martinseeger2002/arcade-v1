@@ -51,16 +51,15 @@ pub(crate) fn coins(node: &Node, script: &[u8]) -> Vec<Utxo> {
 /// Outputs of pooled (unconfirmed) transactions paying `script`, not already spent by
 /// another pooled transaction or by one of ours. Spending them is valid: parent and child
 /// confirm together (Core accepts chains of unconfirmed transactions).
-fn unconfirmed_coins(node: &Node, script: &[u8]) -> Vec<Utxo> {
+pub(crate) fn unconfirmed_coins(node: &Node, script: &[u8]) -> Vec<Utxo> {
     let p = node.params;
     let c = p.chain_no;
     let mut out = Vec::new();
     for (_, raw) in node.chain.mempool(c).unwrap_or_default() {
         let Ok(tx) = arcade_chain::Tx::parse_with(&raw, &p.format) else { continue };
-        // BIP125: a parent that signals replaceability could be swapped out; never build on it.
-        if signals_rbf(&tx) {
-            continue;
-        }
+        // A parent that signals replaceability (BIP125) could be swapped out; it is still
+        // spent (test coins usable within seconds), and a claim whose transaction drops out
+        // of the pool that way is built again (advance_one, Sent).
         for (vout, o) in tx.outputs.iter().enumerate() {
             if o.script_pubkey != script {
                 continue;
@@ -178,7 +177,18 @@ fn advance_one(node: &Node, mut c: Claim) -> Result<Claim, String> {
                     node.app.event("tag", &format!("@{} is yours", c.tag)).ok();
                 }
                 Some(false) => set(&mut c, ClaimStatus::Failed, "someone else's claim confirmed first"),
-                None => {}
+                None => {
+                    // Neither confirmed nor waiting any more (its parent was replaced, or it
+                    // was dropped): after 10 minutes the claim is built again.
+                    let Some(txid) = c.txid.as_deref().and_then(|t| arcade_chain::Hash256::from_hex(t).ok()) else { return Ok(c) };
+                    let pooled = node.chain.mempool(p.chain_no).unwrap_or_default().iter()
+                        .any(|(_, raw)| arcade_chain::Tx::parse_with(raw, &p.format).map(|t| t.txid == txid).unwrap_or(false));
+                    let mined = node.chain.tx_raw(p, &txid).ok().flatten().is_some();
+                    if !pooled && !mined && c.updated + 600 < arcade_app::now() {
+                        c.txid = None;
+                        set(&mut c, ClaimStatus::Checking, "the claim's transaction dropped out; building it again");
+                    }
+                }
             }
         }
         ClaimStatus::Confirmed | ClaimStatus::Failed => {}

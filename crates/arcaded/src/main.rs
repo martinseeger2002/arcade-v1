@@ -286,14 +286,23 @@ fn main() {
         let n = node.clone();
         std::thread::Builder::new()
             .name("claims".into())
-            .spawn(move || loop {
-                if let Err(e) = ledger::catch_up(&n) {
-                    let _ = n.app.event("index", &format!("index catch-up stopped: {e}"));
-                    *n.sync_state.lock().unwrap() = format!("index stopped: {e}");
+            .spawn(move || {
+                // Claims look every 3 s, so test coins still waiting in the mempool are spent
+                // within seconds (Martin: publish the account within seconds); the tag index
+                // and paying asks keep their 15 s clock.
+                let mut last = std::time::Instant::now() - std::time::Duration::from_secs(15);
+                loop {
+                    if last.elapsed() >= std::time::Duration::from_secs(15) {
+                        if let Err(e) = ledger::catch_up(&n) {
+                            let _ = n.app.event("index", &format!("index catch-up stopped: {e}"));
+                            *n.sync_state.lock().unwrap() = format!("index stopped: {e}");
+                        }
+                        faucet::pay_asks(&n);
+                        last = std::time::Instant::now();
+                    }
+                    claims::advance_all(&n);
+                    std::thread::sleep(std::time::Duration::from_secs(3));
                 }
-                claims::advance_all(&n);
-                faucet::pay_asks(&n);
-                std::thread::sleep(std::time::Duration::from_secs(15));
             })
             .unwrap();
     }

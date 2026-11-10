@@ -233,7 +233,7 @@ async function refreshWallet() {
   const [keys, imps] = await Promise.all([api("wallet.keys", { chain: ch.key }), api("wallet.imports").catch(() => [])]);
   state.keys = keys;
   W.list = [
-    ...keys.map((k) => ({ id: "own:" + k.index, own: true, index: k.index, address: k.address, legacy: k.legacy, tag: k.tag, balance: k.balance,
+    ...keys.map((k) => ({ id: "own:" + k.index, own: true, index: k.index, address: k.address, legacy: k.legacy, tag: k.tag, balance: k.balance, pending: k.pending || 0,
       label: k.tag ? "@" + k.tag : k.index ? `This arcade's wallet · address ${k.index}` : "This arcade's wallet" })),
     ...imps.filter((w) => w.chain === ch.key).map((w) => ({ id: "imp:" + w.address, own: false, address: w.address, balance: w.balance, name: w.name,
       kind: w.kind, addr_kind: w.addr_kind, spendable: w.addr_kind !== "p2sh-p2wpkh",
@@ -277,6 +277,7 @@ function drawCard(ch) {
   const ddOn = w.own && w.index === 0 && isDD(ch.key) && W.dd && !W.dd.error;
   const sub = [];
   if (w.balance == null) sub.push(`${ch.name} isn't installed or borrowed with addresses here: add it in Chains & Coins to see balances.`);
+  if (w.pending > 0) sub.push(`+${coinNum(w.pending)} ${tk} arriving (in the mempool, spendable now)`);
   if (ddOn) sub.push(`${usd(W.dd.cents)} DigiDollar`);
   if (!w.own && !w.spendable) sub.push("Wrapped SegWit: receive only for now.");
   $("w-sub").textContent = sub.join(" · ");
