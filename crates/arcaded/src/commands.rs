@@ -88,7 +88,8 @@ cmds! {
     "wallet.imports" Local "" "Imported wallets, with balances on chains this arcade keeps addresses for.";
     "wallet.import_remove" Local "chain, address" "Forget an imported wallet and its key.";
     "tag.check" Public "tag" "Whether a @tag is free and valid.";
-    "tag.claim" Wallet "tag" "Claim a @tag on the home chain.";
+    "tag.claim" Wallet "tag" "Claim a @tag on the home chain (test coins for it are asked for by themselves).";
+    "start.status" Read "" "Getting started: wallet made, handle (claimed or being claimed), test coins asked for or here, synced.";
     "tag.list" Read "" "Your tag claims and their progress.";
     "faucet.ask" Wallet "index?, tag?" "Ask the mesh for test coins.";
     // Messaging

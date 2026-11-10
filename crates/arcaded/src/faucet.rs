@@ -23,6 +23,26 @@ pub fn ask(node: &Node, addr: &str, tag: &str) -> Result<FaucetRequest, String> 
     Ok(req)
 }
 
+/// Ask for test coins to `addr` unless an ask is already open: none yet, or the last one is
+/// still unpaid after 15 minutes (the mesh may not have heard it, or nobody had spare coins
+/// then). Test coins come by themselves (Martin: requesting them should be automatic).
+pub fn ask_if_needed(node: &Node, addr: &str, tag: &str) -> Result<bool, String> {
+    let last = node.app.faucet_requests().unwrap_or_default().into_iter().filter(|f| f.address == addr).max_by_key(|f| f.created);
+    let due = match last {
+        None => true,
+        Some(f) => f.status == FaucetStatus::Asked && f.created + 900 < arcade_app::now(),
+    };
+    if due {
+        ask(node, addr, tag)?;
+    }
+    Ok(due)
+}
+
+/// The newest ask for an address: (status, when).
+pub fn last_ask(node: &Node, addr: &str) -> Option<(FaucetStatus, u64)> {
+    node.app.faucet_requests().unwrap_or_default().into_iter().filter(|f| f.address == addr).max_by_key(|f| f.created).map(|f| (f.status, f.created))
+}
+
 /// A `wl` frame arrived: remember asks and payments; if someone paid our ask, record it.
 pub fn on_welcome(node: &Node, head: &Value) {
     let me = node.id_hex();

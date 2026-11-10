@@ -42,7 +42,7 @@ pub fn spendable(node: &Node, script: &[u8]) -> Vec<Utxo> {
     coins(node, script)
 }
 
-fn coins(node: &Node, script: &[u8]) -> Vec<Utxo> {
+pub(crate) fn coins(node: &Node, script: &[u8]) -> Vec<Utxo> {
     let mut out = confirmed_coins(node, script);
     out.extend(unconfirmed_coins(node, script));
     out
@@ -161,12 +161,8 @@ fn advance_one(node: &Node, mut c: Claim) -> Result<Claim, String> {
                     node.app.event("tag", &format!("claim for @{} sent in {}", c.tag, tx.txid)).ok();
                 }
                 Err(e) => {
-                    if c.status == ClaimStatus::Checking {
-                        let already = node.app.faucet_requests().unwrap_or_default().iter().any(|f| f.address == key.address);
-                        if !already {
-                            crate::faucet::ask(node, &key.address, &c.tag)?;
-                        }
-                    }
+                    // Test coins: asked for by themselves, and again while none came.
+                    crate::faucet::ask_if_needed(node, &key.address, &c.tag)?;
                     set(&mut c, ClaimStatus::Funding, &format!("waiting for test coins to {} ({e})", key.address));
                 }
             }
@@ -297,4 +293,31 @@ pub fn pending_tags(node: &Node) -> Vec<(String, String)> {
 /// BIP125 opt-in replace-by-fee: any input with nSequence < 0xfffffffe.
 pub fn signals_rbf(tx: &arcade_chain::Tx) -> bool {
     tx.inputs.iter().any(|i| i.sequence < 0xffff_fffe)
+}
+
+/// start.status: where this arcade's owner is in getting started (the Home tab's guide):
+/// wallet made, handle claimed or being claimed, test coins asked for or here.
+pub fn start_status(node: &Node) -> serde_json::Value {
+    use serde_json::json;
+    let p = node.params;
+    let wallet = node.app.has_wallet().unwrap_or(false);
+    if !wallet {
+        return json!({"wallet": false});
+    }
+    let tag = node.app.tag_keys(p.chain_no).unwrap_or_default().into_iter().find_map(|k| k.tag);
+    let claim = node.app.claims().unwrap_or_default().into_iter().filter(|c| c.chain == p.chain_no).max_by_key(|c| c.created);
+    let index = claim.as_ref().map(|c| c.key_index).unwrap_or(0);
+    let (key, _) = match node.app.tag_key(p, index) {
+        Ok(k) => k,
+        Err(e) => return json!({"wallet": true, "error": e.to_string()}),
+    };
+    let script = arcade_wallet::keys::p2pkh_script_for(&arcade_wallet::secp256k1::PublicKey::from_slice(&hex::decode(&key.pubkey).unwrap()).unwrap());
+    let balance: u64 = coins(node, &script).iter().map(|u| u.value).sum();
+    let ask = crate::faucet::last_ask(node, &key.address);
+    json!({
+        "wallet": true, "tag": tag, "address": key.address, "balance": balance,
+        "claim": claim.map(|c| json!({"tag": c.tag, "status": format!("{:?}", c.status).to_lowercase(), "note": c.note})),
+        "faucet": ask.map(|(s, at)| json!({"status": format!("{s:?}").to_lowercase(), "at": at})),
+        "synced": node.sync_state.lock().unwrap().starts_with("synced"),
+    })
 }
