@@ -23,7 +23,6 @@
 <nav>
   <button data-tab="home" class="on">Home</button>
   <button data-tab="wallet">Wallet</button>
-  <button data-tab="handle">Handle</button>
   <button data-tab="messages">Messages</button>
   <button data-tab="feed">Feed</button>
   <button data-tab="apps">Apps</button>
@@ -43,7 +42,8 @@
       <ol class="start-steps" id="h-steps"></ol>
     </div>
     <h1>Arcade mesh</h1>
-    <p class="note" id="h-sum">Asking the mesh…</p>
+    <div class="arcades" id="h-top"><div class="arcade"><div class="meta">Asking the mesh…</div></div></div>
+    <h2>Other arcades</h2>
     <div class="arcades" id="h-arcades"></div>
   </section>
 
@@ -152,23 +152,6 @@
       </details>
     </div>
     <p class="msg" id="w-msg"></p>
-  </section>
-
-  <!-- Handle -->
-  <section id="handle" class="tab">
-    <h1>Your handle</h1>
-    <p class="note" id="t-note" hidden></p>
-    <div id="t-body">
-    <p>Pick an @tag: 2–24 characters, a–z, 0–9 and _. It is claimed on the Pepecoin testnet and every arcade sees it.</p>
-    <div class="row">
-      <span class="at">@</span><input id="t-tag" placeholder="yourname" maxlength="24" autocomplete="off">
-      <button id="t-check">Check</button>
-      <button class="primary" id="t-claim" disabled>Claim</button>
-    </div>
-    <p class="msg" id="t-msg"></p>
-    <h2>Claims</h2>
-    <table><thead><tr><th>Tag</th><th>Status</th><th>Note</th></tr></thead><tbody id="t-rows"></tbody></table>
-    </div>
   </section>
 
   <!-- Explorer: the chain chosen at the top, read from this arcade's own database -->

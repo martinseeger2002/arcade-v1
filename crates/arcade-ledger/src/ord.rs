@@ -786,6 +786,34 @@ pub fn number_of(db: &ChainDb, c: u16, iid: &[u8; 36]) -> Option<u64> {
     Some(u64::from_be_bytes(v[..8].try_into().ok()?))
 }
 
+/// (number, content type) of inscriptions numbered lo..hi kept here, in one snapshot (a
+/// Shared-storage arcade skips the groups it doesn't keep).
+pub fn content_types(db: &ChainDb, c: u16, lo: u64, hi: u64) -> Vec<(u64, String)> {
+    if hi <= lo {
+        return Vec::new();
+    }
+    let pre = KeyBuf::new().u16(c).done();
+    let mut out = Vec::new();
+    db.store
+        .read(|r| {
+            let after = KeyBuf::new().u16(c).u64(lo.saturating_sub(1)).done();
+            let rows = r.scan_after(NUM, &pre, (lo > 0).then_some(&after[..]), (hi - lo) as usize)?;
+            for (key, iid) in rows {
+                let n = be_u64(&key, 2);
+                if n >= hi {
+                    break;
+                }
+                if let Some(v) = r.get(INSC, &k(c, &iid))? {
+                    let ct = serde_json::from_slice::<Value>(&v).ok().and_then(|v| v["ct"].as_str().map(String::from)).unwrap_or_default();
+                    out.push((n, ct));
+                }
+            }
+            Ok(())
+        })
+        .ok();
+    out
+}
+
 pub fn count(db: &ChainDb, c: u16) -> u64 {
     db.store
         .read(|r| r.get(STATE, &k(c, b"next")))

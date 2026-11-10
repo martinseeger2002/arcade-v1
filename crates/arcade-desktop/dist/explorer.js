@@ -184,30 +184,22 @@
   }
   // Filter by content type (MIME type): groups, newest first; "Show older" goes on.
   const INS_TYPES = [["", "All"], ["image", "Images"], ["svg", "SVG"], ["text", "Text"], ["html", "HTML"], ["json", "JSON"], ["audio", "Audio"], ["video", "Video"], ["model", "3D"], ["other", "Other"]];
-  let insType = "", insAcc = [], insNext = null, insKey = "";
+  let insType = "";
   function typeChips() {
-    return h("div", { class: "x-types" }, INS_TYPES.map(([v, label]) => h("button", { class: "chip-btn" + (insType === v ? " on" : ""), onclick: () => { insType = v; insAcc = []; insNext = null; insKey = ""; go("inscriptions"); } }, label)));
+    return h("div", { class: "x-types" }, INS_TYPES.map(([v, label]) => h("button", { class: "chip-btn" + (insType === v ? " on" : ""), onclick: () => { insType = v; go("inscriptions"); } }, label)));
   }
   async function vInscriptions() {
     const size = 36, page = pageOf();
     const first = await xapi("explorer.inscriptions", { chain: chain.key, n: 1 });
     const total = first.total;
     if (insType) {
-      const key = `${chain.key}|${insType}`;
-      if (insKey !== key) {
-        insKey = key;
-        const r = await xapi("explorer.inscriptions", { chain: chain.key, type: insType, before: total, n: size });
-        insAcc = r.items; insNext = r.next_before ?? null;
-      }
+      // Paged like the full list (newest first), with the type's own total.
+      const r = await xapi("explorer.inscriptions", { chain: chain.key, type: insType, offset: (page - 1) * size, n: size });
       const label = INS_TYPES.find((t) => t[0] === insType)[1];
-      const more = insNext != null ? h("div", { class: "row" }, h("button", { onclick: async (ev) => {
-        ev.target.disabled = true; ev.target.textContent = "Looking…";
-        const r = await xapi("explorer.inscriptions", { chain: chain.key, type: insType, before: insNext, n: size });
-        insAcc = insAcc.concat(r.items); insNext = r.next_before ?? null;
-        render();
-      } }, `Show older (looked down to #${fmt(insNext)})`)) : h("p", { class: "x-note" }, "That's all of them.");
-      return sect(`${label} · ${fmt(insAcc.length)} found, newest first`, null, h("div", {}, typeChips(),
-        insAcc.length ? insGrid(insAcc) : h("div", { class: "x-empty" }, insNext != null ? "None in the newest ones looked at yet." : "None."), more));
+      const tt = r.type_total ?? r.items.length;
+      const note = r.counting ? h("p", { class: "x-note" }, `Still counting the older ones: ${fmt(tt)} found so far; the total grows as it counts.`) : "";
+      return sect(`${label} · ${fmt(tt)}${r.counting ? "+" : ""}`, null, h("div", {}, typeChips(), note, pager(tt, size, page, "inscriptions"),
+        r.items.length ? insGrid(r.items) : h("div", { class: "x-empty" }, "None."), pager(tt, size, page, "inscriptions")));
     }
     const r = await xapi("explorer.inscriptions", { chain: chain.key, before: Math.max(0, total - (page - 1) * size), n: size });
     const toPage = (num) => Math.floor((total - 1 - num) / size) + 1;
@@ -219,15 +211,20 @@
     return sect(`${r.protocol.toUpperCase()} tokens · ${fmt(r.total)}`, null, h("div", {}, pager(r.total, size, page, "tokens"), tokTable(r.items), pager(r.total, size, page, "tokens")));
   }
   async function vNames() {
-    const r = await xapi("explorer.names", { chain: chain.key, after: arg || undefined, n: 50 });
-    const last = r.items[r.items.length - 1];
-    return sect(`Names · ${fmt(r.counts[0])}`, null, h("div", {}, r.items.length ? table([["Name"], ["Winning inscription", 1]], r.items.map((x) => ({ go: () => go("name", x.name), cells: [[h("span", { class: "mono" }, x.name)], [`#${fmt(x.number)}`, 1]] })))
-      : h("div", { class: "x-empty" }, "No names claimed yet."), r.items.length === 50 && last ? h("div", { class: "row" }, h("button", { onclick: () => go("names", last.name) }, "More")) : ""));
+    const size = 50, page = pageOf();
+    const r = await xapi("explorer.names", { chain: chain.key, offset: (page - 1) * size, n: size });
+    const total = r.total ?? r.counts[0];
+    return sect(`Names · ${fmt(total)}`, null, h("div", {}, pager(total, size, page, "names"),
+      r.items.length ? table([["Name"], ["Winning inscription", 1]], r.items.map((x) => ({ go: () => go("name", x.name), cells: [[h("span", { class: "mono" }, x.name)], [`#${fmt(x.number)}`, 1]] })))
+        : h("div", { class: "x-empty" }, "No names claimed yet."), pager(total, size, page, "names")));
   }
   async function vMaps() {
-    const r = await xapi("explorer.maps", { chain: chain.key, n: 50 });
-    return sect("Maps", null, h("div", {}, r.items.length ? table([["Claim"], ["Winning inscription", 1]], r.items.map((x) => ({ go: () => go("map", x.claim), cells: [[h("span", { class: "mono" }, x.claim)], [`#${fmt(x.number)}`, 1]] })))
-      : h("div", { class: "x-empty" }, "No block maps claimed yet."),
+    const size = 50, page = pageOf();
+    const r = await xapi("explorer.maps", { chain: chain.key, offset: (page - 1) * size, n: size });
+    const total = r.total ?? r.items.length;
+    return sect(`Maps · ${fmt(total)}`, null, h("div", {}, pager(total, size, page, "maps"),
+      r.items.length ? table([["Claim"], ["Winning inscription", 1]], r.items.map((x) => ({ go: () => go("map", x.claim), cells: [[h("span", { class: "mono" }, x.claim)], [`#${fmt(x.number)}`, 1]] })))
+        : h("div", { class: "x-empty" }, "No block maps claimed yet."), pager(total, size, page, "maps"),
       h("p", { class: "x-note" }, "A map claim is an inscription whose whole text is <block>.<name>map (pepemap, dogemap, bitmap, …). The block can't be above the one it was inscribed in, and the first claim wins.")));
   }
   // Arcade ledger: the arcade's own tokens (Omni-style properties), inscriptions and collections.

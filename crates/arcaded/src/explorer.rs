@@ -218,6 +218,13 @@ fn handle_here(node: &Node, cmd: &str, req: &Value) -> R {
             let before = req["before"].as_u64().unwrap_or(total).min(total);
             match s("type").filter(|t| !t.is_empty() && t != "all") {
                 None => Ok(json!({"total": total, "items": latest(&x, before, n(24, 100))})),
+                // Paged like the full list: offset from the newest, with the group's total.
+                Some(ty) if req["offset"].is_u64() && crate::ordtypes::group_index(&ty).is_some() => {
+                    let g = crate::ordtypes::group_index(&ty).unwrap();
+                    let pg = crate::ordtypes::page(x.node, x.p, g, req["offset"].as_u64().unwrap(), n(24, 100));
+                    let items: Vec<Value> = pg.numbers.iter().flat_map(|num| latest(&x, num + 1, 1)).collect();
+                    Ok(json!({"total": total, "type": ty, "type_total": pg.total, "counting": pg.counting, "offset": req["offset"], "items": items}))
+                }
                 Some(ty) => {
                     let (items, next, scanned) = latest_typed(&x, before, n(24, 100), &ty);
                     Ok(json!({"total": total, "type": ty, "items": items, "next_before": next, "scanned": scanned}))
@@ -298,9 +305,15 @@ fn handle_here(node: &Node, cmd: &str, req: &Value) -> R {
         }
         "explorer.names" => {
             x.need("names")?;
+            // Offset paging (names in alphabetical order) with the total, as tokens.
             let pre = KeyBuf::new().u16(x.c()).u8(0).done();
-            let rows = scan_after(&x, names::WIN, pre.clone(), s("after"), n(50, 200) as usize);
-            Ok(json!({"counts": names::counts(&x.node.chain, x.c()), "items": rows.iter().map(|(k, v)| name_row(pre.len(), k, v)).collect::<Vec<_>>()}))
+            let counts = names::counts(&x.node.chain, x.c());
+            let (off, want) = (req["offset"].as_u64().unwrap_or(0) as usize, n(50, 200) as usize);
+            let rows = match s("after") {
+                Some(a) => scan_after(&x, names::WIN, pre.clone(), Some(a), want),
+                None => x.node.chain.store.read(|r| r.scan_prefix_limit(names::WIN, &pre, off + want)).map_err(e)?.into_iter().skip(off).collect(),
+            };
+            Ok(json!({"counts": counts, "total": counts[0], "offset": off, "items": rows.iter().map(|(k, v)| name_row(pre.len(), k, v)).collect::<Vec<_>>()}))
         }
         "explorer.name" => {
             x.need("names")?;
@@ -316,8 +329,14 @@ fn handle_here(node: &Node, cmd: &str, req: &Value) -> R {
         }
         "explorer.maps" => {
             x.need("maps")?;
-            let rows = scan_after(&x, maps::MAP, KeyBuf::new().u16(x.c()).done(), s("after"), n(50, 200) as usize);
-            Ok(json!({"items": rows.iter().map(|(k, v)| map_row(k, v)).collect::<Vec<_>>()}))
+            let pre = KeyBuf::new().u16(x.c()).done();
+            let total: u64 = maps::counts(&x.node.chain, x.c()).iter().map(|c| c.1).sum();
+            let (off, want) = (req["offset"].as_u64().unwrap_or(0) as usize, n(50, 200) as usize);
+            let rows = match s("after") {
+                Some(a) => scan_after(&x, maps::MAP, pre, Some(a), want),
+                None => x.node.chain.store.read(|r| r.scan_prefix_limit(maps::MAP, &pre, off + want)).map_err(e)?.into_iter().skip(off).collect(),
+            };
+            Ok(json!({"total": total, "offset": off, "items": rows.iter().map(|(k, v)| map_row(k, v)).collect::<Vec<_>>()}))
         }
         "explorer.map" => {
             x.need("maps")?;
@@ -510,6 +529,13 @@ fn content_of(x: &Ctx, id: &str, meta: Option<&Value>, cap: usize) -> Value {
 /// "audio", "video", "model", "other"), or an exact type ("image/png").
 pub fn type_matches(ct: &str, ty: &str) -> bool {
     let base = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let ty = ty.trim().to_ascii_lowercase();
+    if ty.contains('/') { base == ty } else { type_group(ct) == ty }
+}
+
+/// The content-type group of `ct` (see [`type_matches`]).
+pub fn type_group(ct: &str) -> &'static str {
+    let base = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
     let group = |b: &str| -> &'static str {
         if b == "image/svg+xml" {
             "svg"
@@ -531,8 +557,7 @@ pub fn type_matches(ct: &str, ty: &str) -> bool {
             "other"
         }
     };
-    let ty = ty.trim().to_ascii_lowercase();
-    if ty.contains('/') { base == ty } else { group(&base) == ty }
+    group(&base)
 }
 
 /// Newest inscriptions below `before` of one content type: (items, where to go on from,

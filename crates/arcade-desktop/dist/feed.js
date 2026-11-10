@@ -12,6 +12,32 @@
     catch (e) { note(e.message, true); }
   }
 
+  // "/content/<id>" in a post (the original arcade's links): the inscription itself, from the
+  // home chain's arcade ledger, else its ord index. Looked up once per id.
+  const CONTENT = new Map();
+  const CONTENT_RE = /\/content\/([0-9a-f]{64}(?:i\d+)?)/gi;
+  function contentOf(id) {
+    if (!CONTENT.has(id)) {
+      CONTENT.set(id, api("explorer.ledger_inscription", { chain: HOME.key, id })
+        .catch(() => api("explorer.inscription", { chain: HOME.key, id }))
+        .then((r) => r.content || null).catch(() => null));
+    }
+    return CONTENT.get(id);
+  }
+  function embeds(text) {
+    const ids = [...new Set([...(text || "").matchAll(CONTENT_RE)].map((m) => m[1].toLowerCase()))].slice(0, 4);
+    return ids.map((id) => {
+      const box = h("div", { class: "fd-file fd-embed" });
+      contentOf(id).then((c) => {
+        if (!c) return;
+        if (c.kind === "image" && c.data) box.append(h("img", { src: c.data, alt: "inscription " + id.slice(0, 12), loading: "lazy" }));
+        else if (c.kind === "text" && c.text) box.append(h("pre", { class: "fd-embed-text" }, c.text.slice(0, 2000)));
+        else box.append(h("span", { class: "s" }, `Inscription ${id.slice(0, 12)}… (${c.type || "file"})`));
+      });
+      return box;
+    });
+  }
+
   function card(p, depth = 0) {
     const a = p.author || {};
     const who = h("a", { class: "fd-who", href: "#" }, a.tag ? "@" + a.tag : (a.address || "").slice(0, 10) + "…");
@@ -50,7 +76,7 @@
     return h("div", { class: "fd-card" + (depth ? " fd-sub" : "") },
       h("div", { class: "fd-head" }, who, a.name && a.name !== a.tag ? h("span", { class: "s" }, " " + a.name) : "",
         h("span", { class: "s" }, ` · ${p.height ? ago(p.age_hours || 0) : "waiting for a block"}${p.edited ? " · edited" : ""}${p.channel && p.channel !== "main" ? " · #" + p.channel : ""}`)),
-      text, file, acts, replyBox, tipBox,
+      text, ...(p.muted ? [] : embeds(p.text)), file, acts, replyBox, tipBox,
       ...(p.replies || []).map((r) => card(r, depth + 1)));
   }
 
