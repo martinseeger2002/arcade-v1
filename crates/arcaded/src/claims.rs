@@ -43,6 +43,12 @@ pub fn spendable(node: &Node, script: &[u8]) -> Vec<Utxo> {
 }
 
 pub(crate) fn coins(node: &Node, script: &[u8]) -> Vec<Utxo> {
+    // The home chain still catching up: its borrowed copy knows the coins (incl. waiting ones).
+    if crate::borrow::is_borrowed(node.params.key) {
+        let mut out = crate::borrow::spendable(node, node.params, script);
+        out.retain(|u| !node.pending_spent.lock().unwrap().contains(&u.outpoint));
+        return out;
+    }
     let mut out = confirmed_coins(node, script);
     out.extend(unconfirmed_coins(node, script));
     out
@@ -155,6 +161,12 @@ fn advance_one(node: &Node, mut c: Claim) -> Result<Claim, String> {
                 Ok(tx) => {
                     crate::claims::mark_spent(node, &tx);
                     node.tx_outbox.lock().unwrap().push(tx.raw.clone());
+                    // While the home chain is borrowed (catching up), its lenders send it now.
+                    if crate::borrow::is_borrowed(p.key) {
+                        if let Err((why, _)) = crate::borrow::broadcast_tx(node, p, &tx) {
+                            node.app.event("tag", &format!("claim for @{}: lenders didn't take it yet ({why})", c.tag)).ok();
+                        }
+                    }
                     c.txid = Some(tx.txid.to_hex());
                     set(&mut c, ClaimStatus::Sent, "claim sent; waiting for a block");
                     node.app.event("tag", &format!("claim for @{} sent in {}", c.tag, tx.txid)).ok();

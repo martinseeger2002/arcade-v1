@@ -41,6 +41,31 @@ pub fn status() -> Value {
 
 /// share.install: take a chain in from V1.0 copies (blocks and coins) made by 2 or more arcades.
 pub fn start(node: Arc<Node>, key: &str) -> Result<Value, String> {
+    start_with(node, key, 1800)
+}
+
+/// First start of an arcade far behind on its home chain: install it from copies when the
+/// mesh offers them within a few minutes (the usual sync goes on meanwhile and takes over if
+/// not), borrowing the chain meanwhile (crate::borrow) so balances and claims work at once.
+pub fn auto_home(node: Arc<Node>) {
+    std::thread::Builder::new()
+        .name("install-home".into())
+        .spawn(move || {
+            // Give the mesh a minute to tell us tips and holders.
+            std::thread::sleep(Duration::from_secs(60));
+            let (lag, _) = crate::borrow::home_lag(&node);
+            if lag < 50_000 {
+                return;
+            }
+            let _ = node.app.event("chain", &format!("{} is {lag} blocks behind: asking the mesh for copies to install it from", node.params.name));
+            if let Err(e) = start_with(node.clone(), node.params.key, 1200) {
+                let _ = node.app.event("chain", &format!("installing {} from copies: {e}", node.params.name));
+            }
+        })
+        .unwrap();
+}
+
+fn start_with(node: Arc<Node>, key: &str, wait_secs: u64) -> Result<Value, String> {
     let p = node.chain_params(key).ok_or_else(|| format!("{key} is not installed here (add it first)"))?;
     let cancel = Arc::new(AtomicBool::new(false));
     {
@@ -53,7 +78,7 @@ pub fn start(node: Arc<Node>, key: &str) -> Result<Value, String> {
     std::thread::Builder::new()
         .name(format!("install-{}", p.key))
         .spawn(move || {
-            let r = wait_for_copies(&node, p, &cancel).and_then(|(bid, cid, cp)| run(&node, p, &bid, &cid, cp, &cancel));
+            let r = wait_for_copies(&node, p, &cancel, wait_secs).and_then(|(bid, cid, cp)| run(&node, p, &bid, &cid, cp, &cancel));
             crate::coreboot::hold(p.key, false);
             for f in ["blocks", "coins"] {
                 vxshare::finish(&vxshare::job_key(p.net, f));
@@ -82,7 +107,7 @@ fn net_tip(node: &Node, p: &'static ChainParams) -> u32 {
 /// Copies are made only when asked for (Martin): ask the linked V1.0 arcades for blocks
 /// and coins copies at a height a few blocks ahead, and wait until 2 or more arcades made
 /// them. Copies already offered (asked for by someone else lately) are taken as they are.
-fn wait_for_copies(node: &Arc<Node>, p: &'static ChainParams, cancel: &Arc<AtomicBool>) -> Result<(String, String, u32), String> {
+fn wait_for_copies(node: &Arc<Node>, p: &'static ChainParams, cancel: &Arc<AtomicBool>, wait_secs: u64) -> Result<(String, String, u32), String> {
     let t0 = Instant::now();
     let mut asked: Option<(u32, Instant)> = None;
     loop {
@@ -96,6 +121,13 @@ fn wait_for_copies(node: &Arc<Node>, p: &'static ChainParams, cancel: &Arc<Atomi
             }
         }
         let top = net_tip(node, p);
+        // Copies are made by V1.0 arcades keeping the chain at the tip: links to those not
+        // linked yet are asked for (the request reaches linked arcades only).
+        for (id, h) in crate::shares::index_holders(node, p.net, "") {
+            if h as u32 + 3 >= top && !crate::shares::is_linked(node, &id) {
+                crate::udpsvc::want(&id);
+            }
+        }
         // (Again when that height went by without copies: some arcade wasn't at the tip.)
         let again = asked.is_none_or(|(h, at)| top > h + 3 && at.elapsed() > Duration::from_secs(60));
         if again && top > 0 {
@@ -104,8 +136,12 @@ fn wait_for_copies(node: &Arc<Node>, p: &'static ChainParams, cancel: &Arc<Atomi
             asked = Some((h, Instant::now()));
             set(p.key, "asking", format!("asked {n} V1.0 arcade{} for copies at block {h} (network tip {top}); they are made when the arcades reach it", if n == 1 { "" } else { "s" }));
         }
-        if t0.elapsed() > Duration::from_secs(1800) {
-            return Err("no copies made by 2 or more arcades came within 30 minutes".into());
+        if t0.elapsed() > Duration::from_secs(wait_secs) {
+            return Err(format!("no copies made by 2 or more arcades came within {} minutes; it syncs the usual way", wait_secs / 60));
+        }
+        // Caught up meanwhile the usual way: nothing to take in.
+        if node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height as u64 + 1000 >= net_tip(node, p) as u64).unwrap_or(false) {
+            return Err("caught up the usual way meanwhile".into());
         }
         std::thread::sleep(Duration::from_secs(2));
     }

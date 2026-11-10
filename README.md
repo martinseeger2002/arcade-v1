@@ -41,6 +41,14 @@ Open **Arcade V1.0** from your app menu, or run `arcade setup` in a terminal. Ei
 
 The service connects to the mesh and syncs Pepecoin testnet by itself.
 
+### Update
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/martinseeger2002/arcade-v1/main/scripts/update.sh | bash
+```
+
+This installs the newest release over the one you have. Your wallet, its 12 words, your @handle, messages and chains are kept: only the programs and the service file are replaced. The service is stopped first (it finishes what it was writing) and started again on the new version. If the app was open, close it and open it again.
+
 ### Options
 
 Pass options after `bash -s --`:

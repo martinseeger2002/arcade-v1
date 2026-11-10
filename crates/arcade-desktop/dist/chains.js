@@ -72,6 +72,11 @@
     }
     const btn = document.createElement("button");
     if (c.installed) { btn.textContent = c.home ? "Manage indexes…" : "Manage…"; btn.onclick = () => { manage(c.key); reveal(); }; }
+    else if (c.queued) {
+      // One install at a time: this one waits its turn.
+      btn.textContent = `Queued #${c.queued} · Cancel`;
+      btn.onclick = async () => { try { await api("chains.unqueue", { key: c.key }); msg(`${c.name} is out of the install queue.`); refresh(); } catch (e) { msg(e.message, true); } };
+    }
     else { btn.textContent = "Install…"; btn.className = "primary"; btn.onclick = () => { choose(c); reveal(); }; }
     act.append(btn);
     el.append(logoOf(c.key, c.name), info, bal, act);
@@ -171,6 +176,13 @@
     const withIdx = [...$("c-idx").querySelectorAll("input:checked")].map((i) => i.dataset.k);
     try {
       const st = await api("chains.add", { key: open.key, mode, with: withIdx });
+      if (st.queued) {
+        // Another chain is still being installed: this one starts by itself after it.
+        $("c-installer").hidden = true;
+        msg(`${open.name} waits its turn (#${st.position} in the queue); it installs by itself once ${st.behind.toUpperCase()} has caught up. One install runs at a time.`);
+        refresh();
+        return;
+      }
       watching = open.key; showProgress(st); refresh();
     } catch (e) { msg(e.message, true); }
   }

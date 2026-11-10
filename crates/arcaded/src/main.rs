@@ -218,6 +218,8 @@ fn main() {
     chains::start_home(&node).expect("home indexes");
     chains::start_saved(&node);
     borrow::start(node.clone());
+    // A home chain far behind (a fresh install): installed from copies when the mesh has them.
+    v1import::auto_home(node.clone());
     sizes::load(&node);
     if node.home_mode == "shared" {
         // Shared home chain (test setups): keep our share of its blocks right.
