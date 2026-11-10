@@ -94,7 +94,7 @@
     return h("div", { class: "x-list" }, list.map((b) => h("div", { class: "x-blk", onclick: () => go("block", String(b.height)) },
       h("div", { class: "x-hbox" }, h("b", {}, fmt(b.height)), h("small", {}, ago(b.time))),
       h("div", { class: "x-mid" }, h("div", { class: "x-hash" }, b.hash),
-        h("div", { class: "chips" }, h("span", { class: "chip" }, `${b.txs} tx`), b.inscriptions ? h("span", { class: "chip ins" }, `${b.inscriptions} inscription${b.inscriptions > 1 ? "s" : ""}`) : "")))));
+        h("div", { class: "chips" }, b.txs != null ? h("span", { class: "chip" }, `${b.txs} tx`) : "", b.inscriptions ? h("span", { class: "chip ins" }, `${b.inscriptions} inscription${b.inscriptions > 1 ? "s" : ""}`) : "")))));
   }
   function insGrid(list) {
     if (!list.length) return h("div", { class: "x-empty" }, "No inscriptions yet.");
@@ -135,23 +135,45 @@
   const pill = (t, ok) => h("span", { class: "pill" + (ok ? " ok" : "") }, t);
 
   // ---------- views ----------
+  // Overviews kept per coin: switching back shows the last one at once, then the fresh one.
+  const SUMS = {};
+  let fresh = false;
+  function refreshHome(key, delay) {
+    setTimeout(async () => {
+      try {
+        const v = await xapi("explorer.summary", { chain: key });
+        SUMS[key] = { v, at: Date.now() };
+        if (page === "home" && chain && chain.key === key) { fresh = true; render(); }
+      } catch {}
+    }, delay);
+  }
   async function vHome() {
-    sum = await xapi("explorer.summary", { chain: chain.key });
-    const tok = sum.protocol ? sum.protocol.toUpperCase() : "Token";
+    const key = chain.key, kept = SUMS[key];
+    if (fresh || !kept || Date.now() - kept.at > 120000) {
+      if (!fresh) SUMS[key] = { v: await xapi("explorer.summary", { chain: key }), at: Date.now() };
+      fresh = false;
+      // Parts other arcades answer still on their way: ask again shortly.
+      if (SUMS[key].v.mesh_pending) refreshHome(key, 2000);
+    } else {
+      refreshHome(key, 0);
+    }
+    sum = SUMS[key].v;
+    const tok = sum.protocol ? sum.protocol.toUpperCase() : "";
     const st = [
       ["Height", fmt(sum.tip), sum.tip_time ? `last block ${ago(sum.tip_time)}` : ""],
-      ["Mempool", `${fmt(sum.mempool.count)} tx`, `${fmt(sum.mempool.bytes)} bytes`],
+      ["Mempool", `${fmt(sum.mempool.count)} tx`, sum.mempool.bytes ? `${fmt(sum.mempool.bytes)} bytes` : "waiting for a block"],
       has("ord") && ["Inscriptions", fmt(sum.inscriptions), "ord index"],
-      has("tokens") && [`${tok} tokens`, fmt(sum.ticks), "deployed ticks"],
+      has("tokens") && [`${tok} tokens`.trim(), fmt(sum.ticks), "deployed ticks"],
       has("names") && ["Names", fmt(sum.names?.[0] ?? 0), sum.names ? `json ${fmt(sum.names[1])} · doge2023 ${fmt(sum.names[2])}` : ""],
       has("maps") && ["Maps", fmt(sum.maps), "first claim wins"],
     ].filter(Boolean);
     const lower = [
-      has("tokens") && sect(`${tok} tokens`, "tokens", tokTable(sum.tokens || [])),
+      has("tokens") && sect(`${tok} tokens`.trim(), "tokens", tokTable(sum.tokens || [])),
       has("names") && sect("Names", "names", (sum.name_rows || []).length ? table([["Name"], ["Inscription", 1]], sum.name_rows.map((r) => ({ go: () => go("name", r.name), cells: [[h("span", { class: "mono" }, r.name)], [`#${fmt(r.number)}`, 1]] }))) : h("div", { class: "x-empty" }, "No names claimed yet.")),
       has("maps") && sect("Maps", "maps", (sum.map_rows || []).length ? table([["Claim"], ["Inscription", 1]], sum.map_rows.map((r) => ({ go: () => go("map", r.claim), cells: [[h("span", { class: "mono" }, r.claim)], [`#${fmt(r.number)}`, 1]] }))) : h("div", { class: "x-empty" }, "No block maps claimed yet.")),
     ].filter(Boolean);
     return h("div", {},
+      sum.borrowed ? h("p", { class: "x-note" }, `This arcade is still catching up on ${chain.name} (block ${fmt(sum.syncing_at)}): the newest blocks and the mempool come from a lender meanwhile.`) : "",
       h("div", { class: "x-stats" }, st.map(([k, v, s]) => h("div", { class: "x-stat" }, h("div", { class: "k" }, k), h("div", { class: "v" }, v), h("div", { class: "s" }, s)))),
       h("div", { class: has("ord") ? "x-cols" : "x-cols one" },
         sect("Latest blocks", "blocks", blockRows(sum.blocks)),
@@ -175,12 +197,14 @@
   }
   async function vMempool() {
     const m = await xapi("explorer.mempool", { chain: chain.key });
-    const body = m.txs.length ? table([["Txid"], ["Out", 1], ["Size", 1], ["Kind"]], m.txs.map((t) => ({ go: () => go("tx", t.txid),
-      cells: [[h("span", { class: "mono" }, short(t.txid, 16, 8))], [coins(t.out), 1], [`${fmt(t.size)} B`, 1], [h("span", { class: "chip" + (t.kind === "inscription" ? " ins" : "") }, t.kind + (t.rbf ? " · RBF" : ""))]] })))
+    // Lender pools give fee and size, not output totals.
+    const lent = m.txs.some((t) => t.out == null);
+    const body = m.txs.length ? table([["Txid"], [lent ? "Fee" : "Out", 1], ["Size", 1], ["Kind"]], m.txs.map((t) => ({ go: () => go("tx", t.txid),
+      cells: [[h("span", { class: "mono" }, short(t.txid, 16, 8))], [t.out != null ? coins(t.out) : t.fee != null ? coins(t.fee) : "", 1], [t.size != null ? `${fmt(t.size)} B` : "", 1], [h("span", { class: "chip" + (t.kind === "inscription" ? " ins" : "") }, (t.mine ? "yours · " : "") + t.kind + (t.rbf ? " · RBF" : ""))]] })))
       : h("div", { class: "x-empty" }, "No unconfirmed transactions right now.");
-    return h("div", {}, sect("Mempool", null, body),
+    return h("div", {}, sect(`Mempool · ${fmt(m.count ?? m.txs.length)}`, null, body),
       m.pending_tags.length ? h("p", { class: "x-note" }, `Tag claims waiting for a block: ${m.pending_tags.map((t) => "@" + (t.tag || t)).join(", ")}`) : "",
-      h("p", { class: "x-note" }, "Read from this arcade's mempool. Spending with zero confirmations is fine on chains without RBF."));
+      h("p", { class: "x-note" }, m.lender_pool !== undefined ? "The whole mempool, read from a lender's node (newest 500 shown)." : "This arcade's mempool, shared with the other V1.0 arcades on the mesh: a transaction any of them hears shows here within seconds. Spending with zero confirmations is fine on chains without RBF."));
   }
   // Filter by content type (MIME type): groups, newest first; "Show older" goes on.
   const INS_TYPES = [["", "All"], ["image", "Images"], ["svg", "SVG"], ["text", "Text"], ["html", "HTML"], ["json", "JSON"], ["audio", "Audio"], ["video", "Video"], ["model", "3D"], ["other", "Other"]];
