@@ -101,7 +101,9 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
                 let scripts = crate::coinsend::key_scripts(cp, &pk);
                 let bal = |sc: &[u8]| if installed { node.chain.balance_for_script(cp.chain_no, sc).ok() } else { crate::borrow::balance(node, cp, sc) };
                 let balance = scripts.iter().map(|(_, sc)| bal(sc)).try_fold(0u64, |a, b| b.map(|x| a + x));
-                json!({"index": k.index, "address": scripts[0].0, "legacy": scripts.get(1).map(|x| x.0.clone()),
+                // Home chain: coins still waiting in the mempool, spendable already.
+                let pending: u64 = if cp.chain_no == p.chain_no { scripts.iter().flat_map(|(_, sc)| crate::claims::unconfirmed_coins(node, sc)).map(|u| u.value).sum() } else { 0 };
+                json!({"index": k.index, "address": scripts[0].0, "legacy": scripts.get(1).map(|x| x.0.clone()), "pending": pending,
                        "tag": if cp.chain_no == p.chain_no { k.tag.clone() } else { None },
                        "balance": balance, "borrowed": !installed && crate::borrow::is_borrowed(cp.key)})
             }).collect::<Vec<_>>()))

@@ -182,13 +182,36 @@
       m.pending_tags.length ? h("p", { class: "x-note" }, `Tag claims waiting for a block: ${m.pending_tags.map((t) => "@" + (t.tag || t)).join(", ")}`) : "",
       h("p", { class: "x-note" }, "Read from this arcade's mempool. Spending with zero confirmations is fine on chains without RBF."));
   }
+  // Filter by content type (MIME type): groups, newest first; "Show older" goes on.
+  const INS_TYPES = [["", "All"], ["image", "Images"], ["svg", "SVG"], ["text", "Text"], ["html", "HTML"], ["json", "JSON"], ["audio", "Audio"], ["video", "Video"], ["model", "3D"], ["other", "Other"]];
+  let insType = "", insAcc = [], insNext = null, insKey = "";
+  function typeChips() {
+    return h("div", { class: "x-types" }, INS_TYPES.map(([v, label]) => h("button", { class: "chip-btn" + (insType === v ? " on" : ""), onclick: () => { insType = v; insAcc = []; insNext = null; insKey = ""; go("inscriptions"); } }, label)));
+  }
   async function vInscriptions() {
     const size = 36, page = pageOf();
     const first = await xapi("explorer.inscriptions", { chain: chain.key, n: 1 });
     const total = first.total;
+    if (insType) {
+      const key = `${chain.key}|${insType}`;
+      if (insKey !== key) {
+        insKey = key;
+        const r = await xapi("explorer.inscriptions", { chain: chain.key, type: insType, before: total, n: size });
+        insAcc = r.items; insNext = r.next_before ?? null;
+      }
+      const label = INS_TYPES.find((t) => t[0] === insType)[1];
+      const more = insNext != null ? h("div", { class: "row" }, h("button", { onclick: async (ev) => {
+        ev.target.disabled = true; ev.target.textContent = "Looking…";
+        const r = await xapi("explorer.inscriptions", { chain: chain.key, type: insType, before: insNext, n: size });
+        insAcc = insAcc.concat(r.items); insNext = r.next_before ?? null;
+        render();
+      } }, `Show older (looked down to #${fmt(insNext)})`)) : h("p", { class: "x-note" }, "That's all of them.");
+      return sect(`${label} · ${fmt(insAcc.length)} found, newest first`, null, h("div", {}, typeChips(),
+        insAcc.length ? insGrid(insAcc) : h("div", { class: "x-empty" }, insNext != null ? "None in the newest ones looked at yet." : "None."), more));
+    }
     const r = await xapi("explorer.inscriptions", { chain: chain.key, before: Math.max(0, total - (page - 1) * size), n: size });
     const toPage = (num) => Math.floor((total - 1 - num) / size) + 1;
-    return sect(`Inscriptions · ${fmt(total)}`, null, h("div", {}, pager(total, size, page, "inscriptions", "inscription #", toPage), insGrid(r.items), pager(total, size, page, "inscriptions", "inscription #", toPage)));
+    return sect(`Inscriptions · ${fmt(total)}`, null, h("div", {}, typeChips(), pager(total, size, page, "inscriptions", "inscription #", toPage), insGrid(r.items), pager(total, size, page, "inscriptions", "inscription #", toPage)));
   }
   async function vTokens() {
     const size = 50, page = pageOf();

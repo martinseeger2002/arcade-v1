@@ -71,13 +71,14 @@ pub(crate) fn tables_of(index: &str) -> Vec<String> {
 }
 
 /// Check a requested set of indexes for a chain; riders bring ord with them.
-fn normalize(p: &ChainParams, indexes: &[String]) -> Result<Vec<String>, String> {
+fn normalize(p: &ChainParams, indexes: &[String], home: bool) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     for ix in indexes {
         if !INDEXES.contains(&ix.as_str()) {
             return Err(format!("unknown index {ix}; indexes: {}", INDEXES.join(", ")));
         }
-        if ix == "messages" {
+        // (The home chain's own list holds messages: adding another index there must work.)
+        if ix == "messages" && !home {
             return Err("messages live on the home chain (Pepecoin testnet), where they're always on".into());
         }
         // Runes live on Bitcoin and dunes on Dogecoin only.
@@ -256,7 +257,7 @@ pub fn add(node: &Arc<Node>, key: &str, mode: &str, indexes: Vec<String>) -> Res
     if mode == "light" || mode == "index" {
         return Err("Light and Index-only storage (borrowing blocks from the mesh) are coming; use full or chain for now".into());
     }
-    let indexes = normalize(p, &indexes)?;
+    let indexes = normalize(p, &indexes, false)?;
     if mode == "chain" && indexes.iter().any(|i| i != "addresses") {
         return Err("Blockchain-only storage keeps no protocol indexes (Addresses is fine); choose full to add indexes".into());
     }
@@ -330,7 +331,7 @@ pub fn add_index(node: &Arc<Node>, key: &str, index: &str) -> Result<Value, Stri
     }
     let mut want = cur.clone();
     want.push(index.into());
-    let set = normalize(p, &want)?;
+    let set = normalize(p, &want, home)?;
     if index == "addresses" && run.as_ref().is_none_or(|r| r.mode != "shared" || crate::shares::pruned(node, p.net).is_empty()) {
         // Rows for the blocks already stored are built from them, in the background.
         if crate::addrsvc::clearing(p.chain_no) {
