@@ -264,6 +264,12 @@ pub fn hold_frame(node: &Node) -> Frame {
     all.extend(node.extra.lock().unwrap().values().map(|r| r.params));
     for p in all {
         let h = tip(p);
+        // The indexes this arcade answers Explorer questions from (V1.0 mesh explorer).
+        let ix: Vec<String> = if p.chain_no == home.chain_no {
+            crate::chains::home_indexes(node)
+        } else {
+            node.extra.lock().unwrap().get(p.key).map(|r| r.indexes.clone()).unwrap_or_default()
+        };
         let mode = node.mode_of(p.key).unwrap_or_default();
         let v = if mode == "shared" {
             let gone = pruned(node, p.net);
@@ -271,9 +277,9 @@ pub fn hold_frame(node: &Node) -> Frame {
             let share = node.share_of(p.key);
             let g = |k: &str| if share[k].is_array() { share[k].clone() } else { json!("all") };
             let (lane, pos) = match my_place(node, p.net) { Some((l, x)) => (json!(l), json!(x)), None => (Value::Null, Value::Null) };
-            json!({"mode": "shared", "h": h, "blocks": held, "ord": g("ord"), "tok": g("tok"), "lane": lane, "pos": pos})
+            json!({"mode": "shared", "h": h, "blocks": held, "ord": g("ord"), "tok": g("tok"), "lane": lane, "pos": pos, "ix": ix})
         } else {
-            json!({"mode": mode, "h": h, "blocks": "all", "ord": "all", "tok": "all"})
+            json!({"mode": mode, "h": h, "blocks": "all", "ord": "all", "tok": "all", "ix": ix})
         };
         chains.insert(p.net.into(), v);
     }
@@ -520,13 +526,28 @@ fn ask(node: &Node, addr: &str, q: Value) -> Result<(Value, Vec<u8>), String> {
     q["op"] = json!("q");
     q["id"] = json!(1);
     link.send(&Frame::new(q)).map_err(|e| e.to_string())?;
-    for _ in 0..200 {
+    let (mut seq, mut big) = (0u64, Vec::new());
+    for _ in 0..2000 {
         let f = link.recv().map_err(|e| e.to_string())?;
         if f.kind() == "ping" {
             let _ = link.send(&Frame::pong(&f));
         } else if f.kind() == "sh" && f.head["op"] == "a" && f.head["id"] == 1 {
             if let Some(e) = f.head["err"].as_str() {
                 return Err(e.to_string());
+            }
+            // A big answer comes as zlib JSON in slices (seq, end).
+            if f.head["seq"].is_u64() {
+                if f.head["seq"].as_u64() != Some(seq) || big.len() + f.blob.len() > 32 << 20 {
+                    return Err("a broken answer".into());
+                }
+                seq += 1;
+                big.extend_from_slice(&f.blob);
+                if f.head["end"] != true {
+                    continue;
+                }
+                let mut raw = Vec::new();
+                std::io::Read::read_to_end(&mut std::io::Read::take(flate2::read::ZlibDecoder::new(&big[..]), 64 << 20), &mut raw).map_err(|e| e.to_string())?;
+                return Ok((serde_json::from_slice(&raw).map_err(|e| e.to_string())?, Vec::new()));
             }
             return Ok((f.head["result"].clone(), f.blob));
         }
@@ -562,12 +583,47 @@ pub fn answer(node: &Node, link: &mut Link, h: &Value) -> Result<(), LinkError> 
                 let v = arcade_ledger::ord::inscription(&node.chain, p, arg).ok_or("not held here")?;
                 Ok(v)
             }
-            "tick" => crate::explorer::handle(node, "explorer.token", &json!({"chain": p.key, "tick": arg})),
+            "tick" => crate::explorer::handle(node, "explorer.token", &json!({"chain": p.key, "tick": arg, "local": true})),
+            // Another arcade's Explorer question (V1.0 mesh explorer): answered only from what
+            // this arcade holds itself (never asked on), public explorer commands only.
+            "x" => {
+                let q: Value = serde_json::from_str(arg).map_err(|_| "bad question".to_string())?;
+                let cmd = q["cmd"].as_str().unwrap_or("");
+                if !crate::explorer::FORWARDABLE.contains(&cmd) {
+                    return Err("not an explorer question".to_string());
+                }
+                let mut req = q["req"].clone();
+                req["chain"] = json!(p.key);
+                req["local"] = json!(true);
+                crate::explorer::handle(node, cmd, &req)
+            }
             _ => Err("unknown question".to_string()),
         }
     })();
     match res {
-        Ok(v) => link.send(&Frame::new(json!({"t": "sh", "op": "a", "id": id, "result": v}))),
+        Ok(v) => {
+            let text = v.to_string();
+            if text.len() <= 40 * 1024 {
+                return link.send(&Frame::new(json!({"t": "sh", "op": "a", "id": id, "result": v})));
+            }
+            // Big: zlib JSON in 60 KiB slices.
+            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+            std::io::Write::write_all(&mut z, text.as_bytes()).map_err(|e| LinkError::Io(e))?;
+            let data = z.finish().map_err(LinkError::Io)?;
+            let mut at = 0;
+            let mut seq = 0u64;
+            loop {
+                let end = (at + 60 * 1024).min(data.len());
+                let mut f = Frame::new(json!({"t": "sh", "op": "a", "id": id, "seq": seq, "end": end == data.len()}));
+                f.blob = data[at..end].to_vec();
+                link.send(&f)?;
+                if end == data.len() {
+                    return Ok(());
+                }
+                at = end;
+                seq += 1;
+            }
+        }
         Err(e) => link.send(&Frame::new(json!({"t": "sh", "op": "a", "id": id, "err": e}))),
     }
 }
@@ -578,7 +634,8 @@ pub fn on_hold(node: &Node, from: &str, h: &Value) {
     let mut clean = Map::new();
     for (k, v) in c.iter().take(32) {
         if arcade_chain::params::by_net(k).is_some() {
-            clean.insert(k.clone(), json!({"mode": v["mode"], "h": v["h"], "blocks": v["blocks"], "ord": v["ord"], "tok": v["tok"], "lane": v["lane"], "pos": v["pos"]}));
+            let ix: Vec<Value> = v["ix"].as_array().map(|a| a.iter().take(16).filter(|x| x.as_str().is_some_and(|s| s.len() <= 16)).cloned().collect()).unwrap_or_default();
+            clean.insert(k.clone(), json!({"mode": v["mode"], "h": v["h"], "blocks": v["blocks"], "ord": v["ord"], "tok": v["tok"], "lane": v["lane"], "pos": v["pos"], "ix": ix}));
         }
     }
     node.holds.lock().unwrap().insert(from.to_string(), (arcade_app::now(), Value::Object(clean)));
@@ -680,4 +737,42 @@ mod clash_tests {
         let distinct: BTreeSet<(usize, u64)> = v.iter().map(|p| (p.1, (p.2 * 1000.0) as u64)).collect();
         assert_eq!(distinct.len(), 3, "{v:?}");
     }
+}
+
+/// Arcades that announce running index `ix` on `net` (any index when `ix` is empty), the
+/// highest tip first: who can answer an Explorer question we can't.
+pub fn index_holders(node: &Node, net: &str, ix: &str) -> Vec<(String, u64)> {
+    let now = arcade_app::now();
+    let mut v: Vec<(String, u64)> = node
+        .holds
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, (at, _))| *at + 600 >= now)
+        .filter_map(|(id, (_, c))| {
+            let ch = &c[net];
+            if !ch.is_object() || ch["mode"] == "borrowed" {
+                return None;
+            }
+            let ok = ix.is_empty() || ch["ix"].as_array().is_some_and(|a| a.iter().any(|x| x == ix));
+            ok.then(|| (id.clone(), ch["h"].as_u64().unwrap_or(0)))
+        })
+        .collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v
+}
+
+/// Ask an Explorer question of the arcades holding what it needs, until one answers:
+/// (answer, arcade's node id).
+pub fn ask_explorer(node: &Node, p: &ChainParams, ix: &str, cmd: &str, req: &Value) -> Result<(Value, String), String> {
+    let mut last = format!("no arcade on the mesh offers {}{} right now", if ix.is_empty() { String::new() } else { format!("the {ix} index of ") }, p.name);
+    let q = json!({"cmd": cmd, "req": req}).to_string();
+    for (id, _) in index_holders(node, p.net, ix).into_iter().take(4) {
+        let Some(addr) = addr_of(node, &id) else { continue };
+        match ask(node, &addr, json!({"net": p.net, "what": "x", "arg": q})) {
+            Ok((v, _)) => return Ok((v, id)),
+            Err(e) => last = format!("arcade {}: {e}", &id[..id.len().min(8)]),
+        }
+    }
+    Err(last)
 }
