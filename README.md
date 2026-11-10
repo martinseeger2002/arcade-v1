@@ -76,10 +76,7 @@ Stopping the service writes the coin cache to disk first, which can take a few m
 ### Uninstall
 
 ```sh
-systemctl --user disable --now arcaded
-rm -f ~/.local/bin/arcaded ~/.local/bin/arcade ~/.local/bin/arcade-desktop \
-      ~/.config/systemd/user/arcaded.service ~/.local/share/applications/arcade-v1.desktop \
-      ~/.local/share/icons/hicolor/256x256/apps/arcade-v1.png
+curl -fsSL https://raw.githubusercontent.com/martinseeger2002/arcade-v1/main/scripts/uninstall.sh | bash
 ```
 
-Your data in `~/.local/share/arcade` (wallet included) is left alone. Delete it yourself only after you've written down your 12 words.
+This removes everything: the programs, the app and its menu entry, the background service, **and your data in `~/.local/share/arcade`**: your wallet and its 12 words, imported wallets, messages and chains. It asks you to type `DELETE` first. If your wallet holds anything, write down your 12 words before (`arcade --home ~/.local/share/arcade wallet phrase`); on a new install you restore it from them on the Home tab.
