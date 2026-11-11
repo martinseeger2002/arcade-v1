@@ -22,12 +22,7 @@ pub const PIECE: usize = 8 << 20;
 pub const KEEP_FREE: u64 = 10 << 30;
 
 fn free_bytes(p: &Path) -> u64 {
-    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else { return 0 };
-    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
-        return 0;
-    }
-    s.f_bavail as u64 * s.f_frsize as u64
+    crate::platform::free_bytes(p)
 }
 
 /// The parts of a chain that are copied, each on its own (Martin: every part optional).

@@ -112,6 +112,7 @@ dependencies = [
  "arcade-wallet",
  "chacha20poly1305",
  "ed25519-dalek",
+ "getrandom 0.2.17",
  "hex",
  "serde",
  "serde_json",
@@ -163,6 +164,8 @@ name = "arcade-cli"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "uds_windows",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -173,6 +176,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "uds_windows",
  "webkit2gtk",
 ]
 
@@ -300,8 +304,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "socket2",
  "tempfile",
+ "uds_windows",
  "ureq",
+ "windows-sys 0.61.2",
  "x25519-dalek",
 ]
 
@@ -4736,6 +4743,17 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "uds_windows"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
+dependencies = [
+ "memoffset",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "unicode-general-category"

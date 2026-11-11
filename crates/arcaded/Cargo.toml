@@ -22,6 +22,7 @@ arcade-store = { version = "0.1.0", path = "../arcade-store" }
 arcade-wallet = { version = "0.1.0", path = "../arcade-wallet" }
 base64 = "0.23.1"
 libc = "0.2"
+socket2 = "0.6"
 pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 aes-gcm = "0.10"
 ureq = { version = "2.12", default-features = false, features = ["tls", "json", "cookies"] }
@@ -33,6 +34,10 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 secp256k1 = "0.29"
+
+[target.'cfg(windows)'.dependencies]
+uds_windows = "1"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Threading"] }
 
 [features]
 default = ["oldimport"]

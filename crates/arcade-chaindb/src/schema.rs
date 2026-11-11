@@ -77,8 +77,17 @@ pub static CHAIN_SCHEMA: Schema = Schema {
     version: 4,
     tables: TABLES,
     migrations: MIGRATIONS,
-    max_size: 4 << 40, // 4 TiB ceiling; the file grows as needed
+    max_size: CHAIN_MAX_SIZE,
 };
+
+/// The file grows as needed up to this ceiling.
+#[cfg(not(windows))]
+const CHAIN_MAX_SIZE: isize = 4 << 40; // 4 TiB
+/// Windows maps the whole ceiling at open and charges commit for its page table: ~2 GB per TiB
+/// per chain file (two 4 TiB files took 16.8 GB of commit while using 389 MB). 1 TiB still
+/// holds any chain the arcade carries, at ~2 GB of commit per file.
+#[cfg(windows)]
+const CHAIN_MAX_SIZE: isize = 1 << 40; // 1 TiB
 
 /// 21-byte script id: what an "address" is for indexing.
 /// 00+hash160 = P2PKH (and P2PK, keyed by its key's hash, as the arcade shows it),

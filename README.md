@@ -2,6 +2,24 @@
 
 A from-scratch Rust rebuild of Dogecoin Arcade, wire-compatible with the existing arcades. Pepecoin testnet first; other chains are add-ons. See [docs/PLAN.md](docs/PLAN.md).
 
+## Install on Windows
+
+Windows 10 1803 or newer, or Windows 11, x64. Install [Rust](https://rustup.rs) (the default MSVC toolchain) and LLVM (`winget install LLVM.LLVM`, for libmdbx's bindings). Then, from a clone of this repo:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1
+```
+
+It builds and installs for your user, with no administrator rights:
+
+- **arcaded**, **arcade** and **arcade-desktop** in `%LOCALAPPDATA%\Programs\Arcade`, which it adds to your PATH;
+- the service, started now and at every logon, hidden (`Arcade service.vbs` in your Startup folder), logging to `%USERPROFILE%\.arcade\arcaded.log`;
+- **Arcade V1.0** in the Start menu (the desktop app uses WebView2, which comes with Windows).
+
+Data lives in `%USERPROFILE%\.arcade`, not AppData: AF_UNIX sockets under AppData fail to connect on some Windows 11 machines. `arcade stop` stops the service cleanly (it writes its caches first); Windows has no SIGTERM for a background process. Run the script again to update. Options: `-NoDesktop`, `-NoBuild`, `-NoStart`.
+
+On Windows a chain file's ceiling is 1 TiB instead of 4 TiB, because Windows charges commit for the whole mapping's page table (about 2 GB per TiB per file).
+
 ## Install on Linux
 
 Paste this one command into a terminal:

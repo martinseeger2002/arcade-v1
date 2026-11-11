@@ -3,7 +3,10 @@
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use uds_windows::UnixStream;
 
 fn home() -> std::path::PathBuf {
     if let Some(h) = std::env::var_os("ARCADE_HOME") {
@@ -12,6 +15,12 @@ fn home() -> std::path::PathBuf {
     let system = std::path::Path::new("/var/lib/arcade");
     if system.join("arcaded.sock").exists() {
         return system.to_path_buf();
+    }
+    // Windows: %USERPROFILE%\.arcade. Not under AppData: AF_UNIX sockets there fail to
+    // connect (WSAEINVAL) on some Windows 11 machines.
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        return std::path::PathBuf::from(profile).join(".arcade");
     }
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
@@ -200,6 +209,9 @@ mod tests {
 /// If a window's web process dies (it crashed, or the system ended it), reload the page instead
 /// of leaving the window blank.
 fn heal(w: &tauri::WebviewWindow) {
+    // Windows/macOS: nothing to do here (WebView2 asks the user for camera and microphone itself).
+    #[cfg(not(target_os = "linux"))]
+    let _ = w;
     #[cfg(target_os = "linux")]
     let _ = w.with_webview(|wv| {
         use webkit2gtk::WebViewExt;
@@ -215,6 +227,9 @@ fn heal(w: &tauri::WebviewWindow) {
 /// Camera & microphone on, and the app's sandboxed frame is not allowed them (no camera or
 /// microphone in its allow list), so a request that reaches here is the window's.
 fn allow_media(w: &tauri::WebviewWindow) {
+    // Windows/macOS: nothing to do here (WebView2 asks the user for camera and microphone itself).
+    #[cfg(not(target_os = "linux"))]
+    let _ = w;
     #[cfg(target_os = "linux")]
     let _ = w.with_webview(|wv| {
         use webkit2gtk::glib::prelude::Cast;

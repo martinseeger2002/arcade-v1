@@ -11,5 +11,5 @@
     ],
     "security": { "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http://127.0.0.1:*; frame-src http://127.0.0.1:*" }
   },
-  "bundle": { "active": false, "icon": ["icons/icon.png"] }
+  "bundle": { "active": false, "icon": ["icons/icon.png", "icons/icon.ico"] }
 }

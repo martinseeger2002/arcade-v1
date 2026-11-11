@@ -28,8 +28,14 @@ pub fn new_phrase() -> String {
 }
 
 fn getrandom(buf: &mut [u8]) {
-    use std::io::Read;
-    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(buf)).expect("system randomness");
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(buf)).expect("system randomness");
+    }
+    // No /dev/urandom on Windows: the OS CSPRNG (ProcessPrng / BCryptGenRandom).
+    #[cfg(not(unix))]
+    ::getrandom::getrandom(buf).expect("system randomness");
 }
 
 /// Normalise and check a phrase the user typed (words, checksum).

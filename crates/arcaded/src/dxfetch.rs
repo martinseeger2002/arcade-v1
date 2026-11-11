@@ -337,12 +337,7 @@ fn inflate(data: &[u8], z: bool) -> Result<Vec<u8>, String> {
 }
 
 fn free_bytes(p: &std::path::Path) -> u64 {
-    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else { return 0 };
-    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
-        return 0;
-    }
-    s.f_bavail as u64 * s.f_frsize as u64
+    crate::platform::free_bytes(p)
 }
 
 /// Tests only: take a snapshot whose blocks aren't stored here (ARCADE_COPY_UNSTORED=1).

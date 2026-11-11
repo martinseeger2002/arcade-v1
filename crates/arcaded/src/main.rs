@@ -6,6 +6,7 @@
 //!           [--http-port N|0] [--http-bind ADDR] [--site DIR] [--stun-port N|0]
 
 mod accountsvc;
+mod platform;
 mod addrsvc;
 mod collsvc;
 mod knowncoll;
@@ -85,6 +86,12 @@ pub fn default_home() -> std::path::PathBuf {
     if system.join("arcaded.sock").exists() || system.join("arcade.mdbx").exists() {
         return system.to_path_buf();
     }
+    // Windows: %USERPROFILE%\.arcade. Not under AppData: AF_UNIX sockets there fail to
+    // connect (WSAEINVAL) on some Windows 11 machines.
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        return std::path::PathBuf::from(profile).join(".arcade");
+    }
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"));
@@ -98,11 +105,7 @@ fn be_polite() {
     if nice == 0 {
         return;
     }
-    unsafe {
-        libc::setpriority(libc::PRIO_PROCESS, 0, nice);
-        // ioprio_set(IOPRIO_WHO_PROCESS, this thread, best-effort class 2, level 7: the lowest).
-        let _ = libc::syscall(libc::SYS_ioprio_set, 1, 0, (2 << 13) | 7);
-    }
+    platform::lower_priority(nice);
 }
 
 /// glibc gives each thread that allocates under contention its own 64 MB arena, and memory
@@ -132,13 +135,13 @@ fn tame_malloc() {
 fn tame_malloc() {}
 
 /// Set by SIGTERM / SIGINT; the "stop" thread flushes and exits.
-static STOP_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static STOP_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 extern "C" fn on_stop_signal(_: libc::c_int) {
     // A second SIGTERM / Ctrl-C while the caches are being written: leave at once (the next
     // start winds the tip back, as before this flush existed). _exit is async-signal-safe.
     if STOP_ASKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        unsafe { libc::_exit(1) };
+        platform::exit_now();
     }
 }
 
@@ -146,10 +149,7 @@ extern "C" fn on_stop_signal(_: libc::c_int) {
 /// database, then exit. Without this a restart while catching up threw away everything since
 /// the last cache flush (up to 10 minutes of blocks): the tip was wound back to "coins_at".
 fn stop_cleanly_on_signal(node: Arc<Node>) {
-    unsafe {
-        libc::signal(libc::SIGTERM, on_stop_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_stop_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
-    }
+    platform::on_stop_request(on_stop_signal);
     std::thread::Builder::new()
         .name("stop".into())
         .spawn(move || loop {
@@ -179,7 +179,7 @@ fn stop_cleanly_on_signal(node: Arc<Node>) {
 const USAGE: &str = "arcaded: the Arcade V1.0 service (normally started by the installer's service).
 
 usage: arcaded [options]
-  --home DIR            the arcade's folder (default ~/.local/share/arcade)
+  --home DIR            the arcade's folder (default ~/.local/share/arcade; %USERPROFILE%\\.arcade on Windows)
   --home-mode shared    keep the home chain in shared storage (default full)
   --http-port N|0       local web port for the app (0: none)
   --http-bind ADDR      address the web port listens on
@@ -198,10 +198,10 @@ usage: arcaded [options]
 /// Hold an exclusive lock on DIR/arcaded.lock for the life of the process (released by the
 /// kernel when it exits, crashes included).
 fn lock_home(home: &std::path::Path) -> Result<std::fs::File, String> {
-    use std::os::fd::AsRawFd;
     let path = home.join("arcaded.lock");
     let f = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    // flock on Unix, LockFileEx on Windows; released by the OS when the process ends.
+    if f.try_lock().is_err() {
         return Err(format!("another arcaded is already running in {}", home.display()));
     }
     Ok(f)
@@ -237,6 +237,7 @@ fn main() {
     let extra_peers: Vec<String> =
         args.iter().enumerate().filter(|(_, a)| *a == "--mesh-peer").filter_map(|(i, _)| args.get(i + 1).cloned()).collect();
     let no_seeds = args.iter().any(|a| a == "--no-seeds");
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let fresh = !home.exists();
     std::fs::create_dir_all(&home).expect("create home");
     // A home made here holds the wallet and its key file: this user only. One made by the package (StateDirectory,

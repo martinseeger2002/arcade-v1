@@ -94,8 +94,7 @@ pub fn write_cookie(home: &std::path::Path) -> std::io::Result<String> {
     let v = format!("__cookie__:{}", arcade_mesh::random::hex(32));
     let p = home.join(".cookie");
     let _ = std::fs::remove_file(&p);
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&p)?;
+    let mut f = crate::platform::create_private(&p)?;
     f.write_all(v.as_bytes())?;
     Ok(v)
 }

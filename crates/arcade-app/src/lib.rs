@@ -148,9 +148,15 @@ pub fn now() -> u64 {
 }
 
 fn random<const N: usize>() -> [u8; N] {
-    use std::io::Read;
     let mut b = [0u8; N];
-    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).expect("system randomness");
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).expect("system randomness");
+    }
+    // No /dev/urandom on Windows: the OS CSPRNG (ProcessPrng / BCryptGenRandom).
+    #[cfg(not(unix))]
+    getrandom::getrandom(&mut b).expect("system randomness");
     b
 }
 
@@ -465,8 +471,14 @@ impl AppDb {
 
 fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let mut f = o.open(path)?;
     f.write_all(data)
 }
 
@@ -520,9 +532,12 @@ mod tests {
         assert_eq!(db.node_identity().unwrap().verifying_key(), id);
         assert_eq!(db.phrase().unwrap(), phrase);
         assert_eq!(db.tag_keys(PEPECOIN_TEST.chain_no).unwrap()[0].address, addr);
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(d.path().join("secret.key")).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(d.path().join("secret.key")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         // The phrase is not stored in the clear.
         let raw = std::fs::read(d.path().join("arcade.mdbx")).unwrap();
         let first = phrase.split(' ').next().unwrap();

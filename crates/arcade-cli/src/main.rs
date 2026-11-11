@@ -2,13 +2,17 @@
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use uds_windows::UnixStream;
 
 const HELP: &str = "arcade — Arcade V1.0
 
   arcade setup                   first-run setup (mesh, chain, wallet, handle)
   arcade status                  sync, tag index, mesh links
   arcade peers                   mesh links
+  arcade stop                    stop arcaded cleanly (writes its caches first)
   arcade wallet create           new wallet; shows the 12-word recovery phrase ONCE
   arcade wallet restore          restore from a recovery phrase (typed at a prompt, not shown)
   arcade wallet phrase           show the recovery phrase
@@ -57,6 +61,12 @@ fn home(args: &[String]) -> std::path::PathBuf {
     let system = std::path::Path::new("/var/lib/arcade");
     if system.join("arcaded.sock").exists() || system.join("arcade.mdbx").exists() {
         return system.to_path_buf();
+    }
+    // Windows: %USERPROFILE%\.arcade. Not under AppData: AF_UNIX sockets there fail to
+    // connect (WSAEINVAL) on some Windows 11 machines.
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        return std::path::PathBuf::from(profile).join(".arcade");
     }
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
@@ -228,13 +238,37 @@ fn restore_phrase(words: &[&str], typed: impl FnOnce() -> std::io::Result<String
     Ok(phrase)
 }
 
+#[cfg(not(windows))]
 fn stty(tty: &std::fs::File, arg: &str) -> std::io::Result<()> {
     let ok = std::process::Command::new("stty").arg(arg).stdin(tty.try_clone()?).status()?.success();
     if ok { Ok(()) } else { Err(std::io::Error::other("stty failed")) }
 }
 
+/// A line typed at the console without showing it; from standard input when there is no
+/// console (`arcade wallet restore < file`): echo is turned off on the console input handle.
+#[cfg(windows)]
+fn read_hidden(prompt: &str) -> std::io::Result<String> {
+    use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, STD_INPUT_HANDLE};
+    let mut line = String::new();
+    let h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    let mut mode = 0u32;
+    if unsafe { GetConsoleMode(h, &mut mode) } == 0 {
+        // Not a console (input redirected from a file or pipe).
+        std::io::stdin().read_line(&mut line)?;
+        return Ok(line.trim().to_string());
+    }
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    unsafe { SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT) };
+    let got = std::io::stdin().read_line(&mut line);
+    unsafe { SetConsoleMode(h, mode) };
+    eprintln!();
+    got.map(|_| line.trim().to_string())
+}
+
 /// A line typed at the terminal without showing it; from standard input when there is no
 /// terminal (`arcade wallet restore < file`).
+#[cfg(not(windows))]
 fn read_hidden(prompt: &str) -> std::io::Result<String> {
     let mut line = String::new();
     let Ok(mut tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") else {
@@ -269,6 +303,7 @@ fn main() {
     let req = match a.as_slice() {
         ["status"] => json!({"cmd": "status"}),
         ["peers"] => json!({"cmd": "peers"}),
+        ["stop"] => json!({"cmd": "service.stop"}),
         ["wallet", "create"] => json!({"cmd": "wallet.create"}),
         ["wallet", "restore", words @ ..] => match restore_phrase(words, || read_hidden("Your recovery phrase (not shown as you type): ")) {
             Ok(phrase) => json!({"cmd": "wallet.create", "phrase": phrase}),

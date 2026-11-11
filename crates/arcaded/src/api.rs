@@ -4,14 +4,21 @@
 use crate::node::Node;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+// Windows 10 1803+ has AF_UNIX sockets too; std just doesn't wrap them.
+#[cfg(windows)]
+use uds_windows::{UnixListener, UnixStream};
 use std::sync::Arc;
 
 pub fn serve(node: Arc<Node>, path: std::path::PathBuf) {
     let _ = std::fs::remove_file(&path);
     let l = UnixListener::bind(&path).expect("bind API socket");
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660) /* service user + arcade group */);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660) /* service user + arcade group */);
+    }
     for s in l.incoming().flatten() {
         let node = node.clone();
         std::thread::spawn(move || handle(node, s));
@@ -22,6 +29,12 @@ fn handle(node: Arc<Node>, s: UnixStream) {
     let mut w = s.try_clone().unwrap();
     for line in BufReader::new(s).lines().map_while(Result::ok) {
         let reply = match serde_json::from_str::<Value>(&line) {
+            // Stop cleanly (write the coin caches, then exit), as SIGTERM does: the way to stop a
+            // background arcaded on Windows, which has no SIGTERM. Socket only, never over HTTP.
+            Ok(req) if req["cmd"] == "service.stop" => {
+                crate::STOP_ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!({"ok": true, "result": "stopping: writing the coin caches, then exiting"})
+            }
             Ok(req) => match dispatch(&node, &req) {
                 Ok(v) => json!({"ok": true, "result": v}),
                 Err(e) => json!({"ok": false, "error": e}),
