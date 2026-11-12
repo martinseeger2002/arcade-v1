@@ -63,6 +63,9 @@ pub fn ord_start(p: &ChainParams) -> Option<u32> {
         "dgb" => 0,
         "flop" => 18_295,
         "wjk" => 1,
+        // Shibacoin: its first inscription (Doginals style) is in block 11,839 (tx 92901dab…), every block before it
+        // checked (2026-11-12; github.com/dpaydrc20/wonky-ord-shibacoin indexes it).
+        "shic" => 11_839,
         // ord-litecoin's first inscription heights (src/chain.rs).
         "ltc" => 2_424_429,
         "ltctest" => 2_669_127,

@@ -32,6 +32,9 @@ pub fn protocol(p: &ChainParams) -> Option<(&'static str, bool)> {
         "main" | "test" => Some(("prc-20", false)),
         "doge" => Some(("drc-20", false)),
         "wjk" => Some(("wjk-20", false)),
+        // SHC-20: Shibacoin's DRC-20 under its own name (wonky-ord-shibacoin src/drc20/params.rs: PROTOCOL_LITERAL
+        // "shc-20"), so DRC-20 rules.
+        "shic" => Some(("shc-20", false)),
         // LTC-20: Litecoin's fork of BRC-20 (ord20-indexer, github.com/ynohtna92/ord20-indexer): read as BRC-20 is.
         "ltc" | "ltctest" | "ltcreg" => Some(("ltc-20", true)),
         _ => None,
