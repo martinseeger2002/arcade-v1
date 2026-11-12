@@ -450,13 +450,14 @@ fn lock_step(node: &Node, leg: &Value, spec: &Spec, st: &mut Value, o: Option<&V
             st["step"] = json!("locked");
         }
         ("dd", "start") => {
-            let (dsk, held, dgb, _, change) = crate::ddsvc::trade_coins(node, p)?;
+            let own_key = o.and_then(|o| o["own"]["keys"][p.key].as_str()).and_then(|h| hex::decode(h).ok()).and_then(|b| arcade_wallet::SecretKey::from_slice(&b).ok());
+            let (dsk, held, dgb, _, change) = crate::ddsvc::trade_coins_for(node, p, own_key.as_ref())?;
             let tx = ddlock::build_lock(p, &dsk, &held, &dgb, &change, &spec.dd()?, units(leg) as i64)?;
             st["txid"] = json!(send(node, p, &tx)?);
             st["vout"] = json!(0);
             // The maker fee in DigiDollars, whole dollars rounded up: a DD send to the operator, made with the lock.
             if let Some((dollars, to)) = whole_fee(o, (units(leg) / 100) as u128, p) {
-                match crate::ddsvc::send(node, Some(p.key), &to, (dollars * 100) as i64, true) {
+                match crate::ddsvc::send_with(node, Some(p.key), &to, (dollars * 100) as i64, true, own_key.as_ref()) {
                     Ok(v) => st["fee_tx"] = v["txid"].clone(),
                     Err(e) => st["fee_error"] = json!(e),
                 }
@@ -626,7 +627,9 @@ fn spend(node: &Node, leg: &Value, spec: &Spec, st: &Value, secret: Option<&[u8]
     let own = crate::coinsend::key_scripts(p, &pk)[0].1.clone();
     if kind == "dd" {
         let lock = spec.dd()?;
-        let to = arcade_wallet::taproot::p2tr_script(&arcade_wallet::taproot::output_key(&pk).ok_or("tweak")?);
+        // An own-key order's dollars go to its payout's DigiDollar address (`payout` names it on this chain as "dd").
+        let mine = arcade_wallet::taproot::p2tr_script(&arcade_wallet::taproot::output_key(&pk).ok_or("tweak")?);
+        let to = o.and_then(|o| o["own"]["payout_dd"][p.key].as_str()).and_then(|a| crate::ddsvc::dd_script_of(p, a)).unwrap_or(mine);
         let reserve = tx.outputs.iter().position(|o| o.value > 0 && o.script_pubkey == lock.script()).ok_or("no reserve")? as u32;
         let d = Utxo { outpoint: cs[0].0, value: 0, script: lock.script() };
         let r = Utxo { outpoint: OutPoint { txid: tx.txid, vout: reserve }, value: tx.outputs[reserve as usize].value, script: lock.script() };
@@ -719,10 +722,14 @@ pub fn place(node: &Node, give: &Value, get_leg: &Value, opts: &Value) -> Result
             let a = opts["payout"][p.key].as_str().ok_or_else(|| format!("an order with its own key names where its {} goes", p.name))?;
             arcade_ledger::address::script_for_address(p, a).ok_or_else(|| format!("{a} is not a {} address", p.name))?;
         }
-        if give["kind"] == "dd" || get_leg["kind"] == "dd" {
-            return Err("an order with its own key gives and gets coins, tokens or inscriptions; DigiDollars come next".into());
+        // DigiDollars come out to a DigiDollar address: `payout_dd` {chain: DD... / TD...} for a DD leg's chain.
+        for (leg, p) in [(give, gp), (get_leg, wp)] {
+            if leg["kind"] == "dd" {
+                let a = opts["payout_dd"][p.key].as_str().ok_or("an order with its own key that gets or gives DigiDollars names its DigiDollar payout address")?;
+                crate::ddsvc::dd_script_of(p, a).ok_or_else(|| format!("{a} is not a DigiDollar address on {}", p.name))?;
+            }
         }
-        o["own"] = json!({"keys": opts["key"], "payout": opts["payout"]});
+        o["own"] = json!({"keys": opts["key"], "payout": opts["payout"], "payout_dd": opts["payout_dd"]});
     }
     if opts["maker_fee"].is_object() {
         let bps = opts["maker_fee"]["bps"].as_u64().ok_or("a maker fee names its bps")?;
@@ -796,6 +803,17 @@ fn sweep(node: &Node, p: &'static ChainParams, o: &Value, give: Option<&Value>) 
                     return Ok(sent); // its fee coins went with it, change to the payout address
                 }
             }
+        }
+        Some("dd") => {
+            // The dollars back to the payout's DigiDollar address by a DD send from the key (its DGB pays the fee and its
+            // change comes back to the key, swept with the coins after).
+            let a = o["own"]["payout_dd"][p.key].as_str().ok_or("no DigiDollar payout address")?;
+            let cents: i64 = crate::ddsvc::coins_of(node, Some(p.key), &hex::encode(pk.serialize()))?["cents"].as_i64().unwrap_or(0);
+            if cents > 0 {
+                let v = crate::ddsvc::send_with(node, Some(p.key), a, cents, true, Some(&sk))?;
+                sent.push(v["txid"].as_str().unwrap_or("").to_string());
+            }
+            // Then the key's DGB (what the DD send didn't spend) with the coins below.
         }
         Some("token20") => {
             // The tokens back by a token send from the key (a transfer note, then its coin: tokensend's job, which pays
@@ -1316,6 +1334,10 @@ mod own_key_tests {
         assert!(place(&t.node, &give, &get_leg, &json!({"key": {k: hex::encode([9u8; 32])}})).is_err(), "no payout");
         assert!(place(&t.node, &give, &get_leg, &json!({"maker_fee": {"bps": 900, "to": {k: addr}}})).is_err(), "over 5%");
         assert!(place(&t.node, &give, &get_leg, &Value::Null).is_ok(), "a plain order as before");
+        // DigiDollars to an own-key order come out to a DigiDollar address it names.
+        let dd = json!({"chain": k, "kind": "dd", "asset": "DD", "amount": "2500"});
+        let opts = json!({"key": {k: hex::encode([9u8; 32])}, "payout": {k: addr}});
+        assert!(place(&t.node, &dd, &get_leg, &opts).is_err(), "no DigiDollar payout address");
     }
 }
 
