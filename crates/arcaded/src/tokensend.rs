@@ -54,7 +54,18 @@ struct T20 {
     dec: u32,
 }
 
-fn t20(node: &Node, chain: &str, tick: &str, amount: &str, to: &str) -> Result<T20, String> {
+/// The key a token send uses: `key` (an own-key swap order's, 32 bytes of hex: swaps.rs) or this wallet's.
+fn key_or_wallet(node: &Node, p: &ChainParams, key: Option<&str>) -> Result<(arcade_wallet::SecretKey, arcade_wallet::secp256k1::PublicKey), String> {
+    match key {
+        Some(h) => {
+            let sk = arcade_wallet::SecretKey::from_slice(&hex::decode(h).map_err(|_| "bad key")?).map_err(|_| "bad key")?;
+            Ok((sk, arcade_wallet::secp256k1::PublicKey::from_secret_key(arcade_wallet::secp256k1::SECP256K1, &sk)))
+        }
+        None => wallet_key(node, p),
+    }
+}
+
+fn t20(node: &Node, chain: &str, tick: &str, amount: &str, to: &str, key: Option<&str>) -> Result<T20, String> {
     let p = crate::chains::find(chain).ok_or_else(|| format!("unknown chain {chain}"))?;
     let proto = arcade_ledger::tokens::protocol(p).ok_or_else(|| format!("no PRC-20 / DRC-20 on {}", p.name))?.0;
     if crate::borrow::is_borrowed(p.key) || !crate::chains::kept(node, p) {
@@ -68,7 +79,7 @@ fn t20(node: &Node, chain: &str, tick: &str, amount: &str, to: &str) -> Result<T
     let amount = amount.trim().to_string();
     let n = arcade_ledger::tokens::num(&amount).ok_or("an amount is a number, for example 100 or 2.5")?;
     let base = n.units(dec).filter(|u| *u > 0).ok_or_else(|| format!("{tick} has {dec} decimals: that amount doesn't fit"))?;
-    let (sk, pk) = wallet_key(node, p)?;
+    let (sk, pk) = key_or_wallet(node, p, key)?;
     let addr = arcade_ledger::address::base58check(p.p2pkh_version, &arcade_ledger::address::hash160(&pk.serialize()));
     let held = crate::explorer::handle(node, "explorer.address", &json!({"chain": p.key, "address": addr})).map_err(|e| format!("this wallet's tokens can't be read right now: {e}"))?;
     let (overall, transferable) = held["tokens"].as_array().into_iter().flatten()
@@ -104,7 +115,12 @@ fn note(t: &T20) -> String {
 /// A PRC-20 / DRC-20 send: checked and priced (`send` false), or started (`send` true): the transfer note's commit and
 /// reveal go out now, the send of its coin once the tokens index has read it.
 pub fn t20_send(node: &Node, chain: &str, tick: &str, amount: &str, to: &str, go: bool) -> Result<Value, String> {
-    let t = t20(node, chain, tick, amount, to)?;
+    t20_send_with(node, chain, tick, amount, to, go, None)
+}
+
+/// `t20_send` from `key` (an own-key swap order's: its fee, or its tokens back on release), kept in the job.
+pub fn t20_send_with(node: &Node, chain: &str, tick: &str, amount: &str, to: &str, go: bool, key: Option<&str>) -> Result<Value, String> {
+    let t = t20(node, chain, tick, amount, to, key)?;
     let p = t.p;
     let own = p2pkh_of(&t.pk);
     let body = note(&t);
@@ -128,6 +144,10 @@ pub fn t20_send(node: &Node, chain: &str, tick: &str, amount: &str, to: &str, go
     let id = arcade_mesh::random::hex(8);
     let job = json!({"id": id, "chain": p.key, "tick": t.tick, "amount": t.amount, "base": base.to_string(), "to": to.trim(),
                      "note_tx": reveal, "commit_tx": i.commit.txid.to_hex(), "step": "noted", "at": arcade_app::now(), "last": ""});
+    let mut job = job;
+    if let Some(k) = key {
+        job["key"] = json!(k); // kept here; never listed (t20_sends)
+    }
     put(node, &job);
     let _ = node.app.event("wallet", &format!("sending {} {} on {}: transfer note inscribed ({reveal})", t.amount, t.tick, p.name));
     v["id"] = json!(id);
@@ -137,7 +157,12 @@ pub fn t20_send(node: &Node, chain: &str, tick: &str, amount: &str, to: &str, go
 }
 
 pub fn t20_sends(node: &Node) -> Value {
-    json!(all(node))
+    json!(all(node).into_iter().map(|mut j| {
+        if let Some(m) = j.as_object_mut() {
+            m.remove("key");
+        }
+        j
+    }).collect::<Vec<_>>())
 }
 
 /// One step of a job: the note's coin to the recipient once the tokens index has read the note; done once that send
@@ -165,7 +190,7 @@ fn step(node: &Node, j: &mut Value) -> Result<(), String> {
                 if d < 2 {
                     return Ok(());
                 }
-                let (_, pk) = wallet_key(node, p)?;
+                let (_, pk) = key_or_wallet(node, p, j["key"].as_str())?;
                 let addr = arcade_ledger::address::base58check(p.p2pkh_version, &arcade_ledger::address::hash160(&pk.serialize()));
                 let held = crate::explorer::handle(node, "explorer.address", &json!({"chain": p.key, "address": addr})).map_err(|e| e.to_string())?;
                 let base: u128 = j["base"].as_str().and_then(|b| b.parse().ok()).unwrap_or(0);
@@ -176,7 +201,7 @@ fn step(node: &Node, j: &mut Value) -> Result<(), String> {
                     return Ok(());
                 }
             }
-            let (sk, pk) = wallet_key(node, p)?;
+            let (sk, pk) = key_or_wallet(node, p, j["key"].as_str())?;
             let own = p2pkh_of(&pk);
             let to = arcade_ledger::address::script_for_address(p, j["to"].as_str().unwrap_or("")).ok_or("bad address")?;
             let first = vec![Utxo { outpoint: OutPoint { txid: note, vout: 0 }, value: POSTAGE, script: own.clone() }];

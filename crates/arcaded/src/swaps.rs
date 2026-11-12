@@ -514,7 +514,8 @@ fn lock_step(node: &Node, leg: &Value, spec: &Spec, st: &mut Value, o: Option<&V
                     // note, then the note's coin sent: tokensend's job), started with the lock.
                     let whole = leg["amount"].as_str().and_then(|a| a.parse::<u128>().ok()).unwrap_or(0);
                     if let Some((fee, to)) = whole_fee(o, whole, p) {
-                        match crate::tokensend::t20_send(node, p.key, leg["asset"].as_str().unwrap_or(""), &fee.to_string(), &to, true) {
+                        let key = o.and_then(|o| o["own"]["keys"][p.key].as_str());
+                        match crate::tokensend::t20_send_with(node, p.key, leg["asset"].as_str().unwrap_or(""), &fee.to_string(), &to, true, key) {
                             Ok(v) => st["fee_job"] = v["id"].clone(),
                             Err(e) => st["fee_error"] = json!(e),
                         }
@@ -718,8 +719,8 @@ pub fn place(node: &Node, give: &Value, get_leg: &Value, opts: &Value) -> Result
             let a = opts["payout"][p.key].as_str().ok_or_else(|| format!("an order with its own key names where its {} goes", p.name))?;
             arcade_ledger::address::script_for_address(p, a).ok_or_else(|| format!("{a} is not a {} address", p.name))?;
         }
-        if matches!(give["kind"].as_str(), Some("dd" | "token20")) || matches!(get_leg["kind"].as_str(), Some("dd" | "token20")) {
-            return Err("an order with its own key gives and gets coins, arcade tokens or inscriptions for now".into());
+        if give["kind"] == "dd" || get_leg["kind"] == "dd" {
+            return Err("an order with its own key gives and gets coins, tokens or inscriptions; DigiDollars come next".into());
         }
         o["own"] = json!({"keys": opts["key"], "payout": opts["payout"]});
     }
@@ -795,6 +796,24 @@ fn sweep(node: &Node, p: &'static ChainParams, o: &Value, give: Option<&Value>) 
                     return Ok(sent); // its fee coins went with it, change to the payout address
                 }
             }
+        }
+        Some("token20") => {
+            // The tokens back by a token send from the key (a transfer note, then its coin: tokensend's job, which pays
+            // its fees from the key's coins, so those stay with it here).
+            let g = give.unwrap();
+            let tick = g["asset"].as_str().unwrap_or("");
+            let addr = arcade_ledger::address::address_of(&own, p).ok_or("no address")?;
+            let held = crate::explorer::handle(node, "explorer.address", &json!({"chain": p.key, "address": addr})).map_err(|e| e.to_string())?;
+            let dec = crate::explorer::handle(node, "explorer.token", &json!({"chain": p.key, "tick": tick})).ok().and_then(|v| v["dec"].as_u64()).unwrap_or(18) as u32;
+            let row = held["tokens"].as_array().into_iter().flatten().find(|t| t["tick"].as_str().is_some_and(|x| x.eq_ignore_ascii_case(tick)));
+            let big = |k: &str| row.and_then(|t| t[k].as_str()).and_then(|x| x.parse::<u128>().ok()).unwrap_or(0);
+            let whole = big("overall").saturating_sub(big("transferable")) / 10u128.pow(dec);
+            if whole > 0 {
+                let a = arcade_ledger::address::address_of(&to, p).ok_or("bad payout")?;
+                let v = crate::tokensend::t20_send_with(node, p.key, tick, &whole.to_string(), &a, true, o["own"]["keys"][p.key].as_str())?;
+                sent.push(v["note_tx"].as_str().unwrap_or("").to_string());
+            }
+            return Ok(sent);
         }
         Some("token") => {
             let g = give.unwrap();
