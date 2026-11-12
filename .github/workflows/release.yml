@@ -91,7 +91,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: LLVM (libclang for libmdbx and chiavdf: the MSVC headers want Clang 20 or newer)
+      - name: "LLVM (libclang for libmdbx and chiavdf: the MSVC headers want Clang 20 or newer)"
         uses: KyleMayes/install-llvm-action@v2
         with:
           version: "20.1.8"
