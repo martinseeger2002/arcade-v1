@@ -1129,7 +1129,7 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
             // (When the coin's P2P network is failing too, any arcade that is ahead serves new blocks.)
             let p2p_failing = run.state.lock().unwrap().starts_with("headers:") || run.state.lock().unwrap().starts_with("no ");
             let gap = if p2p_failing { 0 } else { 1000 };
-            if node.offers_for(p.key).iter().any(|o| o.3 > ours + gap) && last_mesh.elapsed() > Duration::from_secs(if p2p_failing { 20 } else { 60 }) {
+            if ahead_by(&node.offers_for(p.key), ours, gap) && last_mesh.elapsed() > Duration::from_secs(if p2p_failing { 20 } else { 60 }) {
                 mesh_first(&node, &run, &syncer);
                 last_mesh = std::time::Instant::now();
             }
@@ -1178,6 +1178,13 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
             if !walk_indexes(&node, &run, usize::MAX) {
                 continue 'outer;
             }
+            // An arcade far ahead on the mesh (its offer can arrive minutes after the start's
+            // short wait, by way of other arcades): back to the outer loop, which takes the mesh
+            // (every source at once) first. Without this, a working P2P peer kept a far-behind
+            // chain on that one peer for good (JB20B Litecoin, 2026-11-11: 2 blocks/s instead of 120).
+            if far_ahead_on_mesh(&node, p, last_mesh.elapsed()) {
+                continue 'outer;
+            }
             if run.mode == "shared" && last_balance.elapsed() > Duration::from_secs(crate::shares::every()) {
                 match crate::shares::balance(&node, p) {
                     Ok(note) => *run.share_note.lock().unwrap() = note,
@@ -1197,6 +1204,18 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
         }
     }
     set("stopped".into());
+}
+
+/// Is an arcade on the mesh more than 1,000 blocks ahead of this chain (and the mesh last asked
+/// over a minute ago)? The same rule as the top of `follow`'s loop when P2P is working.
+fn far_ahead_on_mesh(node: &Node, p: &ChainParams, since_mesh: Duration) -> bool {
+    let ours = node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height as u64).unwrap_or(0);
+    since_mesh > Duration::from_secs(60) && ahead_by(&node.offers_for(p.key), ours, 1000)
+}
+
+/// Does any offer's tip exceed `ours + gap`?
+fn ahead_by(offers: &[(String, String, &'static str, u64)], ours: u64, gap: u64) -> bool {
+    offers.iter().any(|o| o.3 > ours + gap)
 }
 
 /// Blocks per second for one stage of one chain, over about the last two minutes of samples
@@ -1221,4 +1240,23 @@ fn stage_rate(chain: &str, stage: &str, at: u64) -> Option<f64> {
     let (t0, h0) = *q.front()?;
     let secs = now.duration_since(t0).as_secs_f64();
     (secs >= 5.0).then(|| at.saturating_sub(h0) as f64 / secs)
+}
+
+#[cfg(test)]
+mod far_ahead_tests {
+    use super::ahead_by;
+
+    fn offer(tip: u64) -> (String, String, &'static str, u64) {
+        ("n".into(), "a".into(), "cr", tip)
+    }
+
+    #[test]
+    fn ahead_by_needs_more_than_the_gap() {
+        // JB20B Litecoin: 2,490,000 stored, an arcade at 3,211,626.
+        assert!(ahead_by(&[offer(3_211_626)], 2_490_000, 1000));
+        assert!(!ahead_by(&[offer(2_491_000)], 2_490_000, 1000));
+        assert!(ahead_by(&[offer(2_491_001)], 2_490_000, 1000));
+        assert!(ahead_by(&[offer(10), offer(2_500_000)], 2_490_000, 1000));
+        assert!(!ahead_by(&[], 2_490_000, 0));
+    }
 }
