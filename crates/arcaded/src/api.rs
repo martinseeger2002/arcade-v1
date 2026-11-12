@@ -270,6 +270,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             }
             Ok(j)
         }
+        "realtime.ice" => Ok(crate::turnsvc::ice(node, &s("tag").unwrap_or_default(), req["lan"] == true)),
         "realtime.cert" => crate::realtime::cert(node, &s("address").ok_or("address required")?),
         "tx.coins" => crate::sitesvc::coins(node, req),
         "tx.activity" => crate::sitesvc::activity(node, req),
@@ -502,6 +503,11 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         }
         c if c.starts_with("explorer.") => crate::explorer::handle_with(node, c, &req, req["img"] == "links"),
         c @ ("ledger.book" | "ledger.trades" | "ledger.pairs") => crate::marketsvc::handle(node, c, &req),
+        // Token sends from this wallet (tokensend.rs): arcade tokens in one transaction; PRC-20 / DRC-20 as a job.
+        "token.send" => crate::tokensend::ledger_send(node, req["propertyid"].as_u64().or_else(|| s("propertyid").and_then(|x| x.parse().ok())).ok_or("propertyid required")? as u32,
+            req["units"].as_u64().or_else(|| s("units").and_then(|x| x.parse().ok())).ok_or("units required (base units)")?, &s("to").ok_or("to required")?, req["send"] == true),
+        "token20.send" => crate::tokensend::t20_send(node, &s("chain").ok_or("chain required")?, &s("tick").ok_or("tick required")?, &s("amount").ok_or("amount required")?, &s("to").ok_or("to required")?, req["send"] == true),
+        "token20.sends" => Ok(crate::tokensend::t20_sends(node)),
         "swap.place" => crate::swaps::place(node, &req["give"], &req["get"]),
         "swap.book" => Ok(json!(crate::swaps::book(node))),
         // With the legs shown ({give, get}), only on exactly those terms.

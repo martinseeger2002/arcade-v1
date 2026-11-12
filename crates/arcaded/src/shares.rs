@@ -652,6 +652,8 @@ pub fn answer(node: &Node, link: &mut Link, h: &Value) -> Result<(), LinkError> 
             }
             // A DigiDollar market question (ddmarket.rs): this arcade's own orders and fills.
             "mk" => crate::ddmarket::answer(node, arg),
+            // A login on this arcade's media relay for one of the asker's players (turnsvc.rs).
+            "tu" => crate::turnsvc::answer_tu(&link.peer_id, arg),
             _ => Err("unknown question".to_string()),
         }
     })();

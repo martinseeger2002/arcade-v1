@@ -636,6 +636,12 @@ fn build(node: &Node, r: &Value, send: bool) -> Result<(String, u64, Vec<Value>)
     Ok((tx.txid.to_hex(), fee, outs))
 }
 
+/// An arcade token send from this wallet itself (the Wallet's Send, not a page's request): built as a page's is,
+/// and broadcast when `send`. (txid, fee, outputs).
+pub fn token_send(node: &Node, pid: u32, units: u64, to: &str, send: bool) -> Result<(String, u64, Vec<Value>), String> {
+    build(node, &json!({"kind": "token", "propertyid": pid, "units": units, "to": to}), send)
+}
+
 /// What a request would send, as built now (for the approval card).
 pub fn preview(node: &Node, id: &str) -> Result<Value, String> {
     let r = get_req(node, id).ok_or("no such request")?;

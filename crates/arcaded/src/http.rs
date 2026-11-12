@@ -541,6 +541,14 @@ fn handle(node: &Node, mut s: TcpStream, conf: &Conf) {
         // cookie as Basic auth, as /rpc and the Core RPC take it: the home chain's reads only.
         // Every write (/r/send, the market's) still needs an app page's pass.
         let program = page.is_none() && matches!(r.method.as_str(), "GET" | "HEAD") && cookie_ok(node, &r);
+        // Names' sites (/r/sites, /r/site/<name>, /r/mesh...): public data, read with no pass. A site the
+        // Browser app shows is an inscription at /content/<id>, not an app page with a pass, and it reads
+        // these (Me-Seeks counts and searches every site), as it does on the website.
+        if page.is_none() && matches!(r.method.as_str(), "GET" | "HEAD") {
+            if let Some(a) = crate::namesites::route(node, &path, &query_fields(&r.query)) {
+                return respond(&mut s, status_line(a.code), a.ctype, &cors, &a.body);
+            }
+        }
         if page.is_none() && !program && !matches!(path.as_str(), "/r/blockheight" | "/r/blocktime") {
             return respond(&mut s, "403 Forbidden", "application/json", &cors, br#"{"error":"open this page in the arcade: the request has no page pass"}"#);
         }

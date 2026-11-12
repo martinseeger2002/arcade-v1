@@ -48,6 +48,7 @@ mod meshsvc;
 mod ddmarket;
 mod marketsvc;
 mod swaps;
+mod tokensend;
 mod meshview;
 mod mempoolshare;
 mod msgsvc;
@@ -70,6 +71,7 @@ mod ringsvc;
 mod rpc;
 mod sizes;
 mod udpsvc;
+mod turnsvc;
 mod v1copy;
 mod vxshare;
 mod v1import;
@@ -393,6 +395,7 @@ fn main() {
     chains::start_saved(&node);
     borrow::start(node.clone());
     swaps::start(node.clone());
+    tokensend::start(node.clone());
     ordtypes::init(&node);
     namesites::init(&node);
     // A home chain far behind (a fresh install): installed from copies when the mesh has them.

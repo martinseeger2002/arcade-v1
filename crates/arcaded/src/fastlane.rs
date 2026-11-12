@@ -18,11 +18,14 @@
 //! lane, from a player it already knows is there (seen through the room, cert checked).
 //!
 //! Media ("m", realtime.media) rides the same frames: pieces of encoded pictures and sound that
-//! the windows make and play (WebCodecs), opaque here. Unlike data it goes only over a direct
-//! link to the player's arcade (as the original's media: never through somebody else's arcade),
-//! is never replaced by newer pieces (a picture needs every piece since its last key frame), and is
-//! dropped instead of queued when the link is already behind (stale pictures help nobody; the
-//! window asks for a key frame and goes on).
+//! the windows make and play (WebCodecs), opaque here. It goes over the direct link to the
+//! player's arcade when there is one; otherwise (two arcades behind NAT with no link between
+//! them) through at most MEDIA_HOPS arcades on the room's route, as the original's media went
+//! through a node's TURN relay. An arcade passes media on only while its media relay is on
+//! (turnsvc.rs: the same switch and the same monthly limit), at most MEDIA_RELAY_BYTES a second
+//! for one sending arcade. Media is never replaced by newer pieces (a picture needs every piece
+//! since its last key frame), and is dropped instead of queued when the next link is already
+//! behind (stale pictures help nobody; the window asks for a key frame and goes on).
 
 use super::*;
 
@@ -44,6 +47,10 @@ const MEDIA_BURST: f64 = 1200.0;
 const MEDIA_BYTES: f64 = 8_000_000.0;
 /// Media for a link with more frames than this waiting is dropped.
 const MEDIA_BACKLOG: usize = 600;
+/// Arcades media may pass through on its way (two arcades behind NAT, both linked to a third).
+const MEDIA_HOPS: u64 = 2;
+/// What one arcade passes on of another's media: bytes a second (20 Mbit/s), and the burst.
+const MEDIA_RELAY_BYTES: f64 = 2_500_000.0;
 /// A lane is up while its arcade was heard within this many seconds.
 const LANE_LIFE: u64 = 10;
 /// How often a lane is asked about: while down, and while up.
@@ -250,10 +257,8 @@ fn carry(node: &Node, tok: &str, bytes: &[u8], bin: bool, to: &[String], reliabl
         }
         let Some(hop) = hop_to(node, &st, &o, Some(&room), None) else { continue };
         let f = if is_media {
-            // Direct only, and never into a link that is already behind.
-            if hop != o {
-                continue;
-            }
+            // Over the direct link, else through the room's route (on_fx: relaying arcades);
+            // never into a link that is already behind.
             if st.outq.get(&hop).is_some_and(|q| q.len() > MEDIA_BACKLOG) {
                 dropped += x.len();
                 continue;
@@ -328,11 +333,21 @@ pub(super) fn on_fx(node: &Node, st: &mut St, from: &str, h: &Value, blob: &[u8]
         return;
     }
     if to != me {
-        // For another arcade: pass it on, toward it, never back (media is not passed on).
-        if kind == "m" || hops + 1 >= MAX_HOPS || !allow(st, format!("fxr|{origin}"), FX_RELAY, FX_RELAY_BURST) {
+        // For another arcade: pass it on, toward it, never back.
+        if hops + 1 >= MAX_HOPS || !allow(st, format!("fxr|{origin}"), FX_RELAY, FX_RELAY_BURST) {
             return;
         }
         let Some(hop) = hop_to(node, st, to, h["r"].as_str(), Some(from)) else { return };
+        // Media: a few arcades on its way at most, within this arcade's relay budget, and never
+        // into a link that is already behind.
+        if kind == "m"
+            && (hops >= MEDIA_HOPS
+                || st.outq.get(&hop).is_some_and(|q| q.len() > MEDIA_BACKLOG)
+                || !allow_cost(st, format!("fmr|{origin}"), MEDIA_RELAY_BYTES, MEDIA_RELAY_BYTES, blob.len() as f64)
+                || !crate::turnsvc::charge(blob.len()))
+        {
+            return;
+        }
         let mut c = h.clone();
         c["hops"] = json!(hops + 1);
         fx_queue(st, &hop, Frame { head: c, blob: blob.to_vec() });

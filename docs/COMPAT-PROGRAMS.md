@@ -31,6 +31,17 @@ of a Core node, from this computer only.
 - Coins for an address come from `listunspent` (V1.0's address index); no wallet import or
   rescan is needed (`validateaddress` reports every address as watched).
 
+## The media relay
+
+Every V1.0 arcade with a STUN port runs a media relay on it (TURN, UDP, `turnsvc.rs`), wire for wire the
+original's `arcade/mesh/turn.py`: when two browsers in a call can't reach each other, one sends through
+it. It is offered only where other arcades proved the STUN port open, so in practice by arcades on public
+addresses (a VPS); one behind CGNAT borrows: `realtime.ice` asks linked arcades ("tu") for a login on
+theirs, the address always from its own proof of their STUN port. A website gives its pages
+`realtime.ice`'s `iceServers` (no Cloudflare). Limits as the original's: 256 allocations, 32 per login,
+12 Mbit/s each, 200 Mbit/s in all, 100 GB a month unless set (`mesh.udp_set`); never to this machine,
+and into a private network only for a client on one. `ARCADE_MESH_TURN=0` or `turn: false` turns it off.
+
 ## Borrowed chains
 
 A chain this arcade borrows (not installed, or installed but still syncing or indexing, the home

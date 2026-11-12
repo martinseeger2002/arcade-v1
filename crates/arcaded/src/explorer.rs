@@ -233,6 +233,46 @@ pub fn handle(node: &Node, cmd: &str, req: &Value) -> R {
 /// images as links (`content.src`) the UI loads one by one, so the list comes back at once.
 /// Answers from other arcades keep the bytes (their links would point at them).
 pub fn handle_with(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
+    let mut out = answer(node, cmd, req, img_links);
+    if img_links {
+        if let Ok(v) = out.as_mut() {
+            link_previews(v);
+        }
+    }
+    out
+}
+
+/// Previews another arcade made (a borrowed chain, or an index asked on the mesh) carry an
+/// HTML page as its text and pictures over 96 KB as their type alone: those would show as raw
+/// HTML and as no picture. This computer's UI gets them as links to this arcade's
+/// /content/<id> instead, which fetches the inscription from the mesh when it isn't kept here
+/// (pictures up to 4 MB, whole pages up to 64 KB), as the previews it makes itself.
+fn link_previews(v: &mut Value) {
+    match v {
+        Value::Array(a) => a.iter_mut().for_each(link_previews),
+        Value::Object(o) => {
+            let id = o.get("id").and_then(|i| i.as_str()).filter(|i| arcade_ledger::sites::is_inscription_id(&i.to_lowercase())).map(String::from);
+            if let (Some(id), Some(Value::Object(c))) = (id, o.get_mut("content")) {
+                let ct = c.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                let base = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+                let kind = c.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                let size = c.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+                if c.get("src").is_none() {
+                    if kind == "html" {
+                        c.insert("src".into(), json!(format!("/content/{id}")));
+                    } else if kind == "other" && base.starts_with("image/") && size > 0 && size <= LINK_MAX {
+                        c.insert("kind".into(), json!("image"));
+                        c.insert("src".into(), json!(format!("/content/{id}")));
+                    }
+                }
+            }
+            o.values_mut().for_each(link_previews);
+        }
+        _ => {}
+    }
+}
+
+fn answer(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
     let local = handle_here(node, cmd, req, img_links);
     if req["local"] == true || !FORWARDABLE.contains(&cmd) {
         return local;
@@ -401,7 +441,7 @@ fn handle_here(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
             for r in v["items"].as_array_mut().into_iter().flatten() {
                 let Some(id) = r["cover"].as_str().map(String::from) else { continue };
                 if let Some(rec) = ord::inscription(&x.node.chain, x.p, &id) {
-                    r["cover_content"] = image_link(&x, &rec, &id, 96 << 10).or_else(|| no_preview(&rec)).unwrap_or_else(|| content(&x, &id, 96 << 10));
+                    r["cover_content"] = image_link(&x, &rec, &id).or_else(|| no_preview(&rec)).unwrap_or_else(|| content(&x, &id, 96 << 10));
                     r["cover_ct"] = rec["ct"].clone();
                 }
             }
@@ -417,7 +457,7 @@ fn handle_here(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
                     it["n"] = rec["n"].clone();
                     it["h"] = rec["h"].clone();
                     it["ct"] = rec["ct"].clone();
-                    it["content"] = image_link(&x, &rec, &id, 96 << 10).or_else(|| no_preview(&rec)).unwrap_or_else(|| content(&x, &id, 96 << 10));
+                    it["content"] = image_link(&x, &rec, &id).or_else(|| no_preview(&rec)).unwrap_or_else(|| content(&x, &id, 96 << 10));
                 }
             }
             Ok(v)
@@ -765,11 +805,15 @@ fn blocks(x: &Ctx, before: u32, n: u32) -> Vec<Value> {
     (before.saturating_sub(n)..before).rev().filter_map(|h| block_row(x, h)).collect()
 }
 
+/// The largest picture a list links to: the UI loads each one lazily, on its own, so a big JPG
+/// shows as well as a small one (Martin 2026-11-11). Also what /content asks another arcade for.
+const LINK_MAX: u64 = 4 << 20;
+
 /// An image's or an HTML page's preview as a link to it on this arcade, from its record alone
 /// (no read of the chain), when the UI asked for links: images with their own body up to
-/// `cap` (/ord/<chain>/<id>), HTML (/content/<id>, run in a sandboxed frame; Martin
+/// [`LINK_MAX`] (/ord/<chain>/<id>), HTML (/content/<id>, run in a sandboxed frame; Martin
 /// 2026-11-10).
-fn image_link(x: &Ctx, rec: &Value, id: &str, cap: usize) -> Option<Value> {
+fn image_link(x: &Ctx, rec: &Value, id: &str) -> Option<Value> {
     if !x.img_links || !rec["delegate"].is_null() {
         return None;
     }
@@ -779,7 +823,7 @@ fn image_link(x: &Ctx, rec: &Value, id: &str, cap: usize) -> Option<Value> {
     if base == "text/html" && size > 0 {
         return Some(json!({"type": ct, "kind": "html", "src": format!("/content/{id}"), "size": size}));
     }
-    if !base.starts_with("image/") || size == 0 || size > cap as u64 {
+    if !base.starts_with("image/") || size == 0 || size > LINK_MAX {
         return None;
     }
     Some(json!({"type": ct, "kind": "image", "src": format!("/ord/{}/{id}", x.p.key), "size": size}))
@@ -873,7 +917,7 @@ fn latest(x: &Ctx, before: u64, n: u64) -> Vec<Value> {
                 Some(v) => {
                     let mut v = v;
                     let id = v["id"].as_str().unwrap_or("").to_string();
-                    v["content"] = image_link(x, &v, &id, 96 << 10).or_else(|| no_preview(&v)).unwrap_or_else(|| content(x, &id, 96 << 10));
+                    v["content"] = image_link(x, &v, &id).or_else(|| no_preview(&v)).unwrap_or_else(|| content(x, &id, 96 << 10));
                     v
                 }
                 // Shared storage: records of other groups come from the arcades holding them.
@@ -1131,7 +1175,7 @@ fn addr(x: &Ctx, a: &str, req: &Value) -> R {
             .map(|(pid, units)| {
                 let p = arcade_ledger::engine::property(&x.node.chain, c, pid).ok().flatten().unwrap_or(Value::Null);
                 let div = p["divisible"] == true || p["type"] == 2;
-                json!({"propertyid": pid, "name": p["name"], "units": units, "balance": arcade_ledger::amount::token_plain(div, units)})
+                json!({"propertyid": pid, "name": p["name"], "units": units, "divisible": div, "balance": arcade_ledger::amount::token_plain(div, units)})
             })
             .collect();
         v["ledger_tokens"] = json!(toks);
@@ -1334,7 +1378,35 @@ fn search(x: &Ctx, q: &str) -> R {
 
 #[cfg(test)]
 mod type_tests {
-    use super::type_matches;
+    use super::{link_previews, type_matches, LINK_MAX};
+    use serde_json::json;
+
+    #[test]
+    fn borrowed_previews_link_here() {
+        let id = format!("{}i0", "ab".repeat(32));
+        let mut v = json!({"items": [
+            {"id": id, "content": {"type": "text/html;charset=utf-8", "kind": "html", "text": "<b>hi</b>", "size": 9}},
+            {"id": id, "content": {"type": "image/jpeg", "kind": "other", "size": 479_597}},
+            {"id": id, "content": {"type": "image/png", "kind": "image", "data": "data:image/png;base64,AA==", "size": 1}},
+            {"id": id, "content": {"type": "image/webp", "kind": "other", "size": LINK_MAX + 1}},
+            {"id": id, "content": {"type": "video/mp4", "kind": "other", "size": 10}},
+            {"id": id, "content": {"type": "text/html", "kind": "html", "src": "/content/x", "size": 9}},
+        ]});
+        link_previews(&mut v);
+        let it = &v["items"];
+        assert_eq!(it[0]["content"]["src"], format!("/content/{id}"));
+        assert_eq!(it[0]["content"]["kind"], "html");
+        assert_eq!(it[1]["content"]["kind"], "image");
+        assert_eq!(it[1]["content"]["src"], format!("/content/{id}"));
+        assert!(it[2]["content"]["src"].is_null(), "pictures sent whole stay as they are");
+        assert_eq!(it[3]["content"]["kind"], "other", "over the link limit: no picture");
+        assert_eq!(it[4]["content"]["kind"], "other");
+        assert_eq!(it[5]["content"]["src"], "/content/x", "a link already made stays");
+        // A single inscription's page (explorer.inscription from another arcade).
+        let mut one = json!({"id": id, "content": {"type": "text/html", "kind": "html", "text": "x", "size": 1}});
+        link_previews(&mut one);
+        assert_eq!(one["content"]["src"], format!("/content/{id}"));
+    }
 
     #[test]
     fn content_type_groups() {

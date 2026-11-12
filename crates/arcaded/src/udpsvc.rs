@@ -65,6 +65,27 @@ pub fn enabled(node: &Node) -> bool {
     std::env::var("ARCADE_MESH_UDP").map(|v| v != "0").unwrap_or(true) && cfg(node)["on"] != false
 }
 
+/// One mesh.udp setting (the media relay reads "turn" and "turn_limit_gb").
+pub fn setting(node: &Node, key: &str) -> Option<Value> {
+    Some(cfg(node)[key].clone()).filter(|v| !v.is_null())
+}
+
+/// This arcade's STUN addresses other arcades proved open (where its media relay is offered).
+pub fn proved_stun() -> Vec<SocketAddr> {
+    g().lock().unwrap().proved.clone()
+}
+
+/// This arcade's LAN address on its STUN port (a player at home reaches its media relay there).
+pub fn lan_stun() -> Option<SocketAddr> {
+    let port = g().lock().unwrap().stun_bound.iter().find_map(|a| a.parse::<SocketAddr>().ok()).map(|a| a.port())?;
+    Some(SocketAddr::new(IpAddr::V4(lan_ip()?), port))
+}
+
+/// Linked arcades' STUN addresses as they proved them: (node id, addresses), for borrowing their relays.
+pub fn peer_stun() -> Vec<(String, Vec<SocketAddr>)> {
+    g().lock().unwrap().peer_stun.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
 fn lan_dial(node: &Node) -> bool {
     cfg(node)["lan_dial"] == true
 }
@@ -98,6 +119,16 @@ pub fn set(node: &Node, req: &Value) -> Result<Value, String> {
             return Err("stun_port must be 0..65535".into());
         }
         c["stun_port"] = json!(p);
+    }
+    // The media relay on the STUN port (turnsvc.rs): on or off, and its monthly limit (GB). Both from the next start.
+    if let Some(t) = req["turn"].as_bool() {
+        c["turn"] = json!(t);
+    }
+    if let Some(l) = req["turn_limit_gb"].as_f64() {
+        if !(0.0..=100_000.0).contains(&l) {
+            return Err("turn_limit_gb must be 0..100000".into());
+        }
+        c["turn_limit_gb"] = json!(l);
     }
     node.app.store.write(|w| w.put(arcade_app::META, b"mesh_udp", c.to_string().as_bytes())).map_err(|e| e.to_string())?;
     let _ = node.app.event("mesh", &format!("udp settings: {c}"));
@@ -307,6 +338,9 @@ pub fn start(node: Arc<Node>, stun_flag: Option<u16>) {
                 let a = s.local_addr().map(|a| a.to_string()).unwrap_or_default();
                 let _ = node.app.event("mesh", &format!("STUN server on udp {a}"));
                 g().lock().unwrap().stun_bound.push(a);
+                let s = Arc::new(s);
+                // The media relay answers on the same port (turnsvc.rs).
+                crate::turnsvc::init(&node, s.clone());
                 std::thread::Builder::new().name("stun".into()).spawn(move || stun_serve(s)).unwrap();
             }
             Err(e) => {
@@ -318,8 +352,8 @@ pub fn start(node: Arc<Node>, stun_flag: Option<u16>) {
     std::thread::Builder::new().name("udp".into()).spawn(move || housekeeping(node)).unwrap();
 }
 
-fn stun_serve(s: UdpSocket) {
-    let mut buf = [0u8; 1500];
+fn stun_serve(s: Arc<UdpSocket>) {
+    let mut buf = vec![0u8; 65536];
     // Answers are counted per asking IP and in all (an answer is larger than the request).
     let mut limit = arcade_mesh::stun::AnswerLimit::default();
     loop {
@@ -331,8 +365,10 @@ fn stun_serve(s: UdpSocket) {
             }
             // A dual-stack socket must answer to the address as it came (v4-mapped).
             let _ = s.send_to(&arcade_mesh::stun::response(&tx, from), from);
+            continue;
         }
-        // Other STUN methods (TURN allocations) are not served.
+        // Everything else (TURN allocations, ChannelData) is the media relay's.
+        crate::turnsvc::handle(&buf[..n], from);
     }
 }
 
@@ -946,6 +982,8 @@ fn on_st(node: &Node, peer: &str, h: &Value) {
                 }
             }
             st.proved.truncate(MAX_OFFER);
+            // The media relay's sockets are reached at this arcade's proved IPv4.
+            crate::turnsvc::set_outside(st.proved.iter().find_map(|a| match a.ip() { IpAddr::V4(v) => Some(v), IpAddr::V6(v) => v.to_ipv4_mapped() }));
             if new {
                 let s = offer_json(&st.proved.clone());
                 let _ = node.app.event("mesh", &format!("STUN server proved reachable at {}", s));
@@ -1366,6 +1404,7 @@ pub fn status(node: &Node) -> Value {
             "proved": st.proved.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
             "peer_servers": st.peer_stun.iter().map(|(k, v)| json!({"peer": short(k), "s": v.iter().map(|a| a.to_string()).collect::<Vec<_>>()})).collect::<Vec<_>>(),
         },
+        "relay": crate::turnsvc::status(),
         "nat": {
             "kind": if st.nat.kind.is_empty() { "unknown" } else { &st.nat.kind },
             "mapped": st.nat.mapped.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
@@ -1531,7 +1570,7 @@ mod tests {
     fn stun_server_answers_one_asker_at_a_limited_rate() {
         let srv = UdpSocket::bind("127.0.0.1:0").unwrap();
         let to = srv.local_addr().unwrap();
-        std::thread::spawn(move || stun_serve(srv));
+        std::thread::spawn(move || stun_serve(Arc::new(srv)));
         let c = UdpSocket::bind("127.0.0.1:0").unwrap();
         c.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         for _ in 0..40 {

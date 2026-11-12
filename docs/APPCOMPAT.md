@@ -259,7 +259,8 @@ system notification, and rings to or from an original arcade.
 (`dist/media.js`, `dist/media-worklet.js`):
 - it opens the camera, microphone or screen and encodes VP8 pictures and Opus sound;
 - the arcade carries the pieces (`realtime.media`, up to 60 KB, split above 48 KB) over a direct link
-  between the two arcades only, never through another arcade, as the original's media;
+  between the two arcades, or, when they have none (both behind NAT), through at most two arcades on
+  the room's route whose media relay is on (as the original's media went through a node's TURN relay);
 - the other window decodes them and draws each picture where its page placed it, and plays each voice
   the page hears.
 - Ops: start, stop, screen, share, hear, volume, place, mute, frames, levels, spatial, shown. Events:

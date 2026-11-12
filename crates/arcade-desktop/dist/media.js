@@ -3,7 +3,8 @@
    The original arcade's viewer puts the camera's tracks on WebRTC links. An app window here has no
    WebRTC, so it does the same work itself: it opens the camera, microphone or screen, encodes them
    (WebCodecs: VP8 pictures, Opus sound) and hands the pieces to its arcade (realtime.media), which
-   carries them to the arcade of each player they are shared with, over a direct link only. The
+   carries them to the arcade of each player they are shared with: over a direct link between the
+   two arcades, or through an arcade both are linked to when they have none (behind NAT). The
    other window decodes them and draws each picture where its page placed it, in a layer over the
    page, and plays each voice its page chose to hear. The page itself never touches a camera or a
    voice: it only says what goes to whom (share), whose voice it hears (hear, volume) and where a
@@ -91,12 +92,13 @@
     }
     const say = (s, ev) => { ev.room = s.name; push(ev); };
     const peerOf = (s, id) => (s.fast && s.fast.peers[id]) || null;
-    // Media goes over a direct link between the two arcades only (or stays on this one).
+    // Media goes to a player the arcades' fast lane reaches: over a direct link between the two
+    // arcades, through a relaying arcade when they have none (routes: "relay"), or on this one.
     function direct(s, id) {
       const peer = peerOf(s, id);
       if (!peer || peer.state !== "direct") return false;
       const route = s.fast.routes && s.fast.routes[id];
-      return route === "direct" || (!route && peer.p.node && s.me && peer.p.node === s.me.node);
+      return route === "direct" || route === "relay" || (!route && peer.p.node && s.me && peer.p.node === s.me.node);
     }
 
     // ---------------- sending ----------------
@@ -109,7 +111,7 @@
     }
     function b64(u8) { let t = ""; for (let i = 0; i < u8.length; i += 0x8000) t += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(t); }
     function unb64(text) { const t = atob(text), u = new Uint8Array(t.length); for (let i = 0; i < t.length; i++) u[i] = t.charCodeAt(i); return u; }
-    // Whom a kind goes to now: the players it is shared with, over a direct link.
+    // Whom a kind goes to now: the players it is shared with whom the fast lane reaches.
     function targets(s, kind) {
       const md = s.media, want = kind === KIND.mic || kind === KIND.snd ? "audio" : "video";
       return Object.keys(md.share).filter((id) => md.share[id][want] && direct(s, id));
