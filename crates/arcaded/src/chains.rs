@@ -260,10 +260,28 @@ fn save_queue(node: &Node, q: &[Value]) {
     let _ = node.app.store.write(|w| w.put(arcade_app::META, QUEUE, &serde_json::to_vec(q).unwrap()));
 }
 
-/// The installed chain still being synced or taken in (not caught up yet), if any.
+/// The chain still being synced or taken in (not caught up yet), if any: the home chain first
+/// (Martin 2026-11-12: while Pepecoin testnet syncs, other installs wait in the queue as they do
+/// behind any other chain), then the installed ones.
 pub fn installing_now(node: &Node) -> Option<&'static ChainParams> {
+    if home_syncing(node) {
+        return Some(node.params);
+    }
     let runs: Vec<Arc<ChainRun>> = node.extra.lock().unwrap().values().cloned().collect();
     runs.into_iter().filter(|r| !r.paused.load(Ordering::Relaxed)).map(|r| r.params).find(|p| !crate::borrow::installed_ready(node, p))
+}
+
+/// Whether the home chain isn't caught up: no block yet, more than 10 behind the best height
+/// anyone tells us (headers, arcades on the mesh, lenders), or its address rows still building.
+/// The same test as an installed chain's (borrow::installed_ready).
+fn home_syncing(node: &Node) -> bool {
+    let tip = node.chain.tip(node.params.chain_no).ok().flatten().map(|t| t.height).unwrap_or(0);
+    let (lag, addresses_ready) = crate::borrow::home_lag(node);
+    home_busy(tip, lag, addresses_ready)
+}
+
+fn home_busy(tip: u32, lag: u32, addresses_ready: bool) -> bool {
+    tip == 0 || lag > 10 || !addresses_ready
 }
 
 /// Position (1 = next) of a chain waiting to be installed.
@@ -1342,6 +1360,20 @@ mod one_follower_tests {
         let c = 60_002;
         let _first = take_chain(c, &AtomicBool::new(false), || {}).unwrap();
         assert!(take_chain(c, &AtomicBool::new(true), || {}).is_none());
+    }
+}
+
+#[cfg(test)]
+mod home_queue_tests {
+    use super::home_busy;
+
+    #[test]
+    fn installs_wait_while_the_home_chain_syncs() {
+        assert!(home_busy(0, 0, true), "no home block yet");
+        assert!(home_busy(1_000, 50_000, true), "far behind");
+        assert!(home_busy(1_000, 11, true), "just past the margin");
+        assert!(home_busy(1_000, 0, false), "address rows still building");
+        assert!(!home_busy(1_000, 10, true), "caught up: installs go ahead");
     }
 }
 
