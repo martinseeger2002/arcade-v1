@@ -30,6 +30,12 @@ fn handle(node: Arc<Node>, s: UnixStream) {
     let mut w = s.try_clone().unwrap();
     for line in BufReader::new(s).lines().map_while(Result::ok) {
         let reply = match serde_json::from_str::<Value>(&line) {
+            // Stop cleanly (write the coin caches, then exit), as SIGTERM does. Socket only,
+            // never over HTTP: `arcade stop`, the way to stop a background arcaded on Windows.
+            Ok(req) if req["cmd"] == "service.stop" => {
+                crate::STOP_ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!({"ok": true, "result": "stopping: writing the coin caches, then exiting"})
+            }
             Ok(req) => match dispatch(&node, &req) {
                 Ok(v) => json!({"ok": true, "result": v}),
                 Err(e) => json!({"ok": false, "error": e}),

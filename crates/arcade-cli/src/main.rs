@@ -9,6 +9,7 @@ const HELP: &str = "arcade — Arcade V1.0
   arcade setup                   first-run setup (mesh, chain, wallet, handle)
   arcade status                  sync, tag index, mesh links
   arcade peers                   mesh links
+  arcade stop                    stop arcaded cleanly (writes its caches first)
   arcade wallet create           new wallet; shows the 12-word recovery phrase ONCE
   arcade wallet restore          restore from a recovery phrase (typed at a prompt, not shown)
   arcade wallet phrase           show the recovery phrase
@@ -235,13 +236,43 @@ fn restore_phrase(words: &[&str], typed: impl FnOnce() -> std::io::Result<String
     Ok(phrase)
 }
 
+#[cfg(not(windows))]
 fn stty(tty: &std::fs::File, arg: &str) -> std::io::Result<()> {
     let ok = std::process::Command::new("stty").arg(arg).stdin(tty.try_clone()?).status()?.success();
     if ok { Ok(()) } else { Err(std::io::Error::other("stty failed")) }
 }
 
+/// A line typed at the console without showing it (echo off on the console input handle);
+/// from standard input when there is no console (`arcade wallet restore < file`).
+#[cfg(windows)]
+fn read_hidden(prompt: &str) -> std::io::Result<String> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(which: u32) -> *mut std::ffi::c_void;
+        fn GetConsoleMode(h: *mut std::ffi::c_void, mode: *mut u32) -> i32;
+        fn SetConsoleMode(h: *mut std::ffi::c_void, mode: u32) -> i32;
+    }
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+    const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    let mut line = String::new();
+    let h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    let mut mode = 0u32;
+    if unsafe { GetConsoleMode(h, &mut mode) } == 0 {
+        std::io::stdin().read_line(&mut line)?;
+        return Ok(line.trim().to_string());
+    }
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    unsafe { SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT) };
+    let got = std::io::stdin().read_line(&mut line);
+    unsafe { SetConsoleMode(h, mode) };
+    eprintln!();
+    got.map(|_| line.trim().to_string())
+}
+
 /// A line typed at the terminal without showing it; from standard input when there is no
 /// terminal (`arcade wallet restore < file`).
+#[cfg(not(windows))]
 fn read_hidden(prompt: &str) -> std::io::Result<String> {
     let mut line = String::new();
     let Ok(mut tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") else {
@@ -276,6 +307,7 @@ fn main() {
     let req = match a.as_slice() {
         ["status"] => json!({"cmd": "status"}),
         ["peers"] => json!({"cmd": "peers"}),
+        ["stop"] => json!({"cmd": "service.stop"}),
         ["wallet", "create"] => json!({"cmd": "wallet.create"}),
         ["wallet", "restore", words @ ..] => match restore_phrase(words, || read_hidden("Your recovery phrase (not shown as you type): ")) {
             Ok(phrase) => json!({"cmd": "wallet.create", "phrase": phrase}),

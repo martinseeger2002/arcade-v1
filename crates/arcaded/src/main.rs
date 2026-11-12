@@ -136,9 +136,9 @@ fn tame_malloc() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn tame_malloc() {}
 
-/// Set by SIGTERM / SIGINT (Linux), a console control event (Windows), or the
-/// `arcaded.stop` file. The "stop" thread flushes and exits.
-static STOP_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set by SIGTERM / SIGINT (Linux), a console control event (Windows), the
+/// `arcaded.stop` file, or `service.stop` on the API socket (`arcade stop`). The "stop" thread flushes and exits.
+pub(crate) static STOP_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(unix)]
 extern "C" fn on_stop_signal(_: libc::c_int) {
@@ -156,6 +156,14 @@ unsafe extern "system" fn on_console_ctrl(ctrl: u32) -> i32 {
         0 | 1 | 2 | 5 | 6 => {
             if STOP_ASKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 unsafe { libc::_exit(1) };
+            }
+            // CLOSE / LOGOFF / SHUTDOWN end the process as soon as this returns. Hold it here
+            // while the stop thread writes the caches and exits (Windows allows ~5 s for a
+            // console close, ~20 s at shutdown).
+            if ctrl >= 2 {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
             }
             1
         }
