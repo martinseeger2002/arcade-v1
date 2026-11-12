@@ -1105,10 +1105,44 @@ fn walk_indexes(node: &Node, run: &ChainRun, max_batches: usize) -> bool {
     true
 }
 
+/// Chains a follow thread is storing. A restart (an index added, say) sets the old run's stop
+/// and launches a new thread at once, while the old one can be minutes into a round.
+static FOLLOWING: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+
+struct Following(u16);
+
+impl Drop for Following {
+    fn drop(&mut self) {
+        FOLLOWING.lock().unwrap_or_else(|e| e.into_inner()).retain(|c| *c != self.0);
+    }
+}
+
+/// Wait until no other thread stores chain `c`, then take it (given back when dropped).
+/// None if `stop` is set while waiting.
+fn take_chain(c: u16, stop: &AtomicBool, mut waiting: impl FnMut()) -> Option<Following> {
+    loop {
+        {
+            let mut v = FOLLOWING.lock().unwrap_or_else(|e| e.into_inner());
+            if !v.contains(&c) {
+                v.push(c);
+                return Some(Following(c));
+            }
+        }
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        waiting();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
     let p = run.params;
     let syncer = Syncer::new(&node.chain, p);
     let set = |s: String| *run.state.lock().unwrap() = s;
+    // One thread stores a chain at a time: a restart launches this one while the old thread
+    // may still be inside a round, and two writers undo each other's batches.
+    let Some(_one) = take_chain(p.chain_no, &run.stop, || set("waiting for the previous sync of this chain to stop".into())) else { return };
     mesh_first(&node, &run, &syncer);
     let mut last_mesh = std::time::Instant::now();
     // The first balancing pass waits until the mesh has told us who holds what.
@@ -1244,6 +1278,35 @@ fn stage_rate(chain: &str, stage: &str, at: u64) -> Option<f64> {
     let (t0, h0) = *q.front()?;
     let secs = now.duration_since(t0).as_secs_f64();
     (secs >= 5.0).then(|| at.saturating_sub(h0) as f64 / secs)
+}
+
+#[cfg(test)]
+mod one_follower_tests {
+    use super::*;
+
+    #[test]
+    fn a_second_thread_waits_for_the_first_to_give_the_chain_back() {
+        let c = 60_001;
+        let first = take_chain(c, &AtomicBool::new(false), || {}).unwrap();
+        let got = Arc::new(AtomicBool::new(false));
+        let g = got.clone();
+        let t = std::thread::spawn(move || {
+            let _second = take_chain(c, &AtomicBool::new(false), || {}).unwrap();
+            g.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(!got.load(Ordering::SeqCst), "two threads stored one chain");
+        drop(first);
+        t.join().unwrap();
+        assert!(got.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_stopped_run_gives_up_waiting() {
+        let c = 60_002;
+        let _first = take_chain(c, &AtomicBool::new(false), || {}).unwrap();
+        assert!(take_chain(c, &AtomicBool::new(true), || {}).is_none());
+    }
 }
 
 #[cfg(test)]

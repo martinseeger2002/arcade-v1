@@ -126,6 +126,9 @@ pub struct Prefetched<'p> {
     /// (because a block batch needed it) must still give its headers, or nothing after links.
     heads: VecDeque<HeaderEntry>,
     last_diag: Instant,
+    /// The chain's stop: a wait for blocks ends with it (the chain is being restarted, e.g.
+    /// for an index added, and a new thread takes over).
+    stop: &'p AtomicBool,
 }
 
 impl Prefetched<'_> {
@@ -144,6 +147,9 @@ impl Prefetched<'_> {
         let deadline = Instant::now() + wait;
         let mut st = self.pool.s.lock().unwrap();
         loop {
+            if self.stop.load(Ordering::Relaxed) {
+                return Err("the chain is stopping".into());
+            }
             let want = st.want;
             if let Some((raws, _src)) = st.ready.remove(&want) {
                 st.ready_bytes -= raws.iter().map(|r| r.len()).sum::<usize>();
@@ -498,7 +504,7 @@ pub fn run(node: &Node, p: &'static ChainParams, syncer: &Syncer, top: u32, on_p
             }
         });
         // The ordered side, on this thread.
-        let mut pre = Prefetched { pool: &pool, cache: HashMap::new(), p, heads: VecDeque::new(), last_diag: Instant::now() };
+        let mut pre = Prefetched { pool: &pool, cache: HashMap::new(), p, heads: VecDeque::new(), last_diag: Instant::now(), stop };
         let mut last_note = Instant::now();
         let mut stalls = 0;
         let (mut waited, mut stored) = (Duration::ZERO, Duration::ZERO);
