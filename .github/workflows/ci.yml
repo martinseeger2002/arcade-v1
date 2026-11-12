@@ -32,7 +32,12 @@ jobs:
 
       - name: Test
         shell: pwsh
-        run: cargo test --locked --workspace --exclude arcade-desktop -- --test-threads=2
+        run: |
+          # chiavdf (the ARCADE chain's proof of time) links MPIR's DLLs: on the PATH for the tests.
+          cargo fetch --locked
+          $mpir = Get-ChildItem "$env:USERPROFILE\.cargo\registry\src" -Recurse -Directory -Filter mpir_gc_x64 | Select-Object -First 1
+          if ($mpir) { $env:PATH = "$($mpir.FullName);$env:PATH" }
+          cargo test --locked --workspace --exclude arcade-desktop -- --test-threads=2
 
       - name: Release build
         shell: pwsh

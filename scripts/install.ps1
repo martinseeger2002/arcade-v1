@@ -276,10 +276,12 @@ function Build-Source([string]$Root) {
         Pop-Location
     }
     $script:NoDesktop = -not $desktop
-    if ($script:CargoTarget.Count -gt 0) {
-        return (Join-Path $Root 'target\x86_64-pc-windows-msvc\release')
-    }
-    return (Join-Path $Root 'target\release')
+    $out = if ($script:CargoTarget.Count -gt 0) { Join-Path $Root 'target\x86_64-pc-windows-msvc\release' } else { Join-Path $Root 'target\release' }
+    # MPIR's DLLs (chiavdf, the ARCADE chain's proof of time, links them): beside the programs.
+    $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+    $mpir = Get-ChildItem (Join-Path $cargoHome 'registry\src') -Recurse -Directory -Filter mpir_gc_x64 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($mpir) { Copy-Item (Join-Path $mpir.FullName 'mpir*.dll') $out -Force }
+    return $out
 }
 
 function Try-Download {
@@ -365,6 +367,10 @@ function Install-Programs([string]$FromDir, [string]$IconPng, [string]$IconIco) 
     New-Item -ItemType Directory -Force -Path $bin, $DataDir | Out-Null
     Copy-Item -LiteralPath (Join-Path $FromDir 'arcaded.exe') -Destination (Join-Path $bin 'arcaded.exe') -Force
     Copy-Item -LiteralPath (Join-Path $FromDir 'arcade.exe') -Destination (Join-Path $bin 'arcade.exe') -Force
+    # MPIR's DLLs (chiavdf links them) and its license go beside the programs.
+    Get-ChildItem -LiteralPath $FromDir -Filter 'mpir*.dll' -ErrorAction SilentlyContinue | Copy-Item -Destination $bin -Force
+    $mpirLicense = Join-Path $FromDir 'MPIR-LICENSE.txt'
+    if (Test-Path -LiteralPath $mpirLicense) { Copy-Item -LiteralPath $mpirLicense -Destination $bin -Force }
     $haveDesktop = $false
     $deskSrc = Join-Path $FromDir 'arcade-desktop.exe'
     if (-not $NoDesktop -and (Test-Path -LiteralPath $deskSrc)) {
