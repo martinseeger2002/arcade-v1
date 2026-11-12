@@ -32,6 +32,11 @@ const MAX_PART: usize = 8 << 20;
 const MAX_RAW: usize = 16 << 20;
 const ASK_EVERY: Duration = Duration::from_secs(600);
 const HI_EVERY: Duration = Duration::from_secs(600);
+/// How long a checked snapshot that is waiting for more arcades to back it holds back the
+/// chain's own ord walk. After that the walk goes on (the snapshot is still taken in if enough
+/// arcades back it later): with only the snapshot's holder in reach, no chunk can ever be
+/// backed, and the index must not wait for that forever.
+const WAIT_HOLD: u64 = 600;
 const INDEXER: &str = "ord.v1";
 
 struct Req {
@@ -74,6 +79,8 @@ struct Job {
     /// The moves question in flight: (id, walker, sent, chunks); answers waiting to be compared.
     ask: Option<(u64, String, Instant, Vec<u32>)>,
     answers: Vec<(String, Vec<u32>, Value)>,
+    /// When the check first found every reachable walker asked and some chunks still unbacked.
+    waiting_since: Option<u64>,
 }
 
 #[derive(Default)]
@@ -527,10 +534,13 @@ fn new_job(node: &Node, p: &ChainParams, id: String, h: u64, auto: bool, from: O
         asked_done: BTreeSet::new(),
         ask: None,
         answers: Vec::new(),
+        waiting_since: None,
     }
 }
 
 pub fn run(node: Arc<Node>) {
+    clear_stale_dirs(&node.home.join("import"));
+    st().refused.extend(cancelled_ids(&node.home, "ord"));
     loop {
         std::thread::sleep(Duration::from_secs(2));
         let nets = ord_chains(&node);
@@ -725,7 +735,9 @@ fn step(node: &Arc<Node>, p: &'static ChainParams) {
                 let n2 = node.clone();
                 std::thread::Builder::new().name("dx convert".into()).spawn(move || convert_job(n2, p, dir, m, check)).unwrap();
             } else {
-                j.detail = format!("waiting for more arcades: {confirmed} of {total} chunks backed by {need} or more other established arcades ({one} by at least one)");
+                let since = *j.waiting_since.get_or_insert(now());
+                let walk = if now() >= since + WAIT_HOLD { "; the ord index walks on by itself meanwhile" } else { "" };
+                j.detail = format!("waiting for more arcades: {confirmed} of {total} chunks backed by {need} or more other established arcades ({one} by at least one){walk}");
                 if j.started + 3600 < now() {
                     j.asked_done.clear(); // ask again now and then: words and walkers come and go
                 }
@@ -835,8 +847,56 @@ fn convert_job(node: Arc<Node>, p: &'static ChainParams, dir: PathBuf, m: Value,
 pub fn holds(key: &str) -> bool {
     let Some(p) = by_key(key) else { return false };
     st().jobs.get(p.net).is_some_and(|j| {
-        matches!(j.phase.as_str(), "assembling" | "checking" | "converting") || (matches!(j.phase.as_str(), "manifest" | "copy") && now() < j.started + 1800)
+        walk_held(&j.phase, j.started, j.waiting_since, now(), crate::watchdog::released(key, INDEXER, &format!("{}@{}", j.id, j.started)))
     })
+}
+
+/// [`phase_holds`], unless the watchdog let the walk go on (`released`) while the copy is only
+/// fetched or checked; never while it is assembled or taken in.
+fn walk_held(phase: &str, started: u64, waiting_since: Option<u64>, now: u64, released: bool) -> bool {
+    phase_holds(phase, started, waiting_since, now) && !(released && soft_phase(phase))
+}
+
+/// Phases in which the copy is only fetched or checked: the ord tables aren't touched yet, so
+/// the chain's own walk may go on meanwhile (as it already does after WAIT_HOLD or 30 min).
+fn soft_phase(phase: &str) -> bool {
+    matches!(phase, "manifest" | "copy" | "checking")
+}
+
+/// For the watchdog (crate::watchdog): the copy that holds the ord walk and can let it go
+/// (fetched or checked only), as (token, what it is doing).
+pub fn releasable(key: &str) -> Option<(String, String)> {
+    let p = by_key(key)?;
+    let s = st();
+    let j = s.jobs.get(p.net)?;
+    (soft_phase(&j.phase) && phase_holds(&j.phase, j.started, j.waiting_since, now()))
+        .then(|| (format!("{}@{}", j.id, j.started), format!("ord snapshot {} {}: {}", short(&j.id), j.phase, j.detail)))
+}
+
+/// Whether a job in `phase` holds back the chain's own ord walk at `now`: while it is fetched
+/// (at most 30 minutes from its start), put together, taken in, or checked; but a check left
+/// waiting for arcades that may never come (WAIT_HOLD) no longer does.
+fn phase_holds(phase: &str, started: u64, waiting_since: Option<u64>, now: u64) -> bool {
+    match phase {
+        "assembling" | "converting" => true,
+        "checking" => waiting_since.is_none_or(|t| now < t + WAIT_HOLD),
+        "manifest" | "copy" => now < started + 1800,
+        _ => false,
+    }
+}
+
+/// Snapshot folders left in `import` by an earlier run: the jobs live in memory only, so
+/// nothing goes on with them, and each holds a copy of several GB. (Ledger copies, `-ledger-`,
+/// are crate::lxfetch's.)
+fn clear_stale_dirs(import: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(import) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let ours = name.split_once("-ord-").is_some_and(|(net, id)| by_net(net).is_some() && !id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit()));
+        if ours && e.path().is_dir() {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 // ---------------- operator ----------------
@@ -851,9 +911,51 @@ pub fn start(node: &Node, key: &str, from: Option<String>) -> Result<Value, Stri
     if s.jobs.get(p.net).is_some_and(|j| !matches!(j.phase.as_str(), "done" | "refused" | "failed")) {
         return Err("an ord snapshot is already being fetched for this chain".into());
     }
+    // Asked for by the operator: snapshots cancelled before may be fetched again.
+    for id in cancelled_ids(&node.home, "ord") {
+        s.refused.remove(&id);
+    }
+    clear_cancelled(&node.home, "ord");
     let (id, h, peers) = best_offer(&s, p.net, max_h, from.as_deref()).ok_or("no arcade offers a whole ord snapshot at or below this arcade's tip")?;
     s.jobs.insert(p.net.to_string(), new_job(node, p, id.clone(), h, false, from));
     Ok(json!({"started": true, "id": id, "height": h, "holders": peers}))
+}
+
+// ---------------- cancelled copies ----------------
+//
+// A copy the operator cancelled is not fetched again by itself, in this run or after a restart
+// (one line "<index> <id>" per copy in import/cancelled-copies); starting a fetch by hand
+// clears that index's list. Shared with crate::lxfetch ("ledger").
+
+fn cancelled_file(home: &std::path::Path) -> PathBuf {
+    home.join("import").join("cancelled-copies")
+}
+
+/// The copy ids of `index` the operator cancelled.
+pub(crate) fn cancelled_ids(home: &std::path::Path, index: &str) -> Vec<String> {
+    std::fs::read_to_string(cancelled_file(home))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(ix, id)| *ix == index && !id.is_empty())
+        .map(|(_, id)| id.trim().to_string())
+        .collect()
+}
+
+pub(crate) fn add_cancelled(home: &std::path::Path, index: &str, id: &str) {
+    let mut lines: Vec<String> = std::fs::read_to_string(cancelled_file(home)).unwrap_or_default().lines().map(String::from).collect();
+    let line = format!("{index} {id}");
+    if !lines.contains(&line) {
+        lines.push(line);
+    }
+    let _ = std::fs::create_dir_all(home.join("import"));
+    let _ = std::fs::write(cancelled_file(home), lines.join("\n") + "\n");
+}
+
+pub(crate) fn clear_cancelled(home: &std::path::Path, index: &str) {
+    let Ok(text) = std::fs::read_to_string(cancelled_file(home)) else { return };
+    let keep: Vec<&str> = text.lines().filter(|l| l.split_once(' ').is_none_or(|(ix, _)| ix != index)).collect();
+    let _ = if keep.is_empty() { std::fs::remove_file(cancelled_file(home)) } else { std::fs::write(cancelled_file(home), keep.join("\n") + "\n") };
 }
 
 pub fn cancel(node: &Node, key: &str) -> Result<Value, String> {
@@ -862,11 +964,14 @@ pub fn cancel(node: &Node, key: &str) -> Result<Value, String> {
     match s.jobs.get(p.net) {
         Some(j) if j.phase == "converting" => Err("the snapshot is being taken in; it can't be stopped now".into()),
         Some(j) => {
-            let dir = j.dir.clone();
+            let (dir, id) = (j.dir.clone(), j.id.clone());
             s.jobs.remove(p.net);
+            // Not fetched again by itself (the auto start would pick the same offer at once).
+            s.refused.insert(id.clone());
             drop(s);
+            add_cancelled(&node.home, "ord", &id);
             let _ = std::fs::remove_dir_all(dir);
-            let _ = node.app.event("chains", &format!("{}: ord snapshot fetch cancelled", p.key));
+            let _ = node.app.event("chains", &format!("{}: ord snapshot fetch cancelled; snapshot {} won't be fetched again by itself", p.key, short(&id)));
             Ok(json!({"cancelled": true}))
         }
         None => Ok(json!({"cancelled": false})),
@@ -936,6 +1041,75 @@ mod tests {
         let mut words = BTreeMap::new();
         words.insert(0, w(&[("m", "aa")]));
         assert!(check_chunks(&chunks, &words, &makers).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_check_waiting_for_arcades_stops_holding_the_walk() {
+        let t = 1_000_000;
+        // Fetching: held for 30 minutes from the start.
+        assert!(phase_holds("copy", t, None, t + 1799));
+        assert!(!phase_holds("copy", t, None, t + 1800));
+        assert!(phase_holds("assembling", t, None, t + 99_999));
+        assert!(phase_holds("converting", t, None, t + 99_999));
+        // Checking: held while the walkers are asked...
+        assert!(phase_holds("checking", t, None, t + 99_999));
+        // ...and, once they all were and chunks are still unbacked, only for WAIT_HOLD.
+        assert!(phase_holds("checking", t, Some(t + 50), t + 50 + WAIT_HOLD - 1));
+        assert!(!phase_holds("checking", t, Some(t + 50), t + 50 + WAIT_HOLD));
+        assert!(!phase_holds("refused", t, None, t));
+        assert!(!phase_holds("failed", t, None, t));
+        assert!(!phase_holds("done", t, None, t));
+        // Let go by the watchdog: fetched or checked only, the walk goes on; never while the
+        // copy is assembled or taken in (the ord tables are written then).
+        for ph in ["manifest", "copy", "checking"] {
+            assert!(walk_held(ph, t, None, t + 10, false), "{ph} holds");
+            assert!(!walk_held(ph, t, None, t + 10, true), "{ph} let go");
+        }
+        for ph in ["assembling", "converting"] {
+            assert!(walk_held(ph, t, None, t + 10, true), "{ph} always holds");
+        }
+    }
+
+    #[test]
+    fn a_cancelled_snapshot_is_not_offered_again() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path();
+        let net = arcade_chain::params::by_key("pep").map(|p| p.net).unwrap_or("main");
+        let id = hex::encode([7u8; 32]);
+        let mut s = State::default();
+        s.heard.insert(("peer".into(), net.to_string()), (now(), json!({"sn3": {"id": id, "h": 50_000, "have": "all"}})));
+        assert_eq!(best_offer(&s, net, u64::MAX, None).map(|o| o.0), Some(id.clone()), "offered before the cancel");
+        // Cancelled: remembered on disk, and refused again after a restart.
+        add_cancelled(home, "ord", &id);
+        add_cancelled(home, "ord", &id);
+        add_cancelled(home, "ledger", "abcd");
+        assert_eq!(cancelled_ids(home, "ord"), vec![id.clone()]);
+        let mut s2 = State::default();
+        s2.heard = s.heard.clone();
+        s2.refused.extend(cancelled_ids(home, "ord"));
+        assert!(best_offer(&s2, net, u64::MAX, None).is_none(), "a cancelled snapshot isn't offered");
+        // Starting by hand clears that index's list only.
+        clear_cancelled(home, "ord");
+        assert!(cancelled_ids(home, "ord").is_empty());
+        assert_eq!(cancelled_ids(home, "ledger"), vec!["abcd".to_string()]);
+        clear_cancelled(home, "ledger");
+        assert!(!cancelled_file(home).exists());
+    }
+
+    #[test]
+    fn stale_snapshot_folders_are_cleared() {
+        let d = tempfile::tempdir().unwrap();
+        let net = arcade_chain::params::by_key("pep").map(|p| p.net).unwrap_or("main");
+        let stale = d.path().join(format!("{net}-ord-cdae0b93"));
+        let ledger = d.path().join(format!("{net}-ledger-cdae0b93"));
+        let other = d.path().join("notes-ord-xyz");
+        for p in [&stale, &ledger, &other] {
+            std::fs::create_dir_all(p).unwrap();
+            std::fs::write(p.join("p000000"), b"x").unwrap();
+        }
+        clear_stale_dirs(d.path());
+        assert!(!stale.exists());
+        assert!(ledger.exists() && other.exists());
     }
 
     #[test]

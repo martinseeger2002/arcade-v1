@@ -13,6 +13,8 @@ use std::path::Path;
 
 /// Headers kept in the undo window; deeper reorgs are refused.
 pub const UNDO_DEPTH: u32 = 1000;
+/// How long one protocol-index backfill write runs before it commits (see ChainDb::backfill_for).
+pub const BACKFILL_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub const STATUS_HEADER: u8 = 0;
 pub const STATUS_MAIN: u8 = 1;
@@ -967,6 +969,15 @@ impl ChainDb {
     /// (0 = caught up). Blocks inside the undo window get the index changes appended to
     /// their undo record, so a later reorg undoes them too.
     pub fn backfill(&self, params: &ChainParams, name: &str, max: u32) -> Result<u32> {
+        self.backfill_for(params, name, max, BACKFILL_BUDGET)
+    }
+
+    /// [`backfill`](Self::backfill), but the write ends after the first block that finishes
+    /// once `budget` has passed (at least one block per call). Where blocks are heavy (an
+    /// inscription wave: thousands of inputs a block, each prevout read from disk) 500 of them
+    /// take many minutes in one write; meanwhile no other write on the chain can start (new
+    /// blocks, the address build) and the index's height and rate don't move.
+    pub fn backfill_for(&self, params: &ChainParams, name: &str, max: u32, budget: std::time::Duration) -> Result<u32> {
         let c = params.chain_no;
         let ix = self.indexers.read().unwrap().iter().find(|(ch, i)| *ch == c && i.name() == name).map(|(_, i)| i.clone())
             .ok_or_else(|| other(format!("no indexer {name}")))?;
@@ -983,8 +994,13 @@ impl ChainDb {
             return Ok(0);
         }
         let end = tip.height.min(start + max - 1);
+        let t0 = std::time::Instant::now();
         self.wstore(c)?.write(|w| {
+            let mut done = 0u32;
             for h in start..=end {
+                if done > 0 && t0.elapsed() >= budget {
+                    break;
+                }
                 let hv = w.get(HEIGHT, &k_height(c, h))?.ok_or(StoreError::Corrupt { table: HEIGHT, why: "gap" })?;
                 let b = be_u32(&hv, 32);
                 let raw = block_raw_at(w, c, b)?;
@@ -1019,8 +1035,9 @@ impl ChainDb {
                     all.extend(ops);
                     w.put(UNDO, &k_block(c, b), &undo::encode(&all))?;
                 }
+                done += 1;
             }
-            Ok(end - start + 1)
+            Ok(done)
         })
     }
 

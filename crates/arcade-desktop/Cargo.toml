@@ -15,3 +15,8 @@ tauri-build = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2.0"
+
+# Windows: the WebView2 process-failed event and DestroyWindow (versions as tauri's own).
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

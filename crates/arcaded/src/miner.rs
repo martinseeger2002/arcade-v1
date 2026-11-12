@@ -24,6 +24,31 @@ pub struct MinerState {
     pub hashes: AtomicU64,
     pub found: AtomicU64,
     pub started: std::sync::Mutex<Option<Instant>>,
+    /// Why the miner is waiting instead of mining (None: mining, or stopped).
+    pub waiting: std::sync::Mutex<Option<String>>,
+}
+
+/// Why this arcade may not mine now; None when it is at the tip. Mining needs a coin peer this arcade
+/// is synced with ("synced at N"), and no height anyone tells us of (headers, arcades on the mesh,
+/// lenders) above ours. A block found anywhere else builds on an old tip (a fork), or reaches nobody:
+/// found blocks go out to the coin peer only (Martin 2026-11-12: "it can't mine unless it is up to tip").
+pub fn not_at_tip(node: &Node) -> Option<String> {
+    let sync = node.sync_state.lock().unwrap().clone();
+    if !sync.starts_with("synced at ") {
+        return Some(format!("not synced with a coin peer ({sync})"));
+    }
+    let (lag, _) = crate::borrow::home_lag(node);
+    if lag > 0 {
+        return Some(format!("{lag} block(s) behind the best height known"));
+    }
+    None
+}
+
+/// A found block may go out only while it still extends our tip: its parent (header bytes 4..36) is
+/// the tip. One found on a tip that has since moved is stale, and sent it would only fork.
+pub fn extends_tip(node: &Node, raw: &[u8]) -> bool {
+    let tip = node.chain.tip(node.params.chain_no).ok().flatten().map(|t| t.hash);
+    raw.len() >= 80 && tip.map(|h| h.0[..] == raw[4..36]).unwrap_or(false)
 }
 
 use arcade_wallet::tx::push;
@@ -178,6 +203,19 @@ pub fn run(node: Arc<Node>) {
     let _ = node.app.event("mine", &format!("mining to {} with {threads} threads", key.address));
     let mut extranonce: u64 = arcade_app::now() << 16;
     while node.miner.running.load(Ordering::Relaxed) {
+        if let Some(why) = not_at_tip(&node) {
+            let mut w = node.miner.waiting.lock().unwrap();
+            if w.as_deref() != Some(why.as_str()) {
+                let _ = node.app.event("mine", &format!("waiting to mine: {why}"));
+                *w = Some(why);
+            }
+            drop(w);
+            std::thread::sleep(Duration::from_secs(5));
+            continue;
+        }
+        if node.miner.waiting.lock().unwrap().take().is_some() {
+            let _ = node.app.event("mine", "at the tip: mining");
+        }
         extranonce += 1;
         let t = match build(&node, &pay, extranonce) {
             Ok(t) => t,
@@ -209,7 +247,8 @@ pub fn run(node: Arc<Node>) {
                         n += 1;
                         if n % 1024 == 0 {
                             node.miner.hashes.fetch_add(1024, Ordering::Relaxed);
-                            let moved = node.chain.tip(node.params.chain_no).ok().flatten().map(|x| x.hash) != Some(tip);
+                            let moved = node.chain.tip(node.params.chain_no).ok().flatten().map(|x| x.hash) != Some(tip)
+                                || node.miner.waiting.lock().unwrap().is_some();
                             if moved || Instant::now() > deadline || !node.miner.running.load(Ordering::Relaxed) {
                                 stop.store(true, Ordering::Relaxed);
                             }
@@ -242,5 +281,46 @@ pub fn run(node: Arc<Node>) {
             }
         }
     }
+    *node.miner.waiting.lock().unwrap() = None;
     let _ = node.app.event("mine", "mining stopped");
+}
+
+#[cfg(test)]
+mod tip_tests {
+    use super::{extends_tip, not_at_tip};
+    use crate::sitesvc::tests::setup;
+
+    #[test]
+    fn mines_only_at_the_tip() {
+        let t = setup();
+        // No coin peer synced: never.
+        *t.node.sync_state.lock().unwrap() = "finding a coin peer".into();
+        assert!(not_at_tip(&t.node).unwrap().contains("not synced"));
+        *t.node.sync_state.lock().unwrap() = "no coin peer reachable; at 2 from the mesh, retrying".into();
+        assert!(not_at_tip(&t.node).is_some(), "the mesh alone is not a tip it can mine on");
+        // Synced with a coin peer, nobody higher: mine.
+        *t.node.sync_state.lock().unwrap() = "synced at 2".into();
+        assert_eq!(not_at_tip(&t.node), None);
+        // An arcade on the mesh is further on: wait.
+        let far = crate::node::MeshTip { height: 9, names_digest: None, at: 0, d: None, s: None, from: String::new() };
+        t.node.mesh_tips.lock().unwrap().insert("peer".into(), far);
+        assert!(not_at_tip(&t.node).unwrap().contains("behind"));
+        t.node.mesh_tips.lock().unwrap().clear();
+        t.node.bk_peers.lock().unwrap().insert("peer:8421".into(), 5);
+        assert!(not_at_tip(&t.node).unwrap().contains("behind"));
+        t.node.bk_peers.lock().unwrap().insert("peer:8421".into(), 2);
+        assert_eq!(not_at_tip(&t.node), None);
+    }
+
+    #[test]
+    fn a_found_block_goes_out_only_on_the_tip() {
+        let t = setup();
+        let tip = t.node.chain.tip(t.p.chain_no).unwrap().unwrap().hash;
+        let mut raw = vec![0u8; 81];
+        raw[4..36].copy_from_slice(&tip.0);
+        assert!(extends_tip(&t.node, &raw));
+        raw[4] ^= 1;
+        assert!(!extends_tip(&t.node, &raw), "an old parent: stale, dropped");
+        assert!(!extends_tip(&t.node, &raw[..40]));
+    }
 }

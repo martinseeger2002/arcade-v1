@@ -241,6 +241,7 @@ fn launch(node: &Arc<Node>, key: &str, mode: &str, mut indexes: Vec<String>, add
         source: Mutex::new(String::new()),
     });
     node.extra.lock().unwrap().insert(key.into(), run.clone());
+    crate::watchdog::spawn(node.clone(), run.clone());
     let n = node.clone();
     std::thread::Builder::new().name(format!("chain {key}")).spawn(move || follow(n, run)).unwrap();
     Ok(())
@@ -832,6 +833,14 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
             st["rate"] = json!((r * 10.0).round() / 10.0);
         }
     }
+    // The watchdog's line (waiting on X for T, or a stall and what was done) on each bar.
+    for st in stages.iter_mut() {
+        let id = if st["name"] == "Blocks" { Some("blocks".to_string()) } else { st["index"].as_str().map(str::to_string) };
+        if let Some(t) = id.and_then(|id| crate::watchdog::stage_text(key, &id)) {
+            let d = st["detail"].as_str().unwrap_or("").to_string();
+            st["detail"] = json!(if d.is_empty() { t } else { format!("{d} · {t}") });
+        }
+    }
     // The step being worked on: the first one not done.
     if let Some(cur) = stages.iter_mut().find(|s| s["pct"].as_f64().unwrap_or(0.0) < 100.0) {
         cur["current"] = json!(true);
@@ -852,7 +861,7 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
     // work meanwhile.
     let borrowed = crate::borrow::is_borrowed(p.key);
     Ok(json!({"key": key, "name": p.name, "installed": true, "home": home, "mode": mode, "indexes": indexes,
-              "state": state, "overall": overall, "stages": stages, "tip": tip, "copy": copy, "borrowed": borrowed,
+              "state": state, "overall": overall, "stages": stages, "tip": tip, "copy": copy, "borrowed": borrowed, "watch": crate::watchdog::status(key),
               "borrow_state": if borrowed { crate::borrow::state_text(p.key) } else { None }}))
 }
 
@@ -1043,18 +1052,25 @@ fn mesh_first(node: &Arc<Node>, run: &ChainRun, syncer: &Syncer) {
     }
 }
 
-/// Bring the chain's indexes up to the stored tip, 500 blocks a batch, at most `max_batches`
-/// batches per index this call (the rest on the next), so one index catching up doesn't hold
-/// back the others. Runs after each P2P sync pass and also when the coin's P2P network can't
-/// be reached (blocks then come from the arcade mesh, and the indexes must still walk them; a
-/// capped call there keeps the mesh pulls coming). False when stopped, paused or a copy is
-/// being taken in, so the caller starts over. Never touches `run.state`.
-fn walk_indexes(node: &Node, run: &ChainRun, max_batches: usize) -> bool {
+/// How long one call walks one index before going on (the rest on the next call), so the chain
+/// thread gets back to new blocks and its state, and the other indexes get their turn.
+const WALK_SLICE: Duration = Duration::from_secs(30);
+
+/// Bring the chain's indexes up to the stored tip, 500 blocks a batch (each write at most the
+/// watchdog's budget, crate::watchdog::budget), at most `max_batches` batches and WALK_SLICE
+/// per index this call (the rest on the next), so one index catching up doesn't hold back the
+/// others or the chain. Runs after each P2P sync pass and also when the coin's P2P network
+/// can't be reached (blocks then come from the arcade mesh, and the indexes must still walk
+/// them; a capped call there keeps the mesh pulls coming). None when stopped, paused or a copy
+/// is being taken in, so the caller starts over; else whether an index has more to walk now.
+/// Never touches `run.state`.
+fn walk_indexes(node: &Node, run: &ChainRun, max_batches: usize) -> Option<bool> {
     let p = run.params;
     // Far behind, the chain comes in first; the indexes walk it once it has caught up.
     if node.far_behind(p) {
-        return true;
+        return Some(false);
     }
+    let mut left = false;
     // One note per index, changed only for an index walked this call; logged when it changes.
     let note = |name: &str, why: Option<String>| {
         let mut notes = run.index_notes.lock().unwrap();
@@ -1079,16 +1095,23 @@ fn walk_indexes(node: &Node, run: &ChainRun, max_batches: usize) -> bool {
             continue;
         }
         let mut problem = None;
+        let t0 = std::time::Instant::now();
+        crate::watchdog::busy(p.key, Some(name));
         for _ in 0..max_batches {
             if run.stop.load(Ordering::Relaxed) || run.paused.load(Ordering::Relaxed) || crate::coreboot::held(p.key) {
-                return false;
+                crate::watchdog::busy(p.key, None);
+                return None;
+            }
+            if t0.elapsed() >= WALK_SLICE {
+                left = true;
+                break;
             }
             if run.mode == "shared" {
                 if let Err(e) = crate::shares::prepare_backfill(node, p, name, 500) {
                     problem = Some(format!("waiting for blocks held by other arcades: {e}"));
                 }
             }
-            let more = match node.chain.backfill(p, name, 500) {
+            let more = match node.chain.backfill_for(p, name, 500, crate::watchdog::budget(p.key)) {
                 Ok(n) => n > 0,
                 Err(e) => {
                     problem = Some(e.to_string());
@@ -1102,7 +1125,8 @@ fn walk_indexes(node: &Node, run: &ChainRun, max_batches: usize) -> bool {
         }
         note(name, problem);
     }
-    true
+    crate::watchdog::busy(p.key, None);
+    Some(left)
 }
 
 /// Chains a follow thread is storing. A restart (an index added, say) sets the old run's stop
@@ -1191,6 +1215,12 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
             if run.stop.load(Ordering::Relaxed) || run.paused.load(Ordering::Relaxed) || crate::coreboot::held(p.key) {
                 continue 'outer;
             }
+            // The watchdog saw no new blocks from this peer for a stall period: another one.
+            if crate::watchdog::take_redial(p.key) {
+                crate::peerbook::fail(&node, p.net, &peer.addr.to_string());
+                set(format!("dialing another {} peer (no new blocks from {})", p.name, peer.addr));
+                continue 'outer;
+            }
             let h = match syncer.sync_headers_once(&mut peer) {
                 Ok(n) => n,
                 Err(e) => {
@@ -1213,9 +1243,9 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
                     continue 'outer;
                 }
             };
-            if !walk_indexes(&node, &run, usize::MAX) {
+            let Some(more) = walk_indexes(&node, &run, usize::MAX) else {
                 continue 'outer;
-            }
+            };
             // An arcade far ahead on the mesh (its offer can arrive minutes after the start's
             // short wait, by way of other arcades): back to the outer loop, which takes the mesh
             // (every source at once) first. Without this, a working P2P peer kept a far-behind
@@ -1235,8 +1265,14 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
             if b > 0 && tip >= run.peer_tip.load(Ordering::Relaxed) {
                 crate::v1copy::checkpoint(&node, p, tip, crate::v1copy::families_of(&run.mode, &run.indexes));
             }
-            set(if h == 0 && b == 0 { format!("synced at {tip}") } else { format!("syncing {tip}") });
-            if h == 0 && b == 0 {
+            set(if more {
+                format!("following at {tip} · indexes catching up")
+            } else if h == 0 && b == 0 {
+                format!("synced at {tip}")
+            } else {
+                format!("syncing {tip}")
+            });
+            if h == 0 && b == 0 && !more {
                 std::thread::sleep(Duration::from_secs(15));
             }
         }
@@ -1326,4 +1362,64 @@ mod far_ahead_tests {
         assert!(ahead_by(&[offer(10), offer(2_500_000)], 2_490_000, 1000));
         assert!(!ahead_by(&[], 2_490_000, 0));
     }
+}
+
+/// What the watchdog (crate::watchdog) sees on a followed chain: each stage's progress marker,
+/// whether it should be moving, and what it waits on.
+pub(crate) fn watch_obs(node: &Node, run: &ChainRun) -> Vec<crate::watchdog::Obs> {
+    use crate::watchdog::Obs;
+    let p = run.params;
+    let c = p.chain_no;
+    let held = run.paused.load(Ordering::Relaxed) || run.stop.load(Ordering::Relaxed) || crate::coreboot::held(p.key);
+    let tip = node.chain.tip(c).ok().flatten().map(|t| t.height as u64).unwrap_or(0);
+    let best = node.chain.best_header(c).ok().flatten().and_then(|h| node.chain.header(c, &h).ok().flatten()).map(|r| r.height as u64).unwrap_or(0);
+    let offered = node.offers_for(p.key).iter().map(|o| o.3).max().unwrap_or(0);
+    let top = (run.peer_tip.load(Ordering::Relaxed) as u64).max(best).max(offered);
+    let state = run.state.lock().unwrap().clone();
+    let busy = crate::watchdog::busy_now(p.key).map(|b| b.0);
+    let mut v = Vec::new();
+    let blocks_wait = if ["no ", "headers:", "blocks:", "genesis:"].iter().any(|s| state.starts_with(s)) {
+        Some(format!("peers ({state})"))
+    } else {
+        busy.as_ref().map(|b| format!("the {b} index walk (the chain thread walks the indexes between block fetches)"))
+    };
+    v.push(Obs { stage: "blocks".into(), at: tip, working: !held && top > tip, waiting_on: blocks_wait });
+    let far = node.far_behind(p);
+    let running = node.chain.indexers_for(c);
+    let txs_pending = node.chain.txs_pending(c).unwrap_or(false);
+    let notes = run.index_notes.lock().unwrap().clone();
+    for ix in &run.indexes {
+        let name = indexer_name(ix);
+        if name.is_empty() || is_rider(ix) || ix == "collections" {
+            continue;
+        }
+        let at = node.chain.indexed_to(c, name).ok().flatten().map(|h| h as u64).unwrap_or(0);
+        #[cfg(feature = "oldimport")]
+        let copy = crate::lxfetch::walk_waits(p.key, name);
+        #[cfg(not(feature = "oldimport"))]
+        let copy = false;
+        let waiting_on = if copy {
+            #[cfg(feature = "oldimport")]
+            let what = if name == "ledger.v1" { crate::lxfetch::releasable(p.key) } else { crate::dxfetch::releasable(p.key) }.map(|r| r.1).unwrap_or_else(|| "being taken in".into());
+            #[cfg(not(feature = "oldimport"))]
+            let what = String::new();
+            Some(format!("an index copy being fetched ({what})"))
+        } else if txs_pending {
+            Some("tx index rows still in the address log (txs_pending): index walks wait for the address build".into())
+        } else if let Some(n) = notes.get(name) {
+            Some(n.clone())
+        } else {
+            busy.as_ref().filter(|b| b.as_str() != name).map(|b| format!("its turn (the chain thread is walking {b})"))
+        };
+        v.push(Obs { stage: ix.clone(), at, working: !held && !far && running.contains(&name) && at < tip, waiting_on });
+    }
+    if run.indexes.iter().any(|i| i == "addresses") && node.chain.addresses_pending(c).unwrap_or(false) {
+        let note = crate::addrsvc::note(c);
+        let (at, waiting_on) = match node.chain.build_progress(c) {
+            Some(steps) => (steps.iter().map(|s| s.done).sum::<u64>() + steps.iter().filter(|s| s.state == 2).count() as u64, None),
+            None => (0, Some(if note.is_empty() { "the address service to start the build (it looks every 20 s, once the chain has caught up)".to_string() } else { note })),
+        };
+        v.push(Obs { stage: "addresses".into(), at, working: !held && !far, waiting_on });
+    }
+    v
 }

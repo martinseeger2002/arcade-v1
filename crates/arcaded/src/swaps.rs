@@ -345,13 +345,26 @@ fn leg_ok(node: &Node, leg: &Value) -> Result<&'static ChainParams, String> {
     if kind == "dd" && !matches!(p.key, "dgb" | "dgbtest") {
         return Err("DigiDollars are on dgb or dgbtest".into());
     }
-    if matches!(kind, "token20" | "token") && p.chain_no != node.params.chain_no {
-        return Err("a token leg is on this arcade's home chain (its token indexes)".into());
+    if kind == "token" && p.chain_no != node.params.chain_no {
+        return Err("an arcade-ledger token leg is on this arcade's home chain (its ledger)".into());
+    }
+    // A DRC-20 / PRC-20 leg on any chain kept here with its tokens index (2026-11-12; it was the home chain only).
+    if kind == "token20" && !token20_kept(node, p) {
+        return Err(format!("{} has no tokens index here: a DRC-20 / PRC-20 leg is read on this arcade's own index", p.name));
     }
     if leg["amount"].as_str().unwrap_or("").is_empty() {
         return Err("a leg names its amount, as a string".into());
     }
     Ok(p)
+}
+
+fn token20_kept(node: &Node, p: &ChainParams) -> bool {
+    arcade_ledger::tokens::protocol(p).is_some()
+        && if p.chain_no == node.params.chain_no {
+            crate::chains::home_indexes(node).iter().any(|i| i == "tokens")
+        } else {
+            node.extra.lock().unwrap().get(p.key).is_some_and(|r| r.indexes.iter().any(|i| i == "tokens"))
+        }
 }
 
 fn units(leg: &Value) -> u64 {

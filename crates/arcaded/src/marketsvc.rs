@@ -400,6 +400,38 @@ pub fn assets(node: &Node, q: &str) -> Vec<Value> {
     out
 }
 
+/// DRC-20 / PRC-20 / WJK-20 (and any chain's token protocol) ticks starting with `q`, on every chain kept here with its
+/// tokens index: what a swap may name as a `token20` leg (Martin 2026-11-12: "add all coins and token to the swaps").
+/// Ticks are stored alphabetically per chain, so this reads at most TOKEN20_MAX rows per chain. Nothing for an empty `q`.
+const TOKEN20_MAX: usize = 20;
+pub fn token20_assets(node: &Node, q: &str) -> Vec<Value> {
+    let q = q.trim().to_lowercase();
+    if q.is_empty() || q.len() > 32 {
+        return Vec::new();
+    }
+    let mut chains: Vec<&'static arcade_chain::params::ChainParams> = Vec::new();
+    if crate::chains::home_indexes(node).iter().any(|i| i == "tokens") {
+        chains.push(node.params);
+    }
+    for r in node.extra.lock().unwrap().values() {
+        if r.indexes.iter().any(|i| i == "tokens") {
+            chains.push(r.params);
+        }
+    }
+    let mut out = Vec::new();
+    for p in chains {
+        let Some((proto, _)) = arcade_ledger::tokens::protocol(p) else { continue };
+        let pre = arcade_store::KeyBuf::new().u16(p.chain_no).bytes(q.as_bytes()).done();
+        let rows = node.chain.store(p.chain_no).read(|r| r.scan_prefix_limit(arcade_ledger::tokens::TICK, &pre, TOKEN20_MAX)).unwrap_or_default();
+        for (k, _) in rows {
+            let tick = String::from_utf8_lossy(&k[2..]).to_string();
+            out.push(json!({"network": p.key, "kind": "token20", "asset": tick, "name": tick.to_uppercase(), "protocol": proto.to_uppercase(),
+                            "decimals": 18, "whole": true}));
+        }
+    }
+    out
+}
+
 /// What a trade of `give` for `get` costs and how it settles here (the page shows it before asking).
 fn terms_read(node: &Node, q: &Map<String, Value>) -> Result<Value, String> {
     let (give, get) = (side(node, q.get("give"))?, side(node, q.get("get"))?);
@@ -552,7 +584,12 @@ pub fn read(node: &Node, name: &str, q: &Map<String, Value>) -> Result<Value, St
             let (base, quote) = pair_of(node, q)?;
             Ok(json!(candles(node, base, quote, num(q, "span", 3600), num(q, "count", 48) as usize)))
         }
-        "assets" => Ok(json!(assets(node, q.get("q").and_then(|v| v.as_str()).unwrap_or("")))),
+        "assets" => {
+            let q = q.get("q").and_then(|v| v.as_str()).unwrap_or("");
+            let mut v = assets(node, q);
+            v.extend(token20_assets(node, q));
+            Ok(json!(v))
+        }
         "terms" => terms_read(node, q),
         "mine" => Ok(mine(node)),
         "holdings" => Ok(holdings(node)),

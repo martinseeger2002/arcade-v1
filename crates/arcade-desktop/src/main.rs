@@ -179,6 +179,20 @@ mod tests {
     }
 
     #[test]
+    fn a_dead_web_process_closes_only_that_app_window() {
+        // An app or content window whose page or app frame lost its process closes (only it).
+        assert_eq!(after_process_failed("app-00ff", Gone::Renderer), Healing::Close);
+        assert_eq!(after_process_failed("content-12ab", Gone::Renderer), Healing::Close);
+        assert_eq!(after_process_failed("app-00ff", Gone::Browser), Healing::Close);
+        // The main window reloads its page; it is never closed for this.
+        assert_eq!(after_process_failed("main", Gone::Renderer), Healing::Reload);
+        assert_eq!(after_process_failed("main", Gone::Browser), Healing::Nothing);
+        // Hung or a helper process: nothing (WebView2 recovers; the X still closes the window).
+        assert_eq!(after_process_failed("app-00ff", Gone::Other), Healing::Nothing);
+        assert_eq!(after_process_failed("main", Gone::Other), Healing::Nothing);
+    }
+
+    #[test]
     fn a_second_file_gets_a_number() {
         assert_eq!(numbered("notes.txt", 0), "notes.txt");
         assert_eq!(numbered("notes.txt", 2), "notes (2).txt");
@@ -187,8 +201,9 @@ mod tests {
     }
 }
 
-/// If a window's web process dies (it crashed, or the system ended it), reload the page instead
-/// of leaving the window blank.
+/// If a window's web process dies (it crashed, or the system or Task Manager ended it): the main
+/// window reloads its page instead of staying blank; an app or content window closes (only that
+/// window), as its process was ended.
 fn heal(w: &tauri::WebviewWindow) {
     #[cfg(target_os = "linux")]
     let _ = w.with_webview(|wv| {
@@ -197,6 +212,131 @@ fn heal(w: &tauri::WebviewWindow) {
             eprintln!("arcade-desktop: web process ended ({reason:?}); reloading the page");
             v.reload();
         });
+    });
+    // WebView2 has no reload of its own when its renderer is gone: the window stayed dead (and,
+    // on Darrell's PC, wouldn't close). Its ProcessFailed event says which process went.
+    #[cfg(windows)]
+    {
+        use tauri::Manager;
+        let (app, label) = (w.app_handle().clone(), w.label().to_string());
+        let _ = w.with_webview(move |wv| unsafe {
+            use webview2_com::Microsoft::Web::WebView2::Win32::*;
+            let Ok(core) = wv.controller().CoreWebView2() else { return };
+            let handler = webview2_com::ProcessFailedEventHandler::create(Box::new(move |sender, args| {
+                let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                if let Some(a) = &args {
+                    let _ = a.ProcessFailedKind(&mut kind);
+                }
+                match after_process_failed(&label, process_gone(kind)) {
+                    Healing::Reload => {
+                        eprintln!("arcade-desktop: {label}: web process ended ({kind:?}); reloading the page");
+                        if let Some(s) = sender {
+                            let _ = s.Reload();
+                        }
+                    }
+                    Healing::Close => {
+                        eprintln!("arcade-desktop: {label}: web process ended ({kind:?}); closing this window");
+                        // Not from inside WebView2's own callback: from another thread, as a close.
+                        let (app, label) = (app.clone(), label.clone());
+                        std::thread::spawn(move || {
+                            use tauri::Manager;
+                            if let Some(w) = app.get_webview_window(&label) {
+                                let _ = w.close();
+                            }
+                        });
+                    }
+                    Healing::Nothing => {}
+                }
+                Ok(())
+            }));
+            let mut token = 0i64;
+            let _ = core.add_ProcessFailed(&handler, &mut token);
+        });
+    }
+}
+
+/// Which of a window's processes a WebView2 ProcessFailed event reports.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gone {
+    /// The page's renderer, or an inner frame's (an app runs in a sandboxed frame).
+    Renderer,
+    /// The WebView2 browser process: every window's web content is gone.
+    Browser,
+    /// Hung, a helper (GPU, utility), or something WebView2 recovers from by itself.
+    Other,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Healing {
+    Reload,
+    Close,
+    Nothing,
+}
+
+#[cfg(windows)]
+fn process_gone(kind: webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND) -> Gone {
+    use webview2_com::Microsoft::Web::WebView2::Win32::*;
+    match kind {
+        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED | COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED => Gone::Renderer,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED => Gone::Browser,
+        _ => Gone::Other,
+    }
+}
+
+/// What a window does when one of its processes went: the main window reloads (it can't be
+/// reloaded once the browser process is gone); an app or content window closes, only it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn after_process_failed(label: &str, gone: Gone) -> Healing {
+    match (label == "main", gone) {
+        (_, Gone::Other) => Healing::Nothing,
+        (true, Gone::Renderer) => Healing::Reload,
+        (true, Gone::Browser) => Healing::Nothing,
+        (false, _) => Healing::Close,
+    }
+}
+
+/// How long a closed app or content window may take to go before it is destroyed outright.
+const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// An app or content window asked to close (its X, Task Manager's End task, a WM_CLOSE): make
+/// sure it goes, and only it. Tauri destroys a window by dropping its last handle; on Darrell's
+/// PC an app window whose web process had been ended stayed on screen through every later close
+/// (each found the handle already let go and did nothing). If it is still there after
+/// CLOSE_GRACE, destroy its native window (the same destroy Tauri's own drop asks for), which
+/// ends it the usual way (Destroyed: Tauri forgets it and drops its webview). The main window
+/// and the other windows are left alone.
+fn make_sure_it_closes(w: &tauri::Window) {
+    use tauri::Manager;
+    if w.label() == "main" {
+        return;
+    }
+    let (app, label) = (w.app_handle().clone(), w.label().to_string());
+    #[cfg(windows)]
+    let hwnd = w.hwnd().map(|h| h.0 as isize).ok();
+    std::thread::spawn(move || {
+        use tauri::Manager;
+        std::thread::sleep(CLOSE_GRACE);
+        if app.get_webview_window(&label).is_none() {
+            return; // gone the usual way
+        }
+        eprintln!("arcade-desktop: {label} didn't close within {CLOSE_GRACE:?}; destroying it");
+        #[cfg(windows)]
+        if let Some(h) = hwnd {
+            let _ = app.run_on_main_thread(move || unsafe {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, IsWindow};
+                let h = HWND(h as *mut core::ffi::c_void);
+                if IsWindow(Some(h)).as_bool() {
+                    let _ = DestroyWindow(h);
+                }
+            });
+            return;
+        }
+        if let Some(w) = app.get_webview_window(&label) {
+            let _ = w.destroy();
+        }
     });
 }
 
@@ -248,6 +388,11 @@ fn main() {
                 }
             }
             Ok(())
+        })
+        .on_window_event(|w, ev| {
+            if let tauri::WindowEvent::CloseRequested { .. } = ev {
+                make_sure_it_closes(w);
+            }
         })
         .invoke_handler(tauri::generate_handler![api, open_app, open_content, save_file])
         .run(tauri::generate_context!())

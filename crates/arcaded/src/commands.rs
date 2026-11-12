@@ -208,9 +208,9 @@ cmds! {
     "borrow.coins" Read "chain" "Your coins on a borrowed chain (from blocks read since the floor, and the lender's coin scan).";
     "borrow.send" Local "chain, to, amount, from?, send?" "Pay amount (satoshis) on a borrowed chain, signed here; send: true broadcasts to every lender, otherwise only built and shown.";
     // Mining
-    "mine.start" Admin "threads?" "Mine the home chain.";
+    "mine.start" Admin "threads?" "Mine the home chain: only at the tip (synced with a coin peer, no higher height known); until then it waits and mine.status says why.";
     "mine.stop" Admin "" "Stop mining.";
-    "mine.status" Read "" "Mining state and hash rate.";
+    "mine.status" Read "" "Mining state and hash rate; waiting: why it is not mining now (not at the tip).";
     "stake.status" Read "" "KOT staking: on or off, coins, self-check, blocks staked.";
     "stake.set" Admin "on" "Turn KOT staking on or off.";
     "stake.check" Read "" "Check our KOT stake rules against the newest blocks.";

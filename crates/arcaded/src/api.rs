@@ -360,7 +360,8 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             node.miner.hashes.store(0, Ordering::Relaxed);
             let n = node.self_arc();
             std::thread::Builder::new().name("miner".into()).spawn(move || crate::miner::run(n)).unwrap();
-            Ok(json!({"running": true, "threads": threads}))
+            // Started either way; it mines only at the tip and says why it waits (mine.status).
+            Ok(json!({"running": true, "threads": threads, "waiting": crate::miner::not_at_tip(node)}))
         }
         "mine.stop" => {
             node.miner.running.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -375,6 +376,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             let h = node.miner.hashes.load(Ordering::Relaxed);
             Ok(json!({
                 "running": node.miner.running.load(Ordering::Relaxed),
+                "waiting": node.miner.waiting.lock().unwrap().clone(),
                 "threads": node.miner.threads.load(Ordering::Relaxed),
                 "hashes": h,
                 "hash_rate": if secs > 0.0 { (h as f64 / secs).round() } else { 0.0 },
