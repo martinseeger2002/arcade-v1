@@ -8,6 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 
+/// Coin peers dialed in one round before the mesh is asked instead (a few batches of
+/// node::DIAL_AT_ONCE, each at most node::DIAL_TIMEOUT).
+const DIAL_ROUND: usize = 3 * crate::node::DIAL_AT_ONCE;
+
 fn set_state(node: &Node, s: String) {
     *node.sync_state.lock().unwrap() = s;
 }
@@ -68,9 +72,23 @@ pub fn run(node: Arc<Node>) {
         mesh_bootstrap(&node, &syncer);
     }
     loop {
-        let Some(mut peer) = Node::dial_first(p, &node.coin_candidates(p), true)
+        set_state(&node, "finding a coin peer".into());
+        let candidates = node.coin_candidates(p);
+        let Some(mut peer) = Node::dial_first(p, &candidates[..candidates.len().min(DIAL_ROUND)], true)
         else {
-            set_state(&node, "no coin peer reachable; retrying".into());
+            // No coin peer answers (an address book gone stale, a network that drops the coin's port):
+            // the blocks from V1.0 arcades on the mesh meanwhile, then the coin peers again.
+            if node.mesh_bootstrap {
+                set_state(&node, "no coin peer reachable; syncing from the mesh".into());
+                mesh_bootstrap(&node, &syncer);
+                if let Err(e) = crate::ledger::catch_up(&node) {
+                    set_state(&node, format!("tag index: {e}"));
+                }
+                let th = node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height).unwrap_or(0);
+                set_state(&node, format!("no coin peer reachable; at {th} from the mesh, retrying"));
+            } else {
+                set_state(&node, "no coin peer reachable; retrying".into());
+            }
             std::thread::sleep(Duration::from_secs(15));
             continue;
         };
