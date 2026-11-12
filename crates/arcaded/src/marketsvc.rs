@@ -612,6 +612,11 @@ pub fn route(node: &Node, path: &str, q: &Map<String, Value>) -> Option<(u16, St
             Ok(v) => (200, json!({"ok": true, "result": v}).to_string()),
             Err(e) => (400, json!({"ok": false, "error": e}).to_string()),
         }),
+        // The ord marketplace (ordmarket.rs): collections, pieces, and the book's ord asks and bids.
+        ["ords", rest @ ..] => Some(match crate::ordmarket::read(node, rest, q) {
+            Ok(v) => (200, json!({"ok": true, "result": v}).to_string()),
+            Err(e) => (400, json!({"ok": false, "error": e}).to_string()),
+        }),
         _ => None,
     }
 }

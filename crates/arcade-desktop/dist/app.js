@@ -385,6 +385,8 @@ function drawCard(ch) {
     if (ch.key === HOME.key) for (const t of v.ledger_tokens || []) if (Number(t.units) > 0) assets.push([`lt:${t.propertyid}`, `${t.name || "Arcade token #" + t.propertyid} (arcade token)`]);
     if (w.index === 0) for (const t of v.tokens || []) if (t.overall !== "0") assets.push([`t20:${t.tick}`, `${t.tick} (${ch.key.startsWith("doge") ? "DRC-20" : "PRC-20"})`]);
   }
+  // An inscription picked with its Send button (pickOrd): sent on its own.
+  if (W.ordPick && W.ordPick.chain === ch.key && v && w.own && w.index === 0) assets.push([`ord:${W.ordPick.id}`, `Inscription #${num(W.ordPick.n)}`]);
   W.tokens = v || {};
   const was = $("w-asset").value;
   const asig = JSON.stringify(assets);
@@ -404,8 +406,21 @@ function drawCard(ch) {
     ddOn && !W.dd.whole ? h("p", { class: "note" }, "DigiByte is borrowed here, so DigiDollar coins received before this arcade began following it aren't seen. Installing DigiByte finds them all.") : null].filter(Boolean));
 }
 
+/** An inscription's Send: the Send panel with it picked; the amount is the inscription itself. */
+async function pickOrd(i) {
+  W.ordPick = { chain: picked().key, id: i.id, n: i.n };
+  W.assetSig = "";
+  await refreshWallet().catch(() => {});
+  $("w-asset").value = `ord:${i.id}`;
+  assetChanged();
+  if ($("w-send-panel").hidden) showPanel("w-send-panel");
+  $("w-to").focus();
+}
+
 function assetChanged() {
   const a = $("w-asset").value, dd = a === "dd";
+  // An inscription goes whole: no amount.
+  $("w-amt").hidden = $("w-amt-unit").hidden = a.startsWith("ord:");
   const lt = a.startsWith("lt:") && (W.tokens.ledger_tokens || []).find((t) => `lt:${t.propertyid}` === a);
   $("w-amt-unit").textContent = dd ? "USD" : a.startsWith("t20:") ? a.slice(4) : lt ? (lt.name || "units") : TICKERS[picked().key] || "";
   $("w-to").placeholder = dd ? (picked().key === "dgbtest" ? "TD... address" : "DD... address") : `${picked().name} address`;
@@ -460,7 +475,10 @@ function drawPane(ch) {
         if (c.kind === "image") t.append(h("img", { src: c.data, alt: `inscription ${i.n}`, loading: "lazy" }));
         else if (c.kind === "text") t.append(h("pre", {}, c.text.slice(0, 400)));
         else t.append(h("div", { class: "x-ph" }, c.kind === "html" ? "HTML" : c.kind === "missing" ? "content not stored" : (c.type || "binary")));
-        return h("div", { class: "x-ins", onclick: () => openExplorer("inscription", i.id) }, t, h("div", { class: "cap" }, h("b", {}, `#${num(i.n)}`)));
+        // Send (2026-11-12, ord.send): from this wallet's own address 0, the coin whole to the recipient.
+        const sendable = w && w.own && w.index === 0;
+        const send = sendable ? h("button", { class: "small", onclick: (e) => { e.stopPropagation(); pickOrd(i); } }, "Send") : "";
+        return h("div", { class: "x-ins", onclick: () => openExplorer("inscription", i.id) }, t, h("div", { class: "cap" }, h("b", {}, `#${num(i.n)}`), " ", send));
       })));
   }
 }
@@ -630,6 +648,18 @@ $("w-review").addEventListener("click", async () => {
     return;
   }
   const asset = $("w-asset").value;
+  if (asset.startsWith("ord:")) {
+    const inscription = asset.slice(4);
+    try {
+      const r = await api("ord.send", { chain: ch.key, inscription, to, send: false });
+      pendingSend = { cmd: "ord.send", args: { chain: ch.key, inscription, to } };
+      $("w-confirm-text").replaceChildren(
+        h("div", {}, `Send inscription ${W.ordPick ? "#" + num(W.ordPick.n) : r.inscription} to ${r.to}`),
+        h("div", { class: "s" }, `its coin (${coins(r.value, ch.key)}) goes with it · network fee ${coins(r.fee, ch.key)}`));
+      $("w-confirm").hidden = false; msg(sm, "");
+    } catch (e) { msg(sm, e.message, "bad"); }
+    return;
+  }
   if (asset.startsWith("t20:")) {
     // PRC-20 / DRC-20: a transfer note to this wallet's address, then its coin to the recipient.
     const tick = asset.slice(4), amount = $("w-amt").value.trim();
@@ -687,6 +717,7 @@ $("w-sendnow").addEventListener("click", async () => {
   try {
     const r = await api(pendingSend.cmd, { ...pendingSend.args, send: true });
     $("w-confirm").hidden = true; pendingSend = null; $("w-to").value = ""; $("w-amt").value = "";
+    if (r.inscription) W.ordPick = null;
     msg($("w-send-msg"), r.id ? `Transfer note inscribed (${r.note_tx}); the tokens go once a block holds it.` : `Sent: ${r.txid}`, "ok");
     W.viewAt = 0; W.ddAt = 0; refreshWallet();
   } catch (e) { msg($("w-send-msg"), e.message, "bad"); }

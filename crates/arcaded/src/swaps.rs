@@ -88,7 +88,7 @@ fn tx_of(node: &Node, p: &ChainParams, txid: &Hash256) -> Option<Tx> {
     node.chain.mempool(p.chain_no).ok()?.into_iter().filter_map(|(_, raw)| Tx::parse_with(&raw, &p.format).ok()).find(|t| &t.txid == txid)
 }
 /// The waiting transaction spending `op`, in the chain's own pool.
-fn pool_spender(node: &Node, p: &ChainParams, op: &OutPoint) -> Option<Hash256> {
+pub(crate) fn pool_spender(node: &Node, p: &ChainParams, op: &OutPoint) -> Option<Hash256> {
     if crate::arcsvc::runs(p) {
         return crate::arcsvc::spender(op);
     }
