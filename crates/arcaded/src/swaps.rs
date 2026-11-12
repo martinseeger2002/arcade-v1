@@ -109,6 +109,17 @@ fn token_fee(o: Option<&Value>, amount: u64, p: &ChainParams) -> Option<(u64, Ve
     (fee > 0).then_some((fee, to))
 }
 
+/// A maker fee in whole units, rounded up (Martin 2026-11-12: "DD cannot be fractionalized", fees on it "Whole
+/// dollars, rounded up"; DRC-20 / PRC-20 legs are whole tokens too): ceil(whole * bps / 10000), at least 1 when there is
+/// a fee at all. `whole` is the leg in its whole units. The operator's address on `p` with it.
+fn whole_fee(o: Option<&Value>, whole: u128, p: &ChainParams) -> Option<(u128, String)> {
+    let f = &o?["maker_fee"];
+    let bps = f["bps"].as_u64().filter(|b| *b > 0 && *b <= MAX_FEE_BPS)? as u128;
+    // Checked by the send that pays it (a DigiDollar address is not a coin address).
+    let to = f["to"][p.key].as_str()?.to_string();
+    (whole > 0).then(|| ((whole * bps).div_ceil(10_000).max(1), to))
+}
+
 /// An order as anybody else sees it: never its own keys or payout addresses.
 pub fn public_order(o: &Value) -> Value {
     let mut o = o.clone();
@@ -443,6 +454,13 @@ fn lock_step(node: &Node, leg: &Value, spec: &Spec, st: &mut Value, o: Option<&V
             let tx = ddlock::build_lock(p, &dsk, &held, &dgb, &change, &spec.dd()?, units(leg) as i64)?;
             st["txid"] = json!(send(node, p, &tx)?);
             st["vout"] = json!(0);
+            // The maker fee in DigiDollars, whole dollars rounded up: a DD send to the operator, made with the lock.
+            if let Some((dollars, to)) = whole_fee(o, (units(leg) / 100) as u128, p) {
+                match crate::ddsvc::send(node, Some(p.key), &to, (dollars * 100) as i64, true) {
+                    Ok(v) => st["fee_tx"] = v["txid"].clone(),
+                    Err(e) => st["fee_error"] = json!(e),
+                }
+            }
             st["step"] = json!("locked");
         }
         ("token", "start") => {
@@ -492,6 +510,15 @@ fn lock_step(node: &Node, leg: &Value, spec: &Spec, st: &mut Value, o: Option<&V
                     send(node, p, &i.commit)?;
                     st["note1"] = json!(send_raw(node, p, &i.reveal)?);
                     st["step"] = json!("note1");
+                    // The maker fee in the token, whole tokens rounded up: a token send to the operator (its own transfer
+                    // note, then the note's coin sent: tokensend's job), started with the lock.
+                    let whole = leg["amount"].as_str().and_then(|a| a.parse::<u128>().ok()).unwrap_or(0);
+                    if let Some((fee, to)) = whole_fee(o, whole, p) {
+                        match crate::tokensend::t20_send(node, p.key, leg["asset"].as_str().unwrap_or(""), &fee.to_string(), &to, true) {
+                            Ok(v) => st["fee_job"] = v["id"].clone(),
+                            Err(e) => st["fee_error"] = json!(e),
+                        }
+                    }
                 }
                 "note1" if ready("note1") => {
                     let note1 = OutPoint { txid: h256(&st["note1"])?, vout: 0 };
@@ -704,9 +731,9 @@ pub fn place(node: &Node, give: &Value, get_leg: &Value, opts: &Value) -> Result
         // Paid on the chain of what the maker gives (for an inscription given, of the coins it gets).
         let fp = if give["kind"] == "ord" { wp } else { gp };
         let a = opts["maker_fee"]["to"][fp.key].as_str().ok_or_else(|| format!("a maker fee names its address on {}", fp.name))?;
-        arcade_ledger::address::script_for_address(fp, a).ok_or_else(|| format!("{a} is not a {} address", fp.name))?;
-        if matches!(give["kind"].as_str(), Some("dd" | "token20")) {
-            return Err("a maker fee in DigiDollars or DRC-20 / PRC-20 tokens comes next".into());
+        // A DigiDollar fee goes to a DigiDollar address, which the DD send checks; any other to a coin address.
+        if give["kind"] != "dd" {
+            arcade_ledger::address::script_for_address(fp, a).ok_or_else(|| format!("{a} is not a {} address", fp.name))?;
         }
         o["maker_fee"] = json!({"bps": bps, "to": opts["maker_fee"]["to"]});
     }
@@ -1270,5 +1297,22 @@ mod own_key_tests {
         assert!(place(&t.node, &give, &get_leg, &json!({"key": {k: hex::encode([9u8; 32])}})).is_err(), "no payout");
         assert!(place(&t.node, &give, &get_leg, &json!({"maker_fee": {"bps": 900, "to": {k: addr}}})).is_err(), "over 5%");
         assert!(place(&t.node, &give, &get_leg, &Value::Null).is_ok(), "a plain order as before");
+    }
+}
+
+#[cfg(test)]
+mod whole_fee_tests {
+    use super::*;
+
+    #[test]
+    fn whole_unit_fees_round_up() {
+        let t = crate::sitesvc::tests::setup();
+        let to = arcade_ledger::address::base58check(t.p.p2pkh_version, &[4u8; 20]);
+        let o = json!({"maker_fee": {"bps": 100, "to": {t.p.key: to}}});
+        assert_eq!(whole_fee(Some(&o), 25, t.p).map(|f| f.0), Some(1), "1% of $25 is $1, rounded up");
+        assert_eq!(whole_fee(Some(&o), 250, t.p).map(|f| f.0), Some(3), "1% of $250 is $3 (2.5 up)");
+        assert_eq!(whole_fee(Some(&o), 200, t.p).map(|f| f.0), Some(2), "exact stays");
+        assert_eq!(whole_fee(Some(&o), 0, t.p), None);
+        assert_eq!(whole_fee(None, 100, t.p), None, "no fee on an order without one");
     }
 }
