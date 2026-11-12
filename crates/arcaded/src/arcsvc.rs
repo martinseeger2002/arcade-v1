@@ -12,9 +12,9 @@
 //! blocks. Every frame names the chain's block 0, and an arcade answers only frames for the
 //! chain it runs itself.
 //!
-//! What is here: the chain's rules (arcade-arc) decide every block; the block log keeps
-//! them across a restart; the best branch is copied into the chain store for everything
-//! else in the arcade to read; a writer waits out its draw and writes; and blocks travel
+//! What is here: the chain's rules (arcade-arc) decide every block; the best branch is kept
+//! in the chain store, whole (its one copy on disk, read back and checked again at start),
+//! for everything else in the arcade to read; a writer waits out its draw and writes; and blocks travel
 //! over mesh links as "ac" frames:
 //!
 //! ```text
@@ -36,11 +36,12 @@ use arcade_arc::chain::{Accepted, Chain, ChainError, Entry, Genesis, Storage, Ti
 use arcade_arc::registry::Registry;
 use arcade_arc::light::Headers;
 use arcade_arc::log::{self, BlockLog};
+use arcade_arc::store::unstored;
 use arcade_arc::coins::TxError;
 use arcade_arc::params::{self, Net};
 use arcade_arc::pool::{Pool, PoolError};
-use arcade_arc::time::{StandIn, TimeProofs};
-use arcade_arc::{coins, script, store};
+use arcade_arc::time::{ChiaVdf, StandIn, TimeProofs};
+use arcade_arc::{coins, store};
 use arcade_chain::hash::Hash256;
 use arcade_chain::params::ChainParams;
 use arcade_chain::{OutPoint, Tx};
@@ -48,14 +49,16 @@ use arcade_chaindb::ChainDb;
 use arcade_mesh::bk::{join_blocks, split_blocks, CHUNK};
 use arcade_mesh::link::{Frame, Link, LinkError};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-/// Blocks in one answer, and its most bytes.
+/// Blocks in one answer, and its most bytes (at least one full block: 4 MB of storage
+/// section and 1 MB of transactions since §14.19).
 const ANSWER_BLOCKS: usize = 50;
-const ANSWER_BYTES: usize = 4 << 20;
+const ANSWER_BYTES: usize = 8 << 20;
+const _: () = assert!(ANSWER_BYTES >= arcade_arc::block::MAX_BLOCK_BYTES);
 /// A peer is asked again for a branch it named after this long without it.
 const ASK_AGAIN: Duration = Duration::from_secs(10);
 /// A peer's asks are answered this far apart at the closest; one that comes sooner waits.
@@ -80,7 +83,37 @@ const ANSWERS_AFTER: Duration = Duration::from_secs(30);
 /// The most headers in one shared-core answer.
 pub const LENT_HEADERS: usize = 500;
 
-type LocalChain = Chain<StandIn, Registry>;
+type LocalChain = Chain<Clock, Registry>;
+
+/// The proof of time a chain runs on (its settings' "time"): Chia's VDF (§6.2, "vdf"), or the stand-in a local test
+/// chain may still use (a hash, made at once; the writer then waits as long as the steps would take).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clock {
+    StandIn,
+    Vdf,
+}
+
+impl Clock {
+    /// The proof of `steps` steps from `challenge`: at once for the stand-in, as long as they take for the VDF.
+    pub fn prove(&self, challenge: &arcade_arc::merkle::Hash, steps: u64) -> Option<TimeProof> {
+        match self {
+            Clock::StandIn => Some(StandIn.prove(challenge, steps)),
+            Clock::Vdf => ChiaVdf.prove(challenge, steps),
+        }
+    }
+}
+
+impl TimeProofs for Clock {
+    fn verify(&self, challenge: &arcade_arc::merkle::Hash, steps: u64, proof: &TimeProof) -> bool {
+        match self {
+            Clock::StandIn => StandIn.verify(challenge, steps, proof),
+            Clock::Vdf => ChiaVdf.verify(challenge, steps, proof),
+        }
+    }
+    fn takes_time(&self) -> bool {
+        *self == Clock::Vdf
+    }
+}
 
 /// What `--arc-local` reads: block 0, who holds how much, and how fast this arcade's
 /// stand-in "calculates" (steps of proof of time per second).
@@ -92,6 +125,13 @@ pub struct Settings {
     /// Bytes of blocks in one catalog segment; the rule's own size when not given. A local
     /// chain follows small source chains, so it cuts small segments.
     pub segment_bytes: u64,
+    /// Target seconds between blocks (1 to the rule's 150); the rule's when not given. A local test chain sets
+    /// less, so its tests see audit periods (1,152 blocks) in minutes.
+    pub block_seconds: u64,
+    /// The proof of time ("time": "vdf" for the real one; the stand-in when not given).
+    pub clock: Clock,
+    /// Blocks in an audit period (100 to the rule's 1,152); the rule's when not given. A local test chain sets fewer.
+    pub audit_period: u64,
 }
 
 impl Settings {
@@ -130,13 +170,25 @@ impl Settings {
             Value::Null => params::SEGMENT_BYTES,
             n => n.as_u64().filter(|b| (1..=params::SEGMENT_BYTES).contains(b)).ok_or("settings: segment_bytes must be from 1 to the rule's segment size")?,
         };
-        Ok(Settings { genesis, holders, steps_per_second, segment_bytes })
+        let block_seconds = match &v["block_seconds"] {
+            Value::Null => params::BLOCK_SECONDS,
+            n => n.as_u64().filter(|b| (1..=params::BLOCK_SECONDS).contains(b)).ok_or("settings: block_seconds must be from 1 to the rule's 150")?,
+        };
+        let clock = match v["time"].as_str() {
+            None | Some("stand-in") => Clock::StandIn,
+            Some("vdf") => Clock::Vdf,
+            Some(other) => return Err(format!("settings: time must be \"vdf\" or \"stand-in\", not {other}")),
+        };
+        let audit_period = match &v["audit_period"] {
+            Value::Null => params::AUDIT_PERIOD_BLOCKS,
+            n => n.as_u64().filter(|b| (100..=params::AUDIT_PERIOD_BLOCKS).contains(b)).ok_or("settings: audit_period must be from 100 to the rule's 1,152")?,
+        };
+        Ok(Settings { genesis, holders, steps_per_second, segment_bytes, block_seconds, clock, audit_period })
     }
 }
 
 struct State {
     chain: LocalChain,
-    log: BlockLog,
     /// When the tip became the tip here: a writer's wait runs from then.
     since: Instant,
     pool: Pool,
@@ -175,6 +227,22 @@ struct Peer {
     tx_parts: Option<(u64, Vec<u8>)>,
     tx_served: Option<Instant>,
     tx_waiting: Option<(u64, Vec<u8>)>,
+    /// Blocks it sent that broke the rules, lately; past STRIKES in an hour its ARCADE frames are ignored until
+    /// `ignored_until` (as coin nodes ban a peer that sends bad blocks).
+    strikes: VecDeque<Instant>,
+    ignored_until: Option<Instant>,
+}
+
+impl Svc {
+    /// The network this chain runs on.
+    pub fn net(&self) -> Net {
+        self.net
+    }
+
+    /// A copy of the storage records as of the tip.
+    pub fn registry(&self) -> Registry {
+        self.st.lock().unwrap().chain.storage().clone()
+    }
 }
 
 pub struct Svc {
@@ -182,8 +250,6 @@ pub struct Svc {
     pub params: &'static ChainParams,
     genesis_hex: String,
     steps_per_second: u64,
-    /// Where this arcade's own blocks pay their fees.
-    pay: Option<Vec<u8>>,
     st: Mutex<State>,
     peers: Mutex<HashMap<String, Peer>>,
     /// Set (under `st`) when the chain is removed: nothing is taken in or written after.
@@ -234,7 +300,7 @@ static CHANGING: Mutex<()> = Mutex::new(());
 /// While a removed chain's blocks are still being deleted.
 static REMOVING: AtomicBool = AtomicBool::new(false);
 
-fn svc() -> Option<Arc<Svc>> {
+pub fn svc() -> Option<Arc<Svc>> {
     SVC.read().unwrap().clone()
 }
 
@@ -282,33 +348,70 @@ pub fn reconcile<T: TimeProofs, S: Storage>(db: &ChainDb, p: &ChainParams, chain
 // ---------------------------------------------------------------------------------------
 // Taking blocks in
 
-/// Hand a block to the chain; what the chain keeps goes to the log, and a new tip to the store.
+/// Hand a block to the chain; a new tip goes to the store (the chain's one copy on disk: a side
+/// block is kept in memory only, and comes again from other arcades after a restart).
 fn take(node: &Node, svc: &Svc, block: Block) -> Result<Accepted, ChainError> {
     let mut st = svc.st.lock().unwrap();
     if svc.stop.load(Ordering::Relaxed) {
         return Ok(Accepted::Known);
     }
     let got = st.chain.accept(block.clone(), arcade_app::now())?;
+    // Two blocks of one writer on one parent: the proof goes into a block (§5.1, registry: the writer loses everything).
+    for proof in st.chain.take_evidence() {
+        eprintln!("arc: writer {} signed two blocks on one parent: its proof goes to the chain", hex::encode(&proof.a.writer[..8]));
+        crate::arcseg::add(arcade_arc::block::Item::Equivocation(Box::new(proof)));
+    }
     if got == Accepted::Known {
         return Ok(got);
     }
-    if let Err(e) = st.log.append(&block) {
-        // Still on the chain in memory; after a restart it comes from other arcades again.
-        eprintln!("arc: block log: {e}");
-    }
     if let Accepted::Tip { undone, .. } = &got {
         crate::arcseg::forget(&block.items);
-        st.since = Instant::now();
-        // The transactions of blocks the chain left wait again, oldest first.
-        let st = &mut *st;
-        let back: Vec<Tx> = undone.iter().rev().filter_map(|id| st.chain.block(id)).flat_map(|b| b.txs.iter().skip(1).cloned()).collect();
-        st.pool.retip(st.chain.coins(), st.chain.tip().height + 1, back);
-        st.refused.clear();
-        if let Err(e) = reconcile(&node.chain, svc.params, &st.chain) {
-            eprintln!("arc: {e}");
-        }
+        new_tip(node, svc, &mut st, undone);
     }
     Ok(got)
+}
+
+/// After the tip moved: the transactions of blocks the chain left wait again (oldest first), and the store follows.
+fn new_tip(node: &Node, svc: &Svc, st: &mut State, undone: &[Hash256]) {
+    st.since = Instant::now();
+    let back: Vec<Tx> = undone.iter().rev().filter_map(|id| st.chain.block(id)).flat_map(|b| b.txs.iter().skip(1).cloned()).collect();
+    st.pool.retip(st.chain.coins(), st.chain.tip().height + 1, back);
+    st.refused.clear();
+    if let Err(e) = reconcile(&node.chain, svc.params, &st.chain) {
+        eprintln!("arc: {e}");
+    }
+}
+
+/// A better branch that waited for this arcade's source headers (a fraud proof about a block they didn't reach yet):
+/// tried again.
+fn retry_waiting(node: &Node, svc: &Svc) {
+    let mut st = svc.st.lock().unwrap();
+    if !st.chain.is_waiting() {
+        return;
+    }
+    match st.chain.retry() {
+        Ok(Some(Accepted::Tip { undone, .. })) => {
+            eprintln!("arc: a branch that waited for this arcade's source headers is the tip now");
+            new_tip(node, svc, &mut st, &undone);
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("arc: a branch that waited: {e}"),
+    }
+}
+
+/// The source chains' headers as this arcade keeps them (its stored blocks), for fraud proofs (§2.4): a chain only
+/// borrowed has none here, and proofs about it wait.
+struct NodeSources(Arc<Node>);
+
+impl arcade_arc::registry::Sources for NodeSources {
+    fn tip(&self, chain: &str) -> Option<u64> {
+        let p = crate::chains::find(chain)?;
+        self.0.chain.tip(p.chain_no).ok().flatten().map(|t| t.height as u64)
+    }
+    fn hash_at(&self, chain: &str, height: u64) -> Option<Hash256> {
+        let p = crate::chains::find(chain)?;
+        self.0.chain.hash_at(p.chain_no, u32::try_from(height).ok()?).ok().flatten()
+    }
 }
 
 /// A transaction from this arcade or from a peer: into the pool if it may wait there. Its fee.
@@ -343,40 +446,130 @@ fn seed_proof(chain: &LocalChain) -> Option<TimeProof> {
     if (tip.height + 1) % params::EPOCH_BLOCKS != 0 {
         return None;
     }
-    let (challenge, steps) = chain.draw_seed_task(&tip.id)?;
-    Some(StandIn.prove(&challenge, steps))
+    let task = chain.draw_seed_task(&tip.id)?;
+    match *chain.proofs() {
+        Clock::StandIn => Clock::StandIn.prove(&task.0, task.1),
+        Clock::Vdf => SEED.lock().unwrap().as_ref().filter(|j| j.0 == task).and_then(|j| j.1.clone()),
+    }
+}
+
+/// The epoch's draw seed proof being made (the VDF's, about 15 blocks of steps): its task, and the proof once made.
+static SEED: Mutex<Option<((arcade_arc::merkle::Hash, u64), Option<TimeProof>)>> = Mutex::new(None);
+
+/// From the 80th block of an epoch on, the draw seed's task is known: its proof of time starts at once, in the
+/// background, so it is ready by the epoch's last block (the next epoch's first block carries it).
+fn warm_seed(chain: &LocalChain) {
+    if *chain.proofs() != Clock::Vdf {
+        return;
+    }
+    let tip = chain.tip();
+    let Some(task) = chain.draw_seed_task(&tip.id) else { return };
+    let mut job = SEED.lock().unwrap();
+    if job.as_ref().is_some_and(|j| j.0 == task) {
+        return;
+    }
+    *job = Some((task, None));
+    drop(job);
+    let _ = std::thread::Builder::new().name("arc draw seed".into()).spawn(move || {
+        let t0 = Instant::now();
+        let proof = Clock::Vdf.prove(&task.0, task.1);
+        eprintln!("arc: the draw seed's proof of time ({} steps) took {:.0} s", task.1, t0.elapsed().as_secs_f64());
+        let mut job = SEED.lock().unwrap();
+        if job.as_ref().is_some_and(|j| j.0 == task) {
+            *job = Some((task, proof));
+        }
+    });
 }
 
 /// This arcade's block on the tip, as its ticket allows: the coinbase pays what is owed,
 /// then the fees of the waiting transactions the block takes to `pay`.
-fn write_block(chain: &LocalChain, pool: &Pool, pay: Option<&[u8]>, secret: &[u8; 32], ticket: &Ticket, seed: Option<TimeProof>, now: u64) -> Block {
-    // The storage items waiting (crate::arcseg) that this block can carry, in group order.
-    let mut items = chain.storage().fitting(&crate::arcseg::waiting(), ticket.height);
-    items.sort_by_key(|i| i.tag() >> 4);
+fn write_block(chain: &LocalChain, pool: &Pool, secret: &[u8; 32], ticket: &Ticket, pot: TimeProof, seed: Option<TimeProof>, now: u64) -> Block {
+    // The storage items waiting (crate::arcseg) that this block can carry, in group order, within each kind's limit
+    // and the section's size (§9); registration commits with the most work first.
+    let items = pack(chain.storage(), crate::arcseg::waiting(), ticket.height);
     let items = chain.storage().fitting(&items, ticket.height);
     let time = now.max(chain.tip().time + 1);
-    let mut outputs = chain.payouts();
-    // Room for the transactions: the block's, less the coinbase with a fee output.
-    let fee_out = pay.map(|script| (u64::MAX, script.to_vec()));
-    let coinbase_bytes = coins::coinbase(ticket.height, &ticket.prev, b"", &[outputs.as_slice(), fee_out.as_slice()].concat()).raw.len();
-    let (mut txs, fees) = pool.pick(params::MAX_TX_BYTES.saturating_sub(coinbase_bytes));
-    // Fees under the dust amount can't be paid out, and with nowhere to pay they are burned.
-    if let Some(script) = pay.filter(|_| fees >= params::DUST) {
-        outputs.push((fees, script.to_vec()));
-    }
+    // The coinbase pays what is owed; fees join the pot (docs/ARCADECHAIN.md §14.18).
+    let outputs = chain.payouts();
+    let coinbase_bytes = coins::coinbase(ticket.height, &ticket.prev, b"", &outputs).raw.len();
+    let (mut txs, _fees) = pool.pick(params::MAX_TX_BYTES.saturating_sub(coinbase_bytes));
     txs.insert(0, coins::coinbase(ticket.height, &ticket.prev, b"", &outputs));
-    ticket.seal(chain.net(), secret, time, txs, items, StandIn.prove(&ticket.challenge, ticket.steps), seed)
+    ticket.seal(chain.net(), secret, time, txs, items, pot, seed)
+}
+
+/// What a block carries of `waiting` (§9): in group order; registration commits by their stamp's work, most first
+/// (when more wait than a block's places, filling them with junk gets dearer the longer it is kept up); then each
+/// kind no more than its limit and the whole no more than the storage section.
+fn pack(reg: &Registry, waiting: Vec<arcade_arc::block::Item>, height: u64) -> Vec<arcade_arc::block::Item> {
+    use arcade_arc::block::{work_bits, Item};
+    let work = |i: &Item| match i {
+        Item::RegCommit(c) => reg.block_at(c.anchor).map_or(0, |(id, _)| work_bits(&c.stamp(&reg.catalog().net(), &id))),
+        _ => 0,
+    };
+    order_and_cap(reg.fitting(&waiting, height), work)
+}
+
+/// [`pack`]'s ordering and limits, for items already checked.
+fn order_and_cap(mut items: Vec<arcade_arc::block::Item>, work: impl Fn(&arcade_arc::block::Item) -> u32) -> Vec<arcade_arc::block::Item> {
+    items.sort_by_key(|i| (i.tag() >> 4, std::cmp::Reverse(work(i))));
+    let limit = |g: u8| match g {
+        3 => params::MAX_REGISTRATION_PROOFS,
+        4 => params::MAX_VERDICTS,
+        5 => params::MAX_REGISTRATION_COMMITS,
+        6 => params::MAX_CATALOG_ITEMS,
+        _ => usize::MAX,
+    };
+    let (mut counts, mut bytes, mut out) = ([0usize; 16], 0usize, Vec::new());
+    for i in items {
+        let (g, n) = ((i.tag() >> 4) as usize, i.encoded_len());
+        if counts[g] >= limit(g as u8) || bytes + n > params::MAX_STORAGE_BYTES {
+            continue;
+        }
+        counts[g] += 1;
+        bytes += n;
+        out.push(i);
+    }
+    out
 }
 
 /// The writer: draw on each new tip, wait as long as the draw's proof of time would take,
 /// write. One block per tip: a block the chain doesn't take yet is offered again, never
 /// written a second time.
+///
+/// Never two blocks on one parent, even after the chain went to another branch and came back, or after a restart:
+/// two signed blocks of one writer on one parent are proof of cheating (§5.1). The parents written on are kept in
+/// `<home>/arc/<net>/wrote` (the last WROTE_KEEP).
 fn run_writer(node: Arc<Node>, svc: Arc<Svc>) {
+    let file = node.home.join("arc").join(svc.net.key).join("wrote");
+    let mut wrote: VecDeque<Hash256> = std::fs::read_to_string(&file).unwrap_or_default().lines().filter_map(|l| Hash256::from_hex(l.trim()).ok()).collect();
+    let mut remember = |wrote: &mut VecDeque<Hash256>, parent: Hash256| {
+        wrote.push_back(parent);
+        while wrote.len() > WROTE_KEEP {
+            wrote.pop_front();
+        }
+        let text: String = wrote.iter().map(|h| h.to_hex() + "\n").collect();
+        let _ = std::fs::create_dir_all(file.parent().expect("a folder"));
+        let tmp = file.with_extension("new");
+        if std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &file)).is_err() {
+            eprintln!("arc: couldn't keep the parents this arcade wrote on");
+        }
+    };
+    run_writer_on(node, svc, &mut wrote, &mut remember)
+}
+
+/// Parents the writer remembers having written on.
+const WROTE_KEEP: usize = 1_000;
+/// Rule-breaking blocks from one peer in an hour before its ARCADE frames are ignored for an hour.
+const STRIKES: usize = 5;
+
+fn run_writer_on(node: Arc<Node>, svc: Arc<Svc>, wrote: &mut VecDeque<Hash256>, remember: &mut impl FnMut(&mut VecDeque<Hash256>, Hash256)) {
     let secret = node.identity.to_bytes();
     // The tip drawn on, and what came of it.
     let mut on: Option<Hash256> = None;
     let mut ticket: Option<(Ticket, Option<TimeProof>)> = None;
     let mut written: Option<Block> = None;
+    // The VDF's proof of time for this tip's ticket, made in the background: (tip, its proof when done).
+    let proving: Arc<Mutex<Option<(Hash256, Option<TimeProof>)>>> = Arc::new(Mutex::new(None));
     loop {
         std::thread::sleep(Duration::from_millis(100));
         if svc.stop.load(Ordering::Relaxed) {
@@ -385,17 +578,48 @@ fn run_writer(node: Arc<Node>, svc: Arc<Svc>) {
         if written.is_none() {
             let st = svc.st.lock().unwrap();
             let tip = st.chain.tip().id;
-            if on != Some(tip) {
+            warm_seed(&st.chain);
+            // A new tip, or an epoch's first block still waiting for its draw seed's proof: draw (again).
+            let first_of_epoch = (st.chain.tip().height + 1) % params::EPOCH_BLOCKS == 0;
+            if on != Some(tip) || (ticket.is_none() && first_of_epoch && !wrote.contains(&tip)) {
                 on = Some(tip);
                 let seed = seed_proof(&st.chain);
-                ticket = st.chain.ticket(&secret, seed.as_ref()).map(|t| (t, seed));
+                // Written on before: never a second block on it.
+                ticket = if wrote.contains(&tip) { None } else { st.chain.ticket(&secret, seed.as_ref()).map(|t| (t, seed)) };
             }
             let Some((t, seed)) = &ticket else { continue };
-            if st.since.elapsed().as_secs_f64() < t.steps as f64 / svc.steps_per_second as f64 {
-                continue;
-            }
-            written = Some(write_block(&st.chain, &st.pool, svc.pay.as_deref(), &secret, t, seed.clone(), arcade_app::now()));
+            let pot = match *st.chain.proofs() {
+                // The stand-in: wait as long as the steps would take.
+                Clock::StandIn => {
+                    if st.since.elapsed().as_secs_f64() < t.steps as f64 / svc.steps_per_second as f64 {
+                        continue;
+                    }
+                    StandIn.prove(&t.challenge, t.steps)
+                }
+                // The VDF: run it once for this tip, in the background; written when it is done (if still the tip).
+                Clock::Vdf => {
+                    let mut p = proving.lock().unwrap();
+                    match p.as_ref() {
+                        Some((at, Some(proof))) if *at == tip => proof.clone(),
+                        Some((at, None)) if *at == tip => continue,
+                        _ => {
+                            *p = Some((tip, None));
+                            let (job, challenge, steps) = (proving.clone(), t.challenge, t.steps);
+                            let _ = std::thread::Builder::new().name("arc proof of time".into()).spawn(move || {
+                                let proof = Clock::Vdf.prove(&challenge, steps);
+                                let mut j = job.lock().unwrap();
+                                if j.as_ref().is_some_and(|x| x.0 == tip) {
+                                    *j = proof.map(|pr| (tip, Some(pr)));
+                                }
+                            });
+                            continue;
+                        }
+                    }
+                }
+            };
+            written = Some(write_block(&st.chain, &st.pool, &secret, t, pot, seed.clone(), arcade_app::now()));
             ticket = None;
+            remember(wrote, tip);
         }
         let Some(b) = written.clone() else { continue };
         match take(&node, &svc, b) {
@@ -433,8 +657,8 @@ pub fn define(node: &Arc<Node>, settings: &std::path::Path) -> Result<(), String
 
 /// [`define`] from the settings' text (the built-in testnet's, or a file's).
 pub fn define_text(node: &Arc<Node>, text: &str) -> Result<(), String> {
-    let net = params::TESTNET;
-    let s = Settings::parse(&net, text)?;
+    let s = Settings::parse(&params::TESTNET, text)?;
+    let net = Net { block_seconds: s.block_seconds, audit_period: s.audit_period, ..params::TESTNET };
     Registry::new(&net, &s.holders, s.segment_bytes).ok_or("settings: the holders list doesn't hold (a key twice, nothing held, or an address of another network)")?;
     let genesis = s.genesis.id(&net);
     let def = Def { net, params: store::chain_params(&net, &genesis), genesis, settings: s };
@@ -498,24 +722,65 @@ pub fn remove(node: &Arc<Node>) -> Result<(), String> {
     Ok(())
 }
 
-/// Bring the chain up from its block log and start its writer. The caller holds `CHANGING`.
+/// Bring the chain up from the store's copy and start its writer. The caller holds `CHANGING`.
 fn run(node: &Arc<Node>, def: &Def) -> Result<(), String> {
     let (net, s, genesis, p) = (def.net, &def.settings, def.genesis, def.params);
-    let holders = Registry::new(&net, &s.holders, s.segment_bytes).ok_or("settings: the holders list doesn't hold")?;
-    let mut chain = Chain::new(net, &s.genesis, StandIn, holders, &[]);
+    let mut holders = Registry::new(&net, &s.holders, s.segment_bytes).ok_or("settings: the holders list doesn't hold")?;
+    holders.set_sources(Arc::new(NodeSources(node.clone())));
+    let mut chain = Chain::new(net, &s.genesis, s.clock, holders, &[]);
 
     let dir = node.home.join("arc").join(net.key);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let (log, blocks) = BlockLog::open(dir.join("blocks.log"), &genesis).map_err(|e| format!("block log: {e}"))?;
-    let (held, t0) = (blocks.len(), Instant::now());
-    let refused = log::replay(&mut chain, blocks);
+    let t0 = Instant::now();
+    let mut refused = 0;
+    // The chain's one copy on disk is the store's (docs/ARCADECHAIN.md §14.17): its best branch
+    // is read back and checked again, block by block.
+    let mut held = 0;
+    if node.chain.hash_at(p.chain_no, 0).ok().flatten() == Some(genesis) {
+        let tip = node.chain.tip(p.chain_no).map_err(db_err)?.map_or(0, |t| t.height);
+        let mut batch = Vec::new();
+        for h in 1..=tip {
+            let Some(b) = node.chain.hash_at(p.chain_no, h).ok().flatten().and_then(|id| node.chain.block_raw(p.chain_no, &id).ok().flatten())
+                .and_then(|raw| arcade_chain::Block::parse_with(&raw, &p.format).ok()).and_then(|sb| unstored(&sb)) else { break };
+            batch.push(b);
+            if batch.len() == 1_000 {
+                held += batch.len();
+                refused += log::replay(&mut chain, std::mem::take(&mut batch));
+            }
+        }
+        held += batch.len();
+        refused += log::replay(&mut chain, batch);
+    }
+    // A block log from before is read once more, then goes (one copy). The store's copy from
+    // then holds only the transactions: it is made again, whole.
+    let old_log = dir.join("blocks.log");
+    if old_log.exists() {
+        if let Ok((_, blocks)) = BlockLog::open(&old_log, &genesis) {
+            held += blocks.len();
+            refused += log::replay(&mut chain, blocks);
+        }
+        let first_whole = node.chain.hash_at(p.chain_no, 1).ok().flatten().and_then(|id| node.chain.block_raw(p.chain_no, &id).ok().flatten())
+            .and_then(|raw| arcade_chain::Block::parse_with(&raw, &p.format).ok()).map(|sb| !sb.extra.is_empty());
+        if first_whole == Some(false) {
+            while node.chain.remove_chain_batch(p.chain_no, 50_000).map_err(db_err)? > 0 {}
+        }
+    }
     reconcile(&node.chain, p, &chain)?;
+    if old_log.exists() {
+        // The store now holds every block of the branch whole: the old copy goes.
+        let stored_whole = (1..=chain.tip().height).all(|h| {
+            node.chain.hash_at(p.chain_no, h as u32).ok().flatten().and_then(|id| node.chain.block_raw(p.chain_no, &id).ok().flatten())
+                .and_then(|raw| arcade_chain::Block::parse_with(&raw, &p.format).ok()).is_some_and(|sb| !sb.extra.is_empty())
+        });
+        if stored_whole {
+            let _ = std::fs::remove_file(&old_log);
+        }
+    }
 
     let me = node.identity.verifying_key().to_bytes();
     let weight = chain.storage().weight(&me);
-    let pay = s.holders.iter().find(|(key, ..)| *key == me).and_then(|(_, _, pay)| script::pay_to(&net, pay));
     eprintln!(
-        "arc: ARCADE test chain {} (test coins: a stand-in proof of time; registered replicas count from their registration proof, before audits exist). Block 0 {genesis}, height {} from {held} logged blocks in {:.1}s{}; this arcade {}",
+        "arc: ARCADE test chain {} (test coins: a stand-in proof of time; registered replicas count from their registration proof, before audits exist). Block 0 {genesis}, height {} from {held} stored blocks in {:.1}s{}; this arcade {}",
         net.key,
         chain.tip().height,
         t0.elapsed().as_secs_f64(),
@@ -527,14 +792,16 @@ fn run(node: &Arc<Node>, def: &Def) -> Result<(), String> {
         params: p,
         genesis_hex: genesis.to_hex(),
         steps_per_second: s.steps_per_second,
-        pay,
-        st: Mutex::new(State { chain, log, since: Instant::now(), pool: Pool::default(), refused: HashSet::new() }),
+        st: Mutex::new(State { chain, since: Instant::now(), pool: Pool::default(), refused: HashSet::new() }),
         peers: Default::default(),
         stop: AtomicBool::new(false),
         started: Instant::now(),
         last_up: Mutex::new(None),
     });
     *SVC.write().unwrap() = Some(svc.clone());
+    // The fraud watch (crate::arcfraud): once, for as long as the arcade runs.
+    static FRAUD_WATCH: std::sync::Once = std::sync::Once::new();
+    FRAUD_WATCH.call_once(|| crate::arcfraud::start(node.clone()));
     {
         // The catalog from this arcade's side (crate::arcseg): a round a minute.
         let (n, s2) = (node.clone(), svc.clone());
@@ -544,13 +811,40 @@ fn run(node: &Arc<Node>, def: &Def) -> Result<(), String> {
                 if s2.stop.load(Ordering::Relaxed) {
                     return;
                 }
-                let (reg, weight, tip) = {
+                let (reg, weight) = {
                     let st = s2.st.lock().unwrap();
-                    (st.chain.storage().clone(), st.chain.storage().weight(&me), st.chain.tip().height)
+                    (st.chain.storage().clone(), st.chain.storage().weight(&me))
                 };
                 crate::arcseg::round(&n, &s2.net, reg.catalog(), weight);
-                crate::arcseg::register(&n, &s2.net, s2.params, &reg, tip);
+                crate::arcseg::auto_seal(&n, &s2.net, reg.catalog());
                 std::thread::sleep(Duration::from_secs(if crate::arcseg::busy() { 2 } else { 60 }));
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    {
+        // Serving checks (crate::arcserve): every 5 seconds, so no block's draw is missed.
+        let (n, s2) = (node.clone(), svc.clone());
+        std::thread::Builder::new()
+            .name("arc serving".into())
+            .spawn(move || loop {
+                if s2.stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let (reg, tip) = {
+                    let st = s2.st.lock().unwrap();
+                    (st.chain.storage().clone(), st.chain.tip().height)
+                };
+                retry_waiting(&n, &s2);
+                crate::arcserve::forget_stale(&reg, tip);
+                crate::arcserve::round(&n, &s2.net, &reg, tip);
+                // Storage audits (crate::arcaudit) and registration proofs: answered within their 20-block windows,
+                // which on a fast local test chain pass in seconds.
+                crate::arcaudit::round(&n, &s2.net, &reg, tip);
+                crate::arcseg::register(&n, &s2.net, s2.params, &reg, tip);
+                // Fraud challenges against segments this arcade holds: answered (crate::arcfraud).
+                crate::arcfraud::answer(&n, &s2.net, &reg);
+                drop(reg);
+                std::thread::sleep(Duration::from_secs(5));
             })
             .map_err(|e| e.to_string())?;
     }
@@ -570,7 +864,60 @@ fn frame(svc: &Svc, op: &str, mut head: Value) -> Frame {
     head["t"] = json!("ac");
     head["op"] = json!(op);
     head["g"] = json!(svc.genesis_hex);
+    // The protocol this arcade speaks and the rules versions it knows are scheduled (§14.21).
+    head["pv"] = json!(params::PROTOCOL);
+    head["rules"] = json!(svc.net.rules.iter().map(|(v, h)| [*v as u64, *h]).collect::<Vec<_>>());
     Frame::new(head)
+}
+
+/// Whether a refused block broke the rules (its sender's fault), not only came out of order, from far back or early.
+fn broke_rules(e: &ChainError) -> bool {
+    !matches!(e, ChainError::Orphan | ChainError::AheadOfClock | ChainError::TooDeep | ChainError::KnownInvalid | ChainError::Block(arcade_arc::block::BlockError::Waiting(_)))
+}
+
+/// A rule-breaking block from `peer`: past STRIKES in an hour, its ARCADE frames are ignored for an hour.
+fn strike(svc: &Svc, peer: &str) {
+    let mut peers = svc.peers.lock().unwrap();
+    let p = peers.entry(peer.to_string()).or_default();
+    let now = Instant::now();
+    p.strikes.push_back(now);
+    while p.strikes.front().is_some_and(|t| now.duration_since(*t) > Duration::from_secs(3_600)) {
+        p.strikes.pop_front();
+    }
+    if p.strikes.len() >= STRIKES {
+        p.ignored_until = Some(now + Duration::from_secs(3_600));
+        p.strikes.clear();
+        eprintln!("arc: {} sent {STRIKES} blocks that break the rules within an hour: its ARCADE frames are ignored for an hour", &peer[..peer.len().min(12)]);
+    }
+}
+
+/// A rules version an arcade on the mesh has scheduled that this arcade doesn't know: (version, from height).
+static UPDATE: Mutex<Option<(u32, u64)>> = Mutex::new(None);
+/// Arcades heard speaking an older ARCADE protocol (their frames aren't taken).
+static OUTDATED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// What this arcade has to tell its operator about the ARCADE rules, if anything: an update before a height.
+pub fn update_needed() -> Option<String> {
+    UPDATE.lock().unwrap().map(|(v, h)| format!("arcades on the mesh follow ARCADE rules version {v} from block {h}; this arcade knows up to version {}: update it before block {h}, or it stops there", params::RULES_KNOWN))
+}
+
+/// The protocol and rules schedule a frame carries: false when its sender is too old to take ARCADE frames from.
+fn speaks(peer: &str, head: &Value) -> bool {
+    let pv = head["pv"].as_u64().unwrap_or(0) as u32;
+    if pv < params::MIN_PROTOCOL {
+        OUTDATED.lock().unwrap().insert(peer.to_string());
+        return false;
+    }
+    OUTDATED.lock().unwrap().remove(peer);
+    let newer = head["rules"].as_array().into_iter().flatten().filter_map(|r| Some((r[0].as_u64()? as u32, r[1].as_u64()?))).filter(|(v, _)| *v > params::RULES_KNOWN).min_by_key(|(_, h)| *h);
+    if let Some(n) = newer {
+        let mut u = UPDATE.lock().unwrap();
+        if u.is_none_or(|c| n.1 < c.1) {
+            eprintln!("arc: an arcade on the mesh schedules ARCADE rules version {} from block {}: this arcade knows up to {}; update it", n.0, n.1, params::RULES_KNOWN);
+            *u = Some(n);
+        }
+    }
+    true
 }
 
 fn id_of(v: &Value) -> Option<Hash256> {
@@ -680,6 +1027,9 @@ fn on_answer(node: &Node, svc: &Svc, link: &mut Link, f: &Frame) -> Result<(), L
             Ok(_) => gained = true,
             Err(e) => {
                 eprintln!("arc: a block from {} wasn't taken: {e}", &link.peer_id[..link.peer_id.len().min(12)]);
+                if broke_rules(&e) {
+                    strike(svc, &link.peer_id);
+                }
                 break;
             }
         }
@@ -708,7 +1058,10 @@ fn on_answer(node: &Node, svc: &Svc, link: &mut Link, f: &Frame) -> Result<(), L
 pub fn on_frame(node: &Node, link: &mut Link, f: &Frame) -> Result<(), LinkError> {
     let Some(svc) = svc() else { return Ok(()) };
     let svc = &*svc;
-    if f.head["g"] != svc.genesis_hex.as_str() {
+    if f.head["g"] != svc.genesis_hex.as_str() || !speaks(&link.peer_id, &f.head) {
+        return Ok(());
+    }
+    if svc.peers.lock().unwrap().get(&link.peer_id).and_then(|p| p.ignored_until).is_some_and(|t| Instant::now() < t) {
         return Ok(());
     }
     match f.head["op"].as_str().unwrap_or("") {
@@ -742,6 +1095,9 @@ pub fn on_frame(node: &Node, link: &mut Link, f: &Frame) -> Result<(), LinkError
         "it" => {
             crate::arcseg::on_items(&svc.net, &f.blob);
         }
+        // Fraud proofs (crate::arcfraud): a segment's leaf hashes or a run of its leaves, asked of its holders.
+        "lq" => crate::arcfraud::serve(node, &svc.net, link, &f.head, |op, head| frame(svc, op, head))?,
+        "la" => crate::arcfraud::on_answer(&f.head, &f.blob),
         _ => {}
     }
     Ok(())
@@ -900,6 +1256,7 @@ pub fn tick(_node: &Node, link: &mut Link) -> Result<(), LinkError> {
     if say {
         link.send(&frame(svc, "tip", json!({"id": id.to_hex(), "h": height, "w": total, "new": first})))?;
     }
+    crate::arcfraud::tick(link, |op, head| frame(svc, op, head))?;
     if ask_again {
         ask(svc, link)?;
     }
@@ -972,12 +1329,30 @@ pub fn status(node: &Node) -> Result<Value, String> {
         "time": t.time,
         "difficulty": t.difficulty.to_string(),
         "total_difficulty": t.total_difficulty.to_string(),
-        "weight": st.chain.storage().weight(&me),
+        // What this arcade earns with, and what it writes blocks with (replicas count for the draw DRAW_WEIGHT_WAIT
+        // blocks after their first passed audit).
+        "weight": st.chain.storage().pay_weight(&me),
+        "draw_weight": st.chain.storage().weight(&me),
         "pot": st.chain.storage().pot(),
         "coins": st.chain.coins().len(),
         "waiting": st.pool.len(),
         "waiting_bytes": st.pool.bytes(),
         "stored": node.chain.tip(svc.params.chain_no).map_err(db_err)?.map(|s| s.height),
+        "serving_checks": crate::arcserve::status(),
+        "audits": crate::arcaudit::status(node, st.chain.storage()),
+        // The rules (§14.21): the version now, what this arcade knows, and an update the mesh says is needed.
+        "rules": {"now": svc.net.rules_at(t.height + 1), "known": params::RULES_KNOWN, "protocol": params::PROTOCOL,
+                  "update_needed": update_needed(), "outdated_peers": OUTDATED.lock().unwrap().len()},
+        // Every owner with replicas: the weight they count with now (a missed audit takes a replica out) and the
+        // pay accrued for their next turn.
+        "owners": st.chain.storage().owners().iter().map(|o| json!({"owner": hex::encode(o), "weight": st.chain.storage().pay_weight(o), "draw_weight": st.chain.storage().weight(o),
+            "accrued": st.chain.storage().accrued_of(&arcade_arc::registry::Earner::Owner(*o))})).collect::<Vec<_>>(),
+        // Owners with serving verdicts since their last turn, or pay held back (§14.19 2).
+        "serving": st.chain.storage().owners().iter().filter_map(|owner| {
+            let (v, h) = (st.chain.storage().verdicts_of(owner), st.chain.storage().held_of(owner));
+            (v != (0, 0) || h.1 > 0).then(|| json!({"owner": hex::encode(owner), "served": v.0, "not_served": v.1, "held": h.0, "held_times": h.1}))
+        }).collect::<Vec<_>>(),
+        "accrued": st.chain.storage().accrued_of(&arcade_arc::registry::Earner::Owner(me)),
     }))
 }
 
@@ -995,6 +1370,11 @@ pub fn params_for(key: &str) -> Option<&'static ChainParams> {
 /// The ARCADE chain this arcade knows: the one it can install.
 pub fn defined() -> Option<&'static ChainParams> {
     DEF.get().map(|d| d.params)
+}
+
+/// The (id, seed) of block `h` on the running ARCADE chain's best branch.
+pub fn block_at(h: u64) -> Option<(Hash256, arcade_arc::merkle::Hash)> {
+    svc()?.st.lock().unwrap().chain.storage().block_at(h)
 }
 
 /// Whether `p` is the ARCADE chain installed here.
@@ -1040,6 +1420,23 @@ pub fn raw_block(id: &Hash256) -> Option<Vec<u8>> {
     svc()?.st.lock().unwrap().chain.block(id).map(Block::encode)
 }
 
+/// Block `h` of the branch this arcade is on, as the chain writes it: what a segment of the
+/// ARCADE chain holds (block 0 has no bytes). None past the tip.
+pub fn raw_block_at(h: u64) -> Option<Vec<u8>> {
+    let svc = svc()?;
+    let st = svc.st.lock().unwrap();
+    if h == 0 {
+        return Some(Vec::new());
+    }
+    let id = st.chain.id_at(h)?;
+    st.chain.block(&id).map(Block::encode)
+}
+
+/// The ARCADE chain's height here.
+pub fn height() -> Option<u64> {
+    Some(svc()?.st.lock().unwrap().chain.tip().height)
+}
+
 /// The header of a block this arcade holds, as the chain writes it.
 pub fn raw_header(id: &Hash256) -> Option<Vec<u8>> {
     let svc = svc()?;
@@ -1081,15 +1478,15 @@ pub fn send_lent(raw: &[u8]) -> Result<Hash256, String> {
 // real ones a borrower will have to be shown it (§14.14, open).
 
 /// The headers-only chain, at block 0.
-pub fn light() -> Option<Headers<StandIn>> {
+pub fn light() -> Option<Headers<Clock>> {
     let d = DEF.get()?;
-    Some(Headers::new(d.net, &d.settings.genesis, StandIn))
+    Some(Headers::new(d.net, &d.settings.genesis, d.settings.clock))
 }
 
 /// The headers-only chain, picked up from the newest headers this arcade had checked.
-pub fn light_from(entries: Vec<Entry>) -> Option<Headers<StandIn>> {
+pub fn light_from(entries: Vec<Entry>) -> Option<Headers<Clock>> {
     let d = DEF.get()?;
-    Headers::resume(d.net, &d.settings.genesis, StandIn, entries)
+    Headers::resume(d.net, &d.settings.genesis, d.settings.clock, entries)
 }
 
 /// The draw weight of a writer, as a borrowed copy can tell it: a genesis holder's from the
@@ -1187,12 +1584,14 @@ pub fn catalog(node: &Node) -> Result<Value, String> {
     let entry = |e: &arcade_arc::block::CatalogEntry| json!({"chain": e.chain, "family": e.family, "first": e.first, "last": e.last, "bytes": e.bytes, "root": hex(&e.root), "poster": hex(&e.poster)});
     let mut listed = Vec::new();
     for chain in svc.net.listed {
-        for (_, _, l) in cat.spans(chain, arcade_arc::segment::FAMILY_BLOCKS) {
-            if let Some(l) = l {
-                let mut v = entry(&l.entry);
-                v["id"] = json!(hex(&l.id));
-                v["height"] = json!(l.height);
-                listed.push(v);
+        for &family in arcade_arc::segment::FAMILIES {
+            for (_, _, l) in cat.spans(chain, family) {
+                if let Some(l) = l {
+                    let mut v = entry(&l.entry);
+                    v["id"] = json!(hex(&l.id));
+                    v["height"] = json!(l.height);
+                    listed.push(v);
+                }
             }
         }
     }
@@ -1237,7 +1636,7 @@ pub fn seal(node: &Arc<Node>, req: &Value) -> Result<Value, String> {
         .name("arc sealing".into())
         .spawn(move || {
             let t0 = Instant::now();
-            match crate::arcseal::seal(&n, &net, p, id, e.first, e.last, e.bytes, e.root) {
+            match crate::arcseal::seal(&n, &net, p, e.family, id, e.first, e.last, e.bytes, e.root) {
                 Ok(r) => eprintln!("arc: sealed {} {}..={} ({} leaves) in {:.0} s; replica root {}", r.chain, r.first, r.last, r.leaves, t0.elapsed().as_secs_f64(), hex::encode(r.replica_root)),
                 Err(why) => eprintln!("arc: sealing {}: {why}", hex::encode(id)),
             }
@@ -1256,15 +1655,113 @@ pub fn replicas(node: &Node) -> Result<Value, String> {
         .iter()
         .map(|r| {
             let id = arcade_arc::block::replica_id(&svc.net, &r.segment, &me);
-            json!({"segment": hex::encode(r.segment), "chain": r.chain, "first": r.first, "last": r.last, "bytes": r.bytes, "leaves": r.leaves,
+            json!({"segment": hex::encode(r.segment), "chain": r.chain, "family": r.family, "first": r.first, "last": r.last, "bytes": r.bytes, "leaves": r.leaves,
                    "replica_root": hex::encode(r.replica_root), "replica": hex::encode(id), "registered": reg.registered(&id),
-                   "commit_height": reg.commit(&id).map(|c| c.3)})
+                   // Storage audits missed in a row (§5.3): a replica that missed one doesn't count until it passes.
+                   "missed_audits": reg.replica_audit(&id).map(|a| a.1),
+                   "commit_height": reg.commit_of(&me).filter(|c| c.0.iter().any(|x| x.0 == r.segment)).map(|c| c.1),
+                   // This arcade's serving checks since its last turn, and pay held back by them (§5.4, per owner).
+                   "verdicts": {"served": reg.verdicts_of(&me).0, "not_served": reg.verdicts_of(&me).1},
+                   "held": reg.held_of(&me).0, "held_times": reg.held_of(&me).1})
         })
         .collect();
-    let weight = reg.weight(&me);
+    let weight = reg.pay_weight(&me);
     drop(st);
     let sealing = crate::arcseal::sealing().map(|(id, done, of)| json!({"segment": id, "done": done, "of": of}));
     Ok(json!({"replicas": list, "sealing": sealing, "weight": weight}))
+}
+
+/// `arc.sealing {chain}`: the segments of a chain as this arcade holds them for the ARCADE
+/// chain: waiting (offered, not confirmed), queued (confirmed, to be sealed here), sealing
+/// (done of leaves), registering, earning (its weight); this arcade's weight and the chain's
+/// total; why sealing waits, if it does. {on: false} when the ARCADE chain isn't running.
+pub fn sealing(node: &Node, req: &Value) -> Result<Value, String> {
+    let Some(svc) = svc() else { return Ok(json!({"on": false})) };
+    let key = req["chain"].as_str().ok_or("give a chain")?;
+    let me = node.identity.verifying_key().to_bytes();
+    let replicas = crate::arcseal::replicas(node, &svc.net);
+    let busy = crate::arcseal::sealing();
+    let st = svc.st.lock().unwrap();
+    let reg = st.chain.storage();
+    let cat = reg.catalog();
+    let listed = svc.net.listed.contains(&key);
+    let kept = crate::arcseg::kept(node, &svc.net).iter().any(|p| p.key == key);
+    let mut rows = Vec::new();
+    for (first, last, l) in cat.spans(key, arcade_arc::segment::FAMILY_BLOCKS) {
+        let Some(l) = l else { continue };
+        let id = arcade_arc::block::replica_id(&svc.net, &l.id, &me);
+        let mut v = json!({"first": first, "last": last, "bytes": l.entry.bytes, "segment": hex::encode(l.id)});
+        let holders = reg.holders_of(&l.id);
+        v["holders"] = json!(holders);
+        if reg.registered(&id) {
+            v["state"] = json!("earning");
+            v["weight"] = json!(l.entry.bytes / holders.max(1));
+        } else if replicas.iter().any(|r| r.segment == l.id) {
+            v["state"] = json!("registering");
+            v["commit_height"] = json!(reg.commit_of(&me).filter(|c| c.0.iter().any(|x| x.0 == l.id)).map(|c| c.1));
+        } else if let Some((sid, done, of)) = busy.as_ref().filter(|b| b.0 == hex::encode(l.id)) {
+            let _ = sid;
+            v["state"] = json!("sealing");
+            v["done"] = json!(done);
+            v["of"] = json!(of);
+        } else {
+            v["state"] = json!("queued");
+        }
+        rows.push(v);
+    }
+    for (_, c) in cat.all_waiting().filter(|(_, c)| c.entry.chain == key) {
+        rows.push(json!({"first": c.entry.first, "last": c.entry.last, "bytes": c.entry.bytes, "state": "waiting", "behind": c.behind.len()}));
+    }
+    rows.sort_by_key(|v| v["first"].as_u64());
+    let total: u64 = reg.all_replicas().iter().map(|r| r.3).sum::<u64>() + crate::arcsvc::genesis_total();
+    Ok(json!({"on": true, "chain": key, "listed": listed, "kept": kept, "segment_bytes": cat.segment_bytes(), "segments": rows,
+              "weight": reg.pay_weight(&me), "draw_weight": reg.weight(&me), "total_weight": total, "note": update_needed().unwrap_or_else(crate::arcseg::seal_note), "height": st.chain.tip().height}))
+}
+
+/// `arc.earn {chain, on?}`: the coin's Earn ARCADE switch (docs/ARCADECHAIN.md §14.17) and where
+/// it stands. `on: true` installs the ARCADE chain here first when it isn't (the switch is the
+/// only step an operator takes); the coin must be kept in full.
+pub fn earn(node: &Node, req: &Value) -> Result<Value, String> {
+    let key = req["chain"].as_str().ok_or("give a chain")?;
+    let p = node.chain_params(key).ok_or_else(|| format!("{key} isn't installed here"))?;
+    if let Some(on) = req["on"].as_bool() {
+        if on {
+            if node.mode_of(key).as_deref() != Some("full") {
+                return Err(format!("Earn ARCADE needs {} kept in full (its whole database is sealed)", p.name));
+            }
+            if svc().is_none() {
+                install(&node.self_arc())?;
+            }
+        }
+        crate::arcseg::set_earn(node, key, on)?;
+        let _ = node.app.event("chains", &format!("Earn ARCADE {} for {}", if on { "on" } else { "off" }, p.name));
+    }
+    let on = crate::arcseg::earn_on(node, key);
+    let Some(svc) = svc() else { return Ok(json!({"chain": key, "on": on, "running": false})) };
+    let (sealed, of) = crate::arcseg::earn_progress(node, &svc.net, p);
+    let me = node.identity.verifying_key().to_bytes();
+    let (weight, total, pot, height) = {
+        let st = svc.st.lock().unwrap();
+        let reg = st.chain.storage();
+        (reg.pay_weight(&me), reg.all_replicas().iter().map(|r| r.3).sum::<u64>() + genesis_total(), reg.pot(), st.chain.tip().height)
+    };
+    let sealing = crate::arcseal::sealing().map(|(_, d, o)| json!({"done": d, "of": o}));
+    // The indexes journaled here, sealed after the blocks.
+    let indexes: Vec<Value> = crate::arcseg::families(node, p)
+        .into_iter()
+        .filter(|f| *f != arcade_arc::segment::FAMILY_BLOCKS)
+        .map(|f| {
+            let (to, of) = crate::arcseg::family_progress(node, &svc.net, p, f);
+            json!({"family": f, "name": crate::arcseg::family_name(f), "sealed_to": to, "of": of})
+        })
+        .collect();
+    Ok(json!({"chain": key, "on": on, "running": true, "sealed_to": sealed, "of": of, "indexes": indexes, "sealing": sealing, "weight": weight, "total_weight": total,
+              "pot": pot, "height": height, "note": update_needed().unwrap_or_else(crate::arcseg::seal_note)}))
+}
+
+/// The genesis holders' weight together.
+pub fn genesis_total() -> u64 {
+    DEF.get().map(|d| d.settings.holders.iter().map(|h| h.1).sum()).unwrap_or(0)
 }
 
 /// `arc.open {segment, leaves:[i..]}`: leaves of one of this arcade's replicas, opened.
@@ -1293,7 +1790,8 @@ pub fn segment_root(node: &Node, req: &Value) -> Result<Value, String> {
     let key = req["chain"].as_str().ok_or("give a chain")?;
     let p = node.chain_params(key).ok_or_else(|| format!("{key} isn't kept here"))?;
     let (first, last) = (req["first"].as_u64().ok_or("give first")?, req["last"].as_u64().ok_or("give last")?);
-    let (bytes, root) = crate::arcseg::root_of(node, p, first, last).ok_or("those blocks aren't all here")?;
+    let family = req["family"].as_u64().unwrap_or(0) as u8;
+    let (bytes, root) = crate::arcseg::root_of(node, p, family, first, last).ok_or("those heights aren't all here")?;
     Ok(json!({"chain": key, "first": first, "last": last, "bytes": bytes, "root": hex::encode(root)}))
 }
 
@@ -1320,6 +1818,7 @@ pub fn pool(_req: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arcade_arc::script;
     use arcade_arc::vrf;
     use arcade_chain::hash::hash160;
     use arcade_chain::{OutPoint, TxIn, TxOut};
@@ -1333,8 +1832,9 @@ mod tests {
     fn the_built_in_testnet_reads() {
         let s = Settings::parse(&NET, TESTNET_SETTINGS).unwrap();
         assert_eq!(s.holders.len(), 2);
-        assert_eq!(s.segment_bytes, params::SEGMENT_BYTES);
+        assert_eq!(s.segment_bytes, arcade_arc::params::SEGMENT_BYTES, "16 MiB segments on the testnet, as on the mainnet");
         assert!(Registry::new(&NET, &s.holders, s.segment_bytes).is_some());
+        println!("testnet block 0: {}", s.genesis.id(&NET));
     }
     const START: u64 = 1_797_000_000;
     const LATE: u64 = START + 10_000_000;
@@ -1381,18 +1881,18 @@ mod tests {
 
     fn chain() -> LocalChain {
         let s = Settings::parse(&NET, &settings()).unwrap();
-        Chain::new(NET, &s.genesis, StandIn, Registry::new(&NET, &s.holders, arcade_arc::params::SEGMENT_BYTES).unwrap(), &[])
+        Chain::new(NET, &s.genesis, Clock::StandIn, Registry::new(&NET, &s.holders, arcade_arc::params::SEGMENT_BYTES).unwrap(), &[])
     }
 
     /// `who`'s block on the tip, 150 seconds after it, with what waits in `pool`.
-    fn block_with(c: &LocalChain, who: u8, pool: &Pool, pay: Option<&[u8]>) -> Block {
+    fn block_with(c: &LocalChain, who: u8, pool: &Pool) -> Block {
         let seed = seed_proof(c);
         let t = c.ticket(&secret(who), seed.as_ref()).unwrap();
-        write_block(c, pool, pay, &secret(who), &t, seed, c.tip().time + params::BLOCK_SECONDS)
+        write_block(c, pool, &secret(who), &t, StandIn.prove(&t.challenge, t.steps), seed, c.tip().time + params::BLOCK_SECONDS)
     }
 
     fn block_by(c: &LocalChain, who: u8) -> Block {
-        block_with(c, who, &Pool::default(), Some(&pay_script(who)))
+        block_with(c, who, &Pool::default())
     }
 
     /// `who` spends its coin `from` (worth `value`): `amount` to `to`, the rest less `fee` back.
@@ -1416,6 +1916,14 @@ mod tests {
         Tx::parse_with(&tx.encode_legacy(), &TX_FORMAT).unwrap()
     }
 
+    /// The block that first pays holder `who`: its turn after the first settlement (block 100).
+    fn first_paid(who: u8) -> u64 {
+        let mut address = [NET.p2pkh_version; 21];
+        address[1..].copy_from_slice(&coin_key(who).2);
+        let t = arcade_arc::registry::turn(&NET, &arcade_arc::registry::Earner::Genesis(address));
+        (101..).find(|h| h % NET.audit_period == t).unwrap()
+    }
+
     fn grow(c: &mut LocalChain, who: u8, blocks: u64) {
         for _ in 0..blocks {
             let b = block_by(c, who);
@@ -1429,6 +1937,55 @@ mod tests {
         for h in 0..=c.tip().height {
             assert_eq!(db.hash_at(p.chain_no, h as u32).unwrap(), c.id_at(h));
         }
+    }
+
+    #[test]
+    fn a_block_carries_each_kind_up_to_its_limit_and_commits_with_most_work_first() {
+        use arcade_arc::block::{Item, RegCommit, Verdict};
+        let verdict = |n: u8| Item::Verdict(Verdict { owner: [n; 32], height: 1, checker: [1; 32], vrf_proof: [0; 80], served: true, sig: [0; 64] });
+        let commit = |n: u64| Item::RegCommit(RegCommit { owner: [2; 32], payout: [0x53; 21], replicas: vec![([1; 32], [2; 32])], anchor: 1, nonce: n, sig: [0; 64] });
+        let mut items: Vec<Item> = (0..params::MAX_REGISTRATION_COMMITS as u64 + 50).map(commit).collect();
+        items.extend((0..params::MAX_VERDICTS + 20).map(|i| verdict(i as u8)));
+        // Work: the nonce, here.
+        let work = |i: &Item| if let Item::RegCommit(c) = i { c.nonce as u32 } else { 0 };
+        let out = order_and_cap(items, work);
+        let commits: Vec<u64> = out.iter().filter_map(|i| if let Item::RegCommit(c) = i { Some(c.nonce) } else { None }).collect();
+        assert_eq!(commits.len(), params::MAX_REGISTRATION_COMMITS);
+        assert_eq!(commits[0], params::MAX_REGISTRATION_COMMITS as u64 + 49, "most work first");
+        assert!(commits.iter().all(|&n| n >= 50), "the least work left out");
+        assert_eq!(out.iter().filter(|i| matches!(i, Item::Verdict(_))).count(), params::MAX_VERDICTS);
+        // In group order: verdicts (4) before commits (5).
+        assert!(out.windows(2).all(|w| w[0].tag() >> 4 <= w[1].tag() >> 4));
+    }
+
+    #[test]
+    fn only_rule_breaking_blocks_count_against_a_peer() {
+        // Out of order, far back, early or known bad already: not its sender's fault.
+        for e in [ChainError::Orphan, ChainError::AheadOfClock, ChainError::TooDeep, ChainError::KnownInvalid] {
+            assert!(!broke_rules(&e), "{e}");
+        }
+        for e in [ChainError::Draw, ChainError::Weight, ChainError::TimeProof, ChainError::RulesVersion, ChainError::Difficulty] {
+            assert!(broke_rules(&e), "{e}");
+        }
+    }
+
+    #[test]
+    fn old_arcades_are_not_heard_and_newer_rules_ask_for_an_update() {
+        // An arcade speaking no protocol number (an older release): its ARCADE frames aren't taken.
+        assert!(!speaks("old-peer", &json!({"op": "tip"})));
+        assert!(OUTDATED.lock().unwrap().contains("old-peer"));
+        // One with the same rules: taken, nothing to update.
+        assert!(speaks("same-peer", &json!({"pv": params::PROTOCOL, "rules": [[1, 0]]})));
+        assert!(update_needed().is_none());
+        // One that schedules a version this arcade doesn't know: taken until then, and the operator is told.
+        let next = params::RULES_KNOWN + 1;
+        assert!(speaks("new-peer", &json!({"pv": params::PROTOCOL, "rules": [[1, 0], [next, 50_000]]})));
+        let said = update_needed().unwrap();
+        assert!(said.contains(&format!("version {next} from block 50000")), "{said}");
+        // The earliest such height is the one said.
+        speaks("newer-peer", &json!({"pv": params::PROTOCOL, "rules": [[1, 0], [next, 40_000]]}));
+        assert!(update_needed().unwrap().contains("block 40000"));
+        *UPDATE.lock().unwrap() = None;
     }
 
     #[test]
@@ -1451,25 +2008,26 @@ mod tests {
         let mut c = chain();
         let p = store::chain_params(&NET, &c.id_at(0).unwrap());
 
-        // Block 0 alone, then 105 blocks (past the first pot).
+        // Block 0 alone, then past holder 1's first payout.
+        let fork = first_paid(1) + 1;
         reconcile(&db, p, &c).unwrap();
         stored_matches(&db, p, &c);
-        grow(&mut c, 1, 105);
+        grow(&mut c, 1, fork + 5);
         reconcile(&db, p, &c).unwrap();
         stored_matches(&db, p, &c);
         // Again changes nothing.
         reconcile(&db, p, &c).unwrap();
         stored_matches(&db, p, &c);
 
-        // Another arcade went its own way from block 100: eight blocks by the other writer
+        // Another arcade went its own way from block `fork`: eight blocks by the other writer
         // against this one's last five, so this one changes branch and the store with it.
         let mut other = chain();
-        for h in 1..=100 {
+        for h in 1..=fork {
             other.accept(c.block(&c.id_at(h).unwrap()).unwrap().clone(), LATE).unwrap();
         }
         grow(&mut other, 2, 8);
         let before = c.tip().id;
-        for h in 101..=108 {
+        for h in fork + 1..=fork + 8 {
             c.accept(other.block(&other.id_at(h).unwrap()).unwrap().clone(), LATE).unwrap();
         }
         assert_ne!(c.tip().id, before);
@@ -1487,13 +2045,19 @@ mod tests {
     }
 
     #[test]
-    fn a_block_takes_what_waits_and_its_writer_the_fees() {
+    fn a_block_takes_what_waits_and_its_fees_join_the_pot() {
         let mut c = chain();
-        // The first pot is paid in block 100 and can be spent 100 blocks on.
-        grow(&mut c, 2, 199);
+        // Holder 1's first pay comes at its turn and can be spent 100 blocks on. (A block
+        // that settles an epoch is skipped: the pot is shared there.)
+        let paid_at = first_paid(1);
+        let mut n = paid_at + 99;
+        while (n + 1) % params::EPOCH_BLOCKS == 0 {
+            n += 1;
+        }
+        grow(&mut c, 2, n);
         let mine = pay_script(1);
         let (from, coin) = c.coins().iter().find(|(_, coin)| coin.script == mine).map(|(at, coin)| (*at, coin.clone())).expect("holder 1 was paid");
-        assert!(coin.coinbase && coin.height == 100);
+        assert!(coin.coinbase && coin.height == paid_at);
 
         let mut pool = Pool::default();
         let next = c.tip().height + 1;
@@ -1505,27 +2069,20 @@ mod tests {
         // A block earlier the reward is too young, and the rules say so too.
         assert!(Pool::default().add(first.clone(), c.coins(), next - 1).is_err());
 
-        // Writer 2's block carries both, and its coinbase ends with their fees.
+        // Writer 2's block carries both, the parent first; its coinbase pays only what is owed.
         let fees = params::COIN / 100 + params::COIN / 50;
-        let b = block_with(&c, 2, &pool, Some(&pay_script(2)));
+        let b = block_with(&c, 2, &pool);
         assert_eq!(b.txs.iter().map(|t| t.txid).collect::<Vec<_>>()[1..], [first.txid, second.txid]);
-        let last = b.txs[0].outputs.last().unwrap();
-        assert_eq!((last.value, &last.script_pubkey), (fees, &pay_script(2)));
-        // A writer with nowhere to be paid leaves the fees: the block holds all the same.
-        let burnt = block_with(&c, 1, &pool, None);
-        assert_eq!(burnt.txs.len(), 3);
-        assert_eq!(burnt.txs[0].outputs.len(), c.payouts().len());
-        assert_eq!(b.txs[0].outputs.len(), c.payouts().len() + 1);
-        let mut other = chain();
-        for h in 1..=c.tip().height {
-            other.accept(c.block(&c.id_at(h).unwrap()).unwrap().clone(), LATE).unwrap();
-        }
-        assert!(matches!(other.accept(burnt, LATE), Ok(Accepted::Tip { .. })));
-
+        assert_eq!(b.txs[0].outputs.len(), c.payouts().len().max(1), "nobody's turn: one empty output");
+        // Any writer writes the same block body.
+        assert_eq!(block_with(&c, 1, &pool).txs, b.txs);
+        let pot = c.storage().pot();
         assert!(matches!(c.accept(b, LATE), Ok(Accepted::Tip { .. })));
         let theirs: u64 = c.coins().values().filter(|coin| coin.script == pay_script(2) && !coin.coinbase).map(|coin| coin.value).sum();
         assert_eq!(theirs, 8 * params::COIN);
-        assert!(c.coins().values().any(|coin| coin.coinbase && coin.height == 200 && coin.value == fees));
+        // The fees are nobody's coin: they wait in the pot for the next settlement.
+        assert!(!c.coins().values().any(|coin| coin.coinbase && coin.height == next && coin.value == fees));
+        assert_eq!(c.storage().pot(), pot + params::BLOCK_REWARD + fees);
         pool.retip(c.coins(), c.tip().height + 1, Vec::new());
         assert!(pool.is_empty());
     }
@@ -1551,7 +2108,7 @@ mod tests {
         // And with another chain's settings in the same home: nothing of the old copy stays.
         let text = settings().replace(&"04".repeat(32), &"05".repeat(32));
         let s = Settings::parse(&NET, &text).unwrap();
-        let mut new = Chain::new(NET, &s.genesis, StandIn, Registry::new(&NET, &s.holders, arcade_arc::params::SEGMENT_BYTES).unwrap(), &[]);
+        let mut new = Chain::new(NET, &s.genesis, Clock::StandIn, Registry::new(&NET, &s.holders, arcade_arc::params::SEGMENT_BYTES).unwrap(), &[]);
         grow(&mut new, 2, 3);
         let p2 = store::chain_params(&NET, &new.id_at(0).unwrap());
         reconcile(&db, p2, &new).unwrap();

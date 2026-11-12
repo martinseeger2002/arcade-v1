@@ -30,6 +30,10 @@ pub const MEMPOOL_SPENDS: &str = "core.v1.mempool_spends"; // C|T12|vout -> spen
 pub const ADDR_LOG: &str = "core.v1.addr_log";
 /// The tx index in sorted runs while catching up (txruns): C|run u32|T12|B|P -> "".
 pub const TXS_RUNS: &str = "core.v1.txs_runs";
+/// Index journals (docs/ARCADECHAIN.md §2.2, §14.17): C|family u8|height u32 -> what that
+/// block changed in the family's tables ([`crate::journal`]). A family's segment is its
+/// journals for a range of heights, sealed like blocks.
+pub const JOURNAL: &str = "core.v1.journal";
 
 static TABLES: &[TableDef] = &[
     TableDef::plain(HEADERS),
@@ -48,6 +52,7 @@ static TABLES: &[TableDef] = &[
     TableDef::plain(MEMPOOL_SPENDS),
     TableDef::plain(ADDR_LOG),
     TableDef::plain(TXS_RUNS),
+    TableDef::plain(JOURNAL),
 ];
 
 fn add_addr_log(_w: &arcade_store::WriteTxn) -> arcade_store::Result<()> {
@@ -70,11 +75,12 @@ static MIGRATIONS: &[arcade_store::Migration] = &[
     arcade_store::Migration { to: 2, run: add_mempool },
     arcade_store::Migration { to: 3, run: relayout },
     arcade_store::Migration { to: 4, run: add_addr_log },
+    arcade_store::Migration { to: 5, run: add_addr_log }, // the journal table: created before migrations run
 ];
 
 pub static CHAIN_SCHEMA: Schema = Schema {
     name: "chain",
-    version: 4,
+    version: 5,
     tables: TABLES,
     migrations: MIGRATIONS,
     max_size: 4 << 40, // 4 TiB ceiling; the file grows as needed
@@ -137,6 +143,9 @@ pub fn k_hist(c: u16, sid: &[u8; 21], height: u32, t12: &[u8; 12]) -> Vec<u8> {
 }
 pub fn k_state(c: u16, name: &str) -> Vec<u8> {
     KeyBuf::new().u16(c).bytes(name.as_bytes()).done()
+}
+pub fn k_journal(c: u16, family: u8, height: u32) -> Vec<u8> {
+    KeyBuf::new().u16(c).u8(family).u32(height).done()
 }
 pub fn k_chain(c: u16) -> Vec<u8> {
     KeyBuf::new().u16(c).done()

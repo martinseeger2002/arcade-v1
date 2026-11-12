@@ -49,6 +49,20 @@ pub fn link_add(links: &Mutex<BTreeMap<String, LinkInfo>>, addr: &str, node_id: 
     key
 }
 
+/// A tip whose block time is more than a day before `now`.
+fn tip_old(tip_time: u64, now: u64) -> bool {
+    now.saturating_sub(tip_time) > 24 * 3600
+}
+
+#[cfg(test)]
+#[test]
+fn a_tip_more_than_a_day_old_is_old() {
+    let now = 1_800_000_000;
+    assert!(tip_old(now - 25 * 3600, now));
+    assert!(!tip_old(now - 3600, now));
+    assert!(!tip_old(now + 60, now), "a block time a little ahead of the clock");
+}
+
 /// Remove the entry `link_add` made for one link.
 pub fn link_remove(links: &Mutex<BTreeMap<String, LinkInfo>>, key: &str) {
     links.lock().unwrap().remove(key);
@@ -256,8 +270,16 @@ impl Node {
         let c = p.chain_no;
         let tip = self.chain.tip(c).ok().flatten().map(|t| t.height).unwrap_or(0);
         let best = self.chain.best_header(c).ok().flatten().and_then(|h| self.chain.header(c, &h).ok().flatten()).map(|r| r.height).unwrap_or(0);
-        let told = self.extra.lock().unwrap().values().find(|r| r.params.chain_no == c).map(|r| r.peer_tip.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(0);
-        best.max(told).saturating_sub(tip) > arcade_chaindb::sync::DEFER_BEHIND
+        let told = self.extra.lock().unwrap().values().find(|r| r.params.chain_no == c).map(|r| r.peer_tip.load(std::sync::atomic::Ordering::Relaxed));
+        // An installed chain no source has told its height yet (just after a start): a tip
+        // more than a day old counts as far behind, or the address build would start on a
+        // chain hundreds of thousands of blocks short before the first peer answers.
+        let unknown_and_old = told == Some(0) && {
+            let tip_time = self.chain.tip(c).ok().flatten().and_then(|t| self.chain.header(c, &t.hash).ok().flatten()).map(|r| r.header.time as u64).unwrap_or(0);
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            tip_old(tip_time, now)
+        };
+        unknown_and_old || best.max(told.unwrap_or(0)).saturating_sub(tip) > arcade_chaindb::sync::DEFER_BEHIND
     }
 
     /// Coin peers to try, best first: the address book's (worked before, then newly heard of),

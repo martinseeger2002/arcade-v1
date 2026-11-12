@@ -832,6 +832,17 @@ impl Indexer for OrdIndexer {
     fn name(&self) -> &'static str {
         "ord.v1"
     }
+    /// Its own tables are journaled (docs/ARCADECHAIN.md §2.2), and each rider's apart; the
+    /// derived tables are each arcade's own.
+    fn journals(&self) -> Vec<(u8, Vec<&'static str>)> {
+        let mut v = vec![(arcade_chaindb::journal::ORD, TABLES.to_vec())];
+        for h in &self.hooks {
+            if let Some(f) = arcade_chaindb::journal::rider_family(h.name()) {
+                v.push((f, h.tables().iter().map(|t| t.name).collect()));
+            }
+        }
+        v
+    }
     fn tables(&self) -> Vec<TableDef> {
         let mut t: Vec<TableDef> = TABLES.iter().chain(DERIVED).map(|n| TableDef::plain(n)).collect();
         for h in &self.hooks {

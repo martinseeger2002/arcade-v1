@@ -61,6 +61,11 @@ fn challenge_scalar(c: &[u8; 16]) -> Scalar {
     Scalar::from_bytes_mod_order(wide)
 }
 
+/// The output a proof gives, without checking it (the writer's own proof, to order its block).
+pub fn output_of_proof(proof: &VrfProof) -> Option<Output> {
+    Some(output_of(&string_to_point(proof[..32].try_into().ok()?)?))
+}
+
 fn output_of(gamma: &EdwardsPoint) -> Output {
     sha512(&[&[SUITE, 0x03], gamma.mul_by_cofactor().compress().as_bytes(), &[0x00]])
 }

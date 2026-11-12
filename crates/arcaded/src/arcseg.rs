@@ -9,8 +9,10 @@
 //!   op "it", the items one after another as blocks hold them).
 //! - **Segments**: for a listed chain this arcade keeps in full, every complete range of
 //!   heights (100 blocks below its tip, so a reorg of that chain can't move it) is measured
-//!   once, and the chain is cut by the catalog's rule (segment::cut). A segment's root is
-//!   made from the blocks as the chain stores them.
+//!   once per family, and cut by the catalog's rule (segment::cut). Families: the blocks (0),
+//!   and each index this arcade journals from its start (arcade_chaindb::journal; ord = 1).
+//!   A segment's root is made from the blocks as the chain sends them, or from the journal
+//!   records of those heights.
 //! - **Posting**: with draw weight, this arcade offers the next segment of each such chain when
 //!   nobody has, and attests every waiting entry whose root it made itself. It never stands
 //!   behind two entries for the same heights (the catalog refuses that anyway).
@@ -97,10 +99,17 @@ pub fn on_items(net: &Net, blob: &[u8]) -> usize {
         let signed = match &item {
             Item::CatalogEntry(e) => block::verify(&e.poster, &e.message(net), &e.sig),
             Item::Attest(a) => block::verify(&a.attester, &a.message(net), &a.sig),
-            // Checked by the chain (a commit's signature covers its anchor block's id): a writer
-            // carries only what the next block can.
-            Item::RegCommit(_) | Item::RegProof(_) => true,
-            _ => false, // the chain takes nothing else yet
+            // Checked by the chain (a commit's or a verdict's signature covers a block's id): a
+            // writer carries only what the next block can.
+            Item::RegCommit(_) | Item::RegProof(_) | Item::Verdict(_) | Item::AuditCommit(_) | Item::AuditOpening(_) | Item::Reaudit(_) => true,
+            // Only a real proof of two blocks signed on one parent.
+            Item::Equivocation(e) => e.proves(net),
+            // Checked by the chain against its own source headers (§2.4).
+            Item::BadHeader(_) => true,
+            Item::TxChallenge(c) => block::verify(&c.challenger, &c.message(net), &c.sig),
+            Item::TxAnswer(_) => true,
+            Item::RevealDemand(d) => block::verify(&d.demander, &d.message(net), &d.sig),
+            Item::RevealAnswer(_) => true,
         };
         if signed && add(item) {
             n += 1;
@@ -111,7 +120,7 @@ pub fn on_items(net: &Net, blob: &[u8]) -> usize {
 
 // ---------------- segments ----------------
 
-/// Per chain: bytes of the blocks of each complete range, from range 0 on, and the roots made
+/// Per (chain, family): bytes of each complete range, from range 0 on, and the roots made
 /// (first height -> (last, bytes, root)).
 #[derive(Default)]
 struct Cut {
@@ -119,7 +128,7 @@ struct Cut {
     roots: BTreeMap<u64, (u64, u64, Hash)>,
 }
 
-static CUTS: Mutex<BTreeMap<u16, Cut>> = Mutex::new(BTreeMap::new());
+static CUTS: Mutex<BTreeMap<(u16, u8), Cut>> = Mutex::new(BTreeMap::new());
 /// Ranges were left to measure at the last round: the next comes soon.
 static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -127,55 +136,164 @@ pub fn busy() -> bool {
     BUSY.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn block_bytes(node: &Node, p: &ChainParams, h: u32) -> Option<Vec<u8>> {
+/// Block `h` of a kept chain as its segments hold it: a coin's as its network sends it; the
+/// ARCADE chain's as the chain writes it (its stored copy has another shape).
+pub fn block_bytes(node: &Node, p: &ChainParams, h: u32) -> Option<Vec<u8>> {
+    if crate::arcsvc::runs(p) {
+        return crate::arcsvc::raw_block_at(h as u64);
+    }
     let id = node.chain.hash_at(p.chain_no, h).ok()??;
     node.chain.block_raw(p.chain_no, &id).ok()?
 }
 
-/// Measure the ranges of `p` not measured yet, up to `SETTLED` below its tip (a few at a time:
-/// every block is read once). Whether some are left.
-fn measure(node: &Node, p: &ChainParams, most: usize) -> bool {
-    let tip = node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height).unwrap_or(0);
-    let settled = tip.saturating_sub(SETTLED) as u64;
+/// Height `h`'s unit of a family's segments: the block, or its index journal record (the
+/// empty record before the index starts).
+pub fn unit_bytes(node: &Node, p: &ChainParams, family: u8, h: u32) -> Option<Vec<u8>> {
+    if family == segment::FAMILY_BLOCKS {
+        return block_bytes(node, p, h);
+    }
+    if family == segment::FAMILY_COINS {
+        return coins_record(node, p, h);
+    }
+    let (start, _) = journal_span(node, p, family)?;
+    if h < start {
+        return Some(arcade_chaindb::journal::EMPTY.to_vec());
+    }
+    node.chain.journal(p.chain_no, family, h).ok()?
+}
+
+/// The coins block `h` spends (segment::FAMILY_COINS), made from the blocks: each input's coin read from the
+/// transaction that made it. The same bytes on every arcade that keeps the chain.
+pub fn coins_record(node: &Node, p: &ChainParams, h: u32) -> Option<Vec<u8>> {
+    let block = arcade_chain::Block::parse_with(&block_bytes(node, p, h)?, &p.format).ok()?;
+    let mut out = Vec::new();
+    let mut n = 0u32;
+    for tx in block.txs.iter().filter(|t| !t.is_coinbase()) {
+        for i in &tx.inputs {
+            let (raw, b) = node.chain.tx_raw(p, &i.prevout.txid).ok()??;
+            let prev = arcade_chain::Tx::parse_with(&raw, &p.format).ok()?;
+            let o = prev.outputs.get(i.prevout.vout as usize)?;
+            let made_at = node.chain.block_height_of(p.chain_no, b).ok()??;
+            out.extend_from_slice(&i.prevout.txid.0);
+            out.extend_from_slice(&i.prevout.vout.to_le_bytes());
+            out.extend_from_slice(&o.value.to_le_bytes());
+            out.extend_from_slice(&made_at.to_le_bytes());
+            out.push(prev.is_coinbase() as u8);
+            out.extend_from_slice(&(o.script_pubkey.len() as u32).to_le_bytes());
+            out.extend_from_slice(&o.script_pubkey);
+            n += 1;
+        }
+    }
+    let mut rec = n.to_le_bytes().to_vec();
+    rec.extend(out);
+    Some(rec)
+}
+
+/// The index families, with the indexer each comes from (the riders come with ord's).
+const JOURNALED: &[(u8, &str)] = {
+    use arcade_chaindb::journal::*;
+    &[(ORD, "ord.v1"), (LEDGER, "ledger.v1"), (PROFILES, "profiles.v1"), (MESSAGES, "messages.v1"), (NAMES, "ord.v1"), (TOKENS, "ord.v1"), (MAPS, "ord.v1"), (TAGS, "tags.v1")]
+};
+
+/// Of a family's journals on a chain: the index's first height and the last height journaled,
+/// when they run here from the index's start (an index taken in as a copy has no journals for
+/// the heights before; its family isn't offered or sealed).
+fn journal_span(node: &Node, p: &ChainParams, family: u8) -> Option<(u32, u32)> {
+    let (_, name) = JOURNALED.iter().find(|(f, _)| *f == family)?;
+    let start = node.chain.indexer_start(p, name)?;
+    let from = node.chain.journal_from(p.chain_no, family).ok()??;
+    if from > start {
+        return None;
+    }
+    let to = node.chain.indexed_to(p.chain_no, name).ok()??;
+    Some((start, to))
+}
+
+/// The families of a chain this arcade can cut: the blocks, and every journaled index.
+pub fn families(node: &Node, p: &ChainParams) -> Vec<u8> {
+    let mut v = vec![segment::FAMILY_BLOCKS];
+    if !crate::arcsvc::runs(p) {
+        // The coins each block spends: from the blocks, on every coin kept here.
+        v.push(segment::FAMILY_COINS);
+        v.extend(JOURNALED.iter().map(|(f, _)| *f).filter(|f| journal_span(node, p, *f).is_some()));
+    }
+    v
+}
+
+/// A family's name for people.
+pub fn family_name(family: u8) -> &'static str {
+    use arcade_chaindb::journal::*;
+    match family {
+        segment::FAMILY_BLOCKS => "blocks",
+        ORD => "ord index",
+        LEDGER => "ledger",
+        PROFILES => "profiles",
+        MESSAGES => "messages",
+        NAMES => "names",
+        TOKENS => "tokens",
+        MAPS => "maps",
+        TAGS => "tags",
+        segment::FAMILY_COINS => "coins",
+        _ => "index",
+    }
+}
+
+/// A chain's height here.
+fn tip_of(node: &Node, p: &ChainParams) -> u32 {
+    if crate::arcsvc::runs(p) {
+        return crate::arcsvc::height().unwrap_or(0) as u32;
+    }
+    node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height).unwrap_or(0)
+}
+
+/// Measure the ranges of a family of `p` not measured yet, up to `SETTLED` below its tip (and
+/// for an index, no further than it has journaled), a few at a time: every unit is read once.
+/// Whether some are left.
+fn measure(node: &Node, p: &ChainParams, family: u8, most: usize) -> bool {
+    let tip = tip_of(node, p);
+    let mut settled = tip.saturating_sub(SETTLED) as u64;
+    if family != segment::FAMILY_BLOCKS {
+        let Some((_, to)) = journal_span(node, p, family) else { return false };
+        settled = settled.min(to as u64);
+    }
     for _ in 0..most {
-        let i = CUTS.lock().unwrap().entry(p.chain_no).or_default().ranges.len() as u64;
+        let i = CUTS.lock().unwrap().entry((p.chain_no, family)).or_default().ranges.len() as u64;
         let last = i * RANGE + RANGE - 1;
         if last > settled {
             return false;
         }
         let mut sum = 0u64;
         for h in i * RANGE..=last {
-            let Some(b) = block_bytes(node, p, h as u32) else { return false };
+            let Some(b) = unit_bytes(node, p, family, h as u32) else { return false };
             sum += b.len() as u64;
         }
-        CUTS.lock().unwrap().entry(p.chain_no).or_default().ranges.push(sum);
+        CUTS.lock().unwrap().entry((p.chain_no, family)).or_default().ranges.push(sum);
     }
     true
 }
 
-/// The segments `p` is cut into so far, by the catalog's size.
-pub fn spans(c: u16, full: u64) -> Vec<Span> {
-    CUTS.lock().unwrap().get(&c).map(|cut| segment::cut(&cut.ranges, full)).unwrap_or_default()
+/// The segments a family of `p` is cut into so far, by the catalog's size.
+pub fn spans(c: u16, family: u8, full: u64) -> Vec<Span> {
+    CUTS.lock().unwrap().get(&(c, family)).map(|cut| segment::cut(&cut.ranges, full)).unwrap_or_default()
 }
 
-/// A segment's (bytes, root), made from the stored blocks (and kept).
-pub fn root_of(node: &Node, p: &ChainParams, first: u64, last: u64) -> Option<(u64, Hash)> {
-    if let Some((l, bytes, root)) = CUTS.lock().unwrap().get(&p.chain_no).and_then(|c| c.roots.get(&first).copied()) {
+/// A segment's (bytes, root), made from the stored units (and kept).
+pub fn root_of(node: &Node, p: &ChainParams, family: u8, first: u64, last: u64) -> Option<(u64, Hash)> {
+    if let Some((l, bytes, root)) = CUTS.lock().unwrap().get(&(p.chain_no, family)).and_then(|c| c.roots.get(&first).copied()) {
         if l == last {
             return Some((bytes, root));
         }
     }
     let mut sizes = Vec::with_capacity((last - first + 1) as usize);
-    for h in first..=last {
-        sizes.push(block_bytes(node, p, h as u32)?.len() as u64);
-    }
     let mut r = Rooter::new();
-    r.push(&segment::table(&sizes));
     for h in first..=last {
-        r.push(&block_bytes(node, p, h as u32)?);
+        let u = unit_bytes(node, p, family, h as u32)?;
+        sizes.push(u.len() as u64);
+        r.push(&u);
     }
+    r.push(&segment::table(&sizes));
     let (root, bytes) = r.finish().ok()?;
-    CUTS.lock().unwrap().entry(p.chain_no).or_default().roots.insert(first, (last, bytes, root));
+    CUTS.lock().unwrap().entry((p.chain_no, family)).or_default().roots.insert(first, (last, bytes, root));
     Some((bytes, root))
 }
 
@@ -183,8 +301,11 @@ pub fn root_of(node: &Node, p: &ChainParams, first: u64, last: u64) -> Option<(u
 pub fn kept(node: &Node, net: &Net) -> Vec<&'static ChainParams> {
     net.listed
         .iter()
-        .filter_map(|k| node.chain_params(k))
-        .filter(|p| node.mode_of(p.key).as_deref() == Some("full") && crate::chains::kept(node, p))
+        .filter_map(|k| match crate::arcsvc::defined().filter(|d| d.key == *k) {
+            // The ARCADE chain itself, while it runs here.
+            Some(d) => crate::arcsvc::runs(d).then_some(d),
+            None => node.chain_params(k).filter(|p| node.mode_of(p.key).as_deref() == Some("full") && crate::chains::kept(node, p)),
+        })
         .collect()
 }
 
@@ -198,7 +319,7 @@ pub fn round(node: &Node, net: &Net, catalog: &Catalog, weight: u64) {
     let stale: Vec<Item> = waiting()
         .into_iter()
         .filter(|i| match i {
-            Item::CatalogEntry(e) => catalog.next(&e.chain, e.family) > e.first && !catalog.all_waiting().any(|(_, o)| o.entry.chain == e.chain && o.entry.first == e.first),
+            Item::CatalogEntry(e) => catalog.next(&e.chain, e.family) > e.first && !catalog.all_waiting().any(|(_, o)| o.entry.chain == e.chain && o.entry.family == e.family && o.entry.first == e.first),
             Item::Attest(a) => catalog.waiting(&a.segment).is_none() && !waiting().iter().any(|w| matches!(w, Item::CatalogEntry(e) if e.segment(net) == a.segment)),
             _ => true,
         })
@@ -206,91 +327,282 @@ pub fn round(node: &Node, net: &Net, catalog: &Catalog, weight: u64) {
     forget(&stale);
     let mut more = false;
     for p in kept(node, net) {
-        more |= measure(node, p, 50);
-        if weight == 0 {
-            continue;
-        }
-        // Attest what matches our own root.
-        for (id, cand) in catalog.all_waiting() {
-            let e = &cand.entry;
-            if e.chain != p.key || cand.behind.contains(&me) {
+        for family in families(node, p) {
+            more |= measure(node, p, family, 50);
+            if weight == 0 {
                 continue;
             }
-            // Never behind two entries for the same heights.
-            if catalog.all_waiting().any(|(_, o)| o.entry.chain == e.chain && o.entry.first == e.first && o.behind.contains(&me)) {
+            // Attest what matches our own root.
+            for (id, cand) in catalog.all_waiting() {
+                let e = &cand.entry;
+                if e.chain != p.key || e.family != family || cand.behind.contains(&me) {
+                    continue;
+                }
+                // Never behind two entries for the same heights.
+                if catalog.all_waiting().any(|(_, o)| o.entry.chain == e.chain && o.entry.family == e.family && o.entry.first == e.first && o.behind.contains(&me)) {
+                    continue;
+                }
+                if root_of(node, p, family, e.first, e.last) == Some((e.bytes, e.root)) {
+                    let mut a = Attest { segment: *id, attester: me, sig: [0; 64] };
+                    a.sig = block::sign(&node.identity, &a.message(net));
+                    add(Item::Attest(a));
+                }
+            }
+            // Offer the next segment when nobody has.
+            let next = catalog.next(p.key, family);
+            if catalog.all_waiting().any(|(_, o)| o.entry.chain == p.key && o.entry.family == family && o.entry.first == next) {
                 continue;
             }
-            if root_of(node, p, e.first, e.last) == Some((e.bytes, e.root)) {
-                let mut a = Attest { segment: *id, attester: me, sig: [0; 64] };
-                a.sig = block::sign(&node.identity, &a.message(net));
-                add(Item::Attest(a));
-            }
+            let Some(span) = spans(p.chain_no, family, catalog.segment_bytes()).into_iter().find(|s| s.first == next) else { continue };
+            let Some((bytes, root)) = root_of(node, p, family, span.first, span.last) else { continue };
+            let mut e = CatalogEntry { chain: p.key.to_string(), family, first: span.first, last: span.last, bytes, manifest: [0; 32], root, poster: me, sig: [0; 64] };
+            e.sig = block::sign(&node.identity, &e.message(net));
+            add(Item::CatalogEntry(e));
         }
-        // Offer the next segment when nobody has.
-        let next = catalog.next(p.key, segment::FAMILY_BLOCKS);
-        if catalog.all_waiting().any(|(_, o)| o.entry.chain == p.key && o.entry.first == next) {
-            continue;
-        }
-        let Some(span) = spans(p.chain_no, catalog.segment_bytes()).into_iter().find(|s| s.first == next) else { continue };
-        let Some((bytes, root)) = root_of(node, p, span.first, span.last) else { continue };
-        let mut e = CatalogEntry { chain: p.key.to_string(), family: segment::FAMILY_BLOCKS, first: span.first, last: span.last, bytes, manifest: [0; 32], root, poster: me, sig: [0; 64] };
-        e.sig = block::sign(&node.identity, &e.message(net));
-        add(Item::CatalogEntry(e));
     }
     BUSY.store(more, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Registration (§4): every sealed replica of this arcade that isn't registered gets a commit
-/// (anchored to the tip, its work stamp mined here), then, once the block `CHALLENGE_DELAY`
-/// after the commit's is in, its proof. Paid to this arcade's wallet on the chain.
+/// Bytes free on the disk holding `path` (unknown on Windows: sealing doesn't wait for space there yet).
+#[cfg(not(unix))]
+fn free_bytes(_path: &std::path::Path) -> Option<u64> {
+    None
+}
+
+/// Bytes free on the disk holding `path`.
+#[cfg(unix)]
+fn free_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
+}
+
+
+
+/// What automatic sealing is waiting on, when it isn't sealing (shown in the cards).
+static SEAL_NOTE: Mutex<String> = Mutex::new(String::new());
+
+pub fn seal_note() -> String {
+    SEAL_NOTE.lock().unwrap().clone()
+}
+
+// ---------------- Earn ARCADE (docs/ARCADECHAIN.md §14.17) ----------------
+
+fn earn_key(chain: &str) -> Vec<u8> {
+    format!("arc_earn:{chain}").into_bytes()
+}
+
+/// Whether the operator switched Earn ARCADE on for this coin.
+pub fn earn_on(node: &Node, chain: &str) -> bool {
+    node.app.store.read(|r| r.get(arcade_app::META, &earn_key(chain))).ok().flatten().is_some_and(|v| v == b"1")
+}
+
+pub fn set_earn(node: &Node, chain: &str, on: bool) -> Result<(), String> {
+    node.app.store.write(|w| w.put(arcade_app::META, &earn_key(chain), if on { b"1" } else { b"0" })).map_err(|e| e.to_string())
+}
+
+/// Free space a seal needs beyond the segment itself (its working copy and the sealed file
+/// exist side by side for a moment, then the plain blocks go).
+const FREE_FLOOR: u64 = 2_000_000_000;
+
+/// Earn ARCADE: for each kept coin switched on, and always for the ARCADE chain itself (sealing it is not an option,
+/// §14.17), every settled unit is sealed as it comes, block by block (Martin 2026-11-12), from block 0 up: into the
+/// family's open segment (arcseal::Open), its plain copy pruned once sealed so the sealed copy is the database's only
+/// copy (reads unseal it, arcseal::reader). When a range ends with a full segment's bytes in, the table goes on the end
+/// and the segment becomes a replica to register. Blocks first, then each index, per coin; one run at a time, in the
+/// background.
+pub fn auto_seal(node: &Node, net: &Net, catalog: &Catalog) {
+    if crate::arcseal::sealing().is_some() {
+        return;
+    }
+    // Every chain and family with work this round, each in turn: the ARCADE chain has newly settled blocks almost
+    // every round, and taking only the first with work starved the families after it.
+    let work: Vec<(&'static ChainParams, u8)> = kept(node, net)
+        .into_iter()
+        .filter(|p| crate::arcsvc::runs(p) || earn_on(node, p.key))
+        .flat_map(|p| families(node, p).into_iter().filter(|f| seal_work(node, net, p, *f).is_some_and(|(next, settled)| next <= settled)).map(move |f| (p, f)))
+        .collect();
+    let Some(&(p0, f0)) = work.first() else {
+        *SEAL_NOTE.lock().unwrap() = String::new();
+        return;
+    };
+    if free_bytes(&node.home.join("arc")).is_some_and(|f| f < FREE_FLOOR) {
+        *SEAL_NOTE.lock().unwrap() = format!("waiting for disk space to seal {} {}", p0.name, family_name(f0));
+        return;
+    }
+    *SEAL_NOTE.lock().unwrap() = String::new();
+    let (n, net, full) = (node.self_arc(), *net, catalog.segment_bytes());
+    crate::arcseal::set_sealing(Some((format!("{} {}", p0.key, family_name(f0)), 0, 0)));
+    let _ = std::thread::Builder::new().name("arc sealing".into()).spawn(move || {
+        for (p, family) in work {
+            let what = family_name(family);
+            if let Err(why) = seal_on(&n, &net, p, family, full) {
+                eprintln!("arc: sealing {} {what}: {why}", p.key);
+                *SEAL_NOTE.lock().unwrap() = format!("sealing {} {what} failed: {why}", p.name);
+            }
+        }
+        crate::arcseal::set_sealing(None);
+    });
+}
+
+/// The next height of a family to seal here, and the last that is settled (no further than its index has journaled);
+/// None while nothing is settled.
+fn seal_work(node: &Node, net: &Net, p: &ChainParams, family: u8) -> Option<(u64, u64)> {
+    let closed = crate::arcseal::replicas(node, net).iter().filter(|r| r.chain == p.key && r.family == family).map(|r| r.last + 1).max().unwrap_or(0);
+    let open = crate::arcseal::opens(node, net).into_iter().find(|o| o.chain == p.key && o.family == family && o.first == closed);
+    let next = open.and_then(|o| o.through).map(|t| t + 1).unwrap_or(closed);
+    let tip = tip_of(node, p) as u64;
+    let mut settled = tip.checked_sub(SETTLED as u64)?;
+    // An index family no further than its index has journaled; blocks and the coins they spend (made from the blocks)
+    // as far as the chain is settled.
+    if family != segment::FAMILY_BLOCKS && family != segment::FAMILY_COINS {
+        settled = settled.min(journal_span(node, p, family)?.1 as u64);
+    }
+    Some((next, settled))
+}
+
+/// Units the sealing run takes at a time before it saves where it is.
+const SEAL_BATCH: u64 = 1_000;
+
+/// Seal what is settled of a family into its open segment, closing segments as ranges fill them, until it's caught up
+/// (or a few minutes have passed: the next round goes on).
+fn seal_on(node: &Node, net: &Net, p: &'static ChainParams, family: u8, full: u64) -> Result<(), String> {
+    let me = node.identity.verifying_key().to_bytes();
+    let what = family_name(family);
+    let t0 = std::time::Instant::now();
+    while t0.elapsed().as_secs() < 300 {
+        let Some((next, settled)) = seal_work(node, net, p, family).filter(|(n, s)| n <= s) else { return Ok(()) };
+        let closed = crate::arcseal::replicas(node, net).iter().filter(|r| r.chain == p.key && r.family == family).map(|r| r.last + 1).max().unwrap_or(0);
+        let mut open = crate::arcseal::Open::start(node, net, p.key, family, closed)?;
+        // No further than the end of the range `next` is in: a segment can only end there.
+        let range_end = next - next % RANGE + RANGE - 1;
+        let to = settled.min(range_end).min(next + SEAL_BATCH - 1);
+        crate::arcseal::set_sealing(Some((format!("{} {what} {next}..={to}", p.key), 0, to - next + 1)));
+        let mut units = Vec::with_capacity((to - next + 1) as usize);
+        for h in next..=to {
+            units.push(unit_bytes(node, p, family, h as u32).ok_or_else(|| format!("{} {what} {h} isn't here", p.name))?);
+        }
+        open.append(&me, &units)?;
+        // One copy on disk: the sealed one.
+        let freed = if family == segment::FAMILY_BLOCKS {
+            if crate::arcsvc::runs(p) { 0 } else { prune_sealed(node, p, next, to) }
+        } else {
+            node.chain.prune_journals(p.chain_no, family, next as u32, to as u32).unwrap_or(0)
+        };
+        let _ = freed;
+        if to == range_end && open.bytes >= full {
+            let t1 = std::time::Instant::now();
+            let r = open.close(node, net, &me)?;
+            eprintln!("arc: sealed {} {what} {}..={} ({} leaves, {} bytes), block by block, its plain copy pruned as it went; closed in {:.1} s", r.chain, r.first, r.last, r.leaves, r.bytes, t1.elapsed().as_secs_f64());
+        }
+    }
+    Ok(())
+}
+
+/// After a segment is sealed: its blocks' plain bodies go (the sealed copy answers for them).
+fn prune_sealed(node: &Node, p: &'static ChainParams, first: u64, last: u64) -> u64 {
+    let c = p.chain_no;
+    let mut freed = 0;
+    let bs: Vec<u32> = (first..=last).filter_map(|h| Some(node.chain.header(c, &node.chain.hash_at(c, h as u32).ok()??).ok()??.b)).filter(|b| *b != 0).collect();
+    for chunk in bs.chunks(1000) {
+        freed += node.chain.prune_blocks(p, chunk).unwrap_or(0);
+    }
+    freed
+}
+
+/// Where Earn ARCADE stands for a coin: sealed up to which height of how many.
+pub fn earn_progress(node: &Node, net: &Net, p: &ChainParams) -> (u64, u64) {
+    family_progress(node, net, p, segment::FAMILY_BLOCKS)
+}
+
+/// Where sealing a family of a coin stands: sealed up to which height of how many.
+pub fn family_progress(node: &Node, net: &Net, p: &ChainParams, family: u8) -> (u64, u64) {
+    let closed = crate::arcseal::replicas(node, net).iter().filter(|r| r.chain == p.key && r.family == family).map(|r| r.last + 1).max().unwrap_or(0);
+    // Sealed block by block: the open segment's through counts too.
+    let open = crate::arcseal::opens(node, net).into_iter().filter(|o| o.chain == p.key && o.family == family && o.first == closed).find_map(|o| o.through).map(|t| t + 1);
+    (open.unwrap_or(closed).max(closed), tip_of(node, p) as u64 + 1)
+}
+
+/// When each sealed replica waiting to register was first seen here (for the batch's timing).
+static CANDIDATES: Mutex<BTreeMap<Hash, std::time::Instant>> = Mutex::new(BTreeMap::new());
+/// A batch goes in once no new sealed replica has come for this long (so segments closing one
+/// after another go in one batch), or the oldest has waited QUIET_MAX.
+const QUIET: std::time::Duration = std::time::Duration::from_secs(60);
+const QUIET_MAX: std::time::Duration = std::time::Duration::from_secs(1_800);
+
+/// Registration (§4, §14.19 1): this arcade's sealed replicas that aren't registered go in
+/// one batch: a commit (anchored to the tip, its work stamp mined here), then, once the block
+/// `CHALLENGE_DELAY` after the commit's is in, its proof. At most one batch an audit period.
+/// Paid to this arcade's wallet on the chain.
 pub fn register(node: &Node, net: &Net, p: &ChainParams, reg: &Registry, tip: u64) {
+    use arcade_arc::params::{ANSWER_WINDOW, CHALLENGE_DELAY};
     let me = node.identity.verifying_key().to_bytes();
     let Some(payout) = payout_of(node, net, p) else { return };
+    let live = reg.commit_of(&me).filter(|(_, hc)| tip <= hc + CHALLENGE_DELAY + ANSWER_WINDOW);
     // Registration items the chain is past go.
     let stale: Vec<Item> = waiting()
         .into_iter()
         .filter(|i| match i {
-            Item::RegCommit(c) => reg.registered(&c.replica(net)) || reg.commit(&c.replica(net)).is_some() || tip > c.anchor + registry::ANCHOR_AGE,
-            Item::RegProof(pr) => reg.registered(&pr.replica) || reg.commit(&pr.replica).is_none_or(|c| tip > c.3 + arcade_arc::params::CHALLENGE_DELAY + arcade_arc::params::ANSWER_WINDOW),
+            Item::RegCommit(c) => c.owner == me && (live.is_some() || c.replica_ids(net).iter().all(|id| reg.registered(id)) || tip > c.anchor + registry::ANCHOR_AGE),
+            Item::RegProof(pr) => pr.owner == me && live.is_none(),
             _ => false,
         })
         .collect();
     forget(&stale);
-    for r in crate::arcseal::replicas(node, net) {
-        let id = block::replica_id(net, &r.segment, &me);
-        if reg.registered(&id) || reg.catalog().get(&r.segment).is_none() {
-            continue;
+    let mine = crate::arcseal::replicas(node, net);
+    if let Some((pairs, hc)) = live {
+        let challenge = hc + CHALLENGE_DELAY;
+        if tip < challenge || waiting().iter().any(|i| matches!(i, Item::RegProof(x) if x.owner == me)) {
+            return;
         }
-        let waiting_here = waiting();
-        match reg.commit(&id) {
-            Some((_, _, _, hc)) if tip <= hc + arcade_arc::params::CHALLENGE_DELAY + arcade_arc::params::ANSWER_WINDOW => {
-                let challenge = hc + arcade_arc::params::CHALLENGE_DELAY;
-                if tip < challenge || waiting_here.iter().any(|i| matches!(i, Item::RegProof(x) if x.replica == id)) {
-                    continue;
-                }
-                let Some((_, seed)) = reg.block_at(challenge) else { continue };
-                let picks = registry::picks(net, &seed, &id, r.leaves);
-                match r.open(&me, &picks) {
-                    Ok(leaves) => {
-                        add(Item::RegProof(RegProof { replica: id, leaves }));
-                    }
-                    Err(e) => eprintln!("arc: opening replica {}: {e}", hex::encode(id)),
-                }
-            }
-            _ => {
-                if waiting_here.iter().any(|i| matches!(i, Item::RegCommit(c) if c.replica(net) == id)) || tip == 0 {
-                    continue;
-                }
-                let Some((anchor_id, _)) = reg.block_at(tip) else { continue };
-                let mut c = RegCommit { segment: r.segment, owner: me, payout, replica_root: r.replica_root, anchor: tip, nonce: 0, sig: [0; 64] };
-                while block::work_bits(&c.stamp(net, &anchor_id)) < registry::STAMP_BITS {
-                    c.nonce += 1;
-                }
-                c.sig = block::sign(&node.identity, &c.message(net, &anchor_id));
-                add(Item::RegCommit(c));
+        let Some((_, seed)) = reg.block_at(challenge) else { return };
+        let mut held = Vec::with_capacity(pairs.len());
+        for (seg, _) in &pairs {
+            match mine.iter().find(|r| r.segment == *seg) {
+                Some(r) => held.push(r),
+                None => return eprintln!("arc: a replica of the waiting batch isn't here any more"),
             }
         }
+        let leaves: Vec<u64> = held.iter().map(|r| r.leaves).collect();
+        let mut opened = Vec::new();
+        for (at, i) in registry::picks(net, &seed, &me, &leaves) {
+            match held[at].open(&me, &[i]) {
+                Ok(mut o) => opened.append(&mut o),
+                Err(e) => return eprintln!("arc: opening replica of segment {}: {e}", hex::encode(held[at].segment)),
+            }
+        }
+        add(Item::RegProof(RegProof { owner: me, leaves: opened }));
+        return;
     }
+    // A new batch: what is sealed here, listed and not registered.
+    let todo: Vec<&crate::arcseal::Replica> = mine
+        .iter()
+        .filter(|r| reg.catalog().get(&r.segment).is_some() && !reg.registered(&block::replica_id(net, &r.segment, &me)))
+        .take(block::MAX_BATCH)
+        .collect();
+    let now = std::time::Instant::now();
+    let (newest, oldest) = {
+        let mut seen = CANDIDATES.lock().unwrap();
+        seen.retain(|seg, _| todo.iter().any(|r| r.segment == *seg));
+        for r in &todo {
+            seen.entry(r.segment).or_insert(now);
+        }
+        (seen.values().max().copied(), seen.values().min().copied())
+    };
+    let (Some(newest), Some(oldest)) = (newest, oldest) else { return };
+    if now - newest < QUIET && now - oldest < QUIET_MAX {
+        return;
+    }
+    let last = reg.last_batch(&me);
+    if tip == 0 || (last > 0 && tip + 1 < last + net.audit_period) || waiting().iter().any(|i| matches!(i, Item::RegCommit(c) if c.owner == me)) {
+        return;
+    }
+    let Some((anchor_id, _)) = reg.block_at(tip) else { return };
+    let mut c = RegCommit { owner: me, payout, replicas: todo.iter().map(|r| (r.segment, r.replica_root)).collect(), anchor: tip, nonce: 0, sig: [0; 64] };
+    c.finish(net, &anchor_id, registry::STAMP_BITS, &node.identity);
+    eprintln!("arc: registering a batch of {} replicas", c.replicas.len());
+    add(Item::RegCommit(c));
 }
 
 /// This arcade's address on the chain (its wallet's first key), as a payout.
@@ -308,8 +620,15 @@ pub fn status(node: &Node, net: &Net, full: u64) -> serde_json::Value {
     let chains: Vec<serde_json::Value> = kept(node, net)
         .iter()
         .map(|p| {
-            let ranges = CUTS.lock().unwrap().get(&p.chain_no).map(|c| c.ranges.len()).unwrap_or(0);
-            serde_json::json!({"chain": p.key, "ranges": ranges, "segments": spans(p.chain_no, full).len()})
+            let fams: Vec<serde_json::Value> = families(node, p)
+                .into_iter()
+                .map(|f| {
+                    let ranges = CUTS.lock().unwrap().get(&(p.chain_no, f)).map(|c| c.ranges.len()).unwrap_or(0);
+                    serde_json::json!({"family": f, "name": family_name(f), "ranges": ranges, "segments": spans(p.chain_no, f, full).len()})
+                })
+                .collect();
+            let ranges = CUTS.lock().unwrap().get(&(p.chain_no, segment::FAMILY_BLOCKS)).map(|c| c.ranges.len()).unwrap_or(0);
+            serde_json::json!({"chain": p.key, "ranges": ranges, "segments": spans(p.chain_no, segment::FAMILY_BLOCKS, full).len(), "families": fams})
         })
         .collect();
     serde_json::json!({"kept": chains, "waiting_items": POOL.lock().unwrap().items.len()})

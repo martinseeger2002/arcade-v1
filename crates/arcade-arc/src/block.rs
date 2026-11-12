@@ -36,6 +36,7 @@ pub type Payout = [u8; 21];
 /// ARCADE's coin transactions are Dogecoin's: legacy, no SegWit, no AuxPoW.
 pub const TX_FORMAT: Format = Format { auxpow: false, ..Format::AUXPOW };
 
+/// The header layout's version; a header also says its rules version in the same field (params::Net::rules_at).
 pub const HEADER_VERSION: u32 = 1;
 /// Longest proof-of-time output or proof, in bytes.
 pub const MAX_TIME_BYTES: usize = 512;
@@ -76,6 +77,10 @@ pub enum BlockError {
     BadSignature(&'static str),
     #[error("{0}")]
     Invalid(&'static str),
+    /// Not decided yet: the block can't be judged until this arcade knows more (a fraud proof about a source block
+    /// its own headers don't reach yet). Not invalid: the block is tried again later.
+    #[error("waiting: {0}")]
+    Waiting(&'static str),
 }
 
 pub fn sign(key: &SigningKey, msg: &[u8]) -> Sig {
@@ -202,8 +207,11 @@ impl Header {
 
     pub fn decode(r: &mut Reader) -> Result<Header, DecodeError> {
         let version = r.u32()?;
-        if version != HEADER_VERSION {
+        if version == 0 {
             return Err(DecodeError::Invalid("unknown header version"));
+        }
+        if version > params::RULES_KNOWN {
+            return Err(DecodeError::Invalid("a block made under newer rules than this arcade knows: update this arcade"));
         }
         let height = r.u64()?;
         let prev = r.hash()?;
@@ -344,18 +352,20 @@ impl Reaudit {
     }
 }
 
-/// A registration's proof (§4 step 2): the 16 leaves the seed chose.
+/// A registration's proof (§4 step 2, §14.19 1): the 16 leaves the seed chose across the
+/// owner's waiting batch, in draw order. Which replica and leaf each is follows from the draw.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegProof {
-    pub replica: Hash,
+    pub owner: Key,
     pub leaves: Vec<Opened>,
 }
 
-/// A serving check's verdict (§5.4).
+/// A serving check's verdict (§5.4, §14.19 2): checkers are drawn per owner, and the replica
+/// checked is drawn by bytes from the owner's replicas.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
-    pub replica: Hash,
-    /// The block whose seed made `checker` a checker of this replica.
+    pub owner: Key,
+    /// The block whose seed made `checker` a checker of this owner.
     pub height: u64,
     pub checker: Key,
     pub vrf_proof: VrfProof,
@@ -365,19 +375,24 @@ pub struct Verdict {
 
 impl Verdict {
     pub fn message(&self, net: &Net, block_id: &Hash256) -> Vec<u8> {
-        tagged::message(net, "verdict", &[&self.replica, &block_id.0, &self.checker, &self.vrf_proof, &[self.served as u8]])
+        tagged::message(net, "verdict", &[&self.owner, &block_id.0, &self.checker, &self.vrf_proof, &[self.served as u8]])
     }
 }
 
-/// A registration's commit (§4 step 1). Signed by the owner key, and stamped with work.
-/// Both cover the id of a recent block (`anchor`), so stamps can't be stocked up for a
-/// flood and an old commit can't be posted again.
+/// Most replicas in one registration batch.
+pub const MAX_BATCH: usize = 4_096;
+
+/// A registration's commit (§4 step 1, §14.19 1): a batch of the owner's new replicas, each a
+/// listed segment and the root over its sealed leaves. Signed by the owner key, and stamped
+/// with work. Both cover the id of a recent block (`anchor`), so stamps can't be stocked up
+/// for a flood and an old commit can't be posted again. The payout address is where all the
+/// owner's pay goes from then on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegCommit {
-    pub segment: Hash,
     pub owner: Key,
     pub payout: Payout,
-    pub replica_root: Hash,
+    /// (segment, replica root), each segment once.
+    pub replicas: Vec<(Hash, Hash)>,
     /// Height of a recent block.
     pub anchor: u64,
     /// Chosen to give the stamp its work.
@@ -386,21 +401,42 @@ pub struct RegCommit {
 }
 
 impl RegCommit {
+    /// What the signature and the stamp cover, but the nonce.
+    fn digest(&self, net: &Net, anchor_id: &Hash256) -> Hash {
+        let mut pairs = Vec::with_capacity(self.replicas.len() * 64);
+        for (seg, root) in &self.replicas {
+            pairs.extend_from_slice(seg);
+            pairs.extend_from_slice(root);
+        }
+        tagged::hash(net, "batch", &[&self.owner, &self.payout, &pairs, &anchor_id.0])
+    }
+
     pub fn message(&self, net: &Net, anchor_id: &Hash256) -> Vec<u8> {
-        tagged::message(net, "register", &[&self.segment, &self.owner, &self.payout, &self.replica_root, &anchor_id.0])
+        tagged::message(net, "register", &[&self.digest(net, anchor_id)])
     }
 
     /// The work stamp: the more zero bits it starts with, the more work it took.
     pub fn stamp(&self, net: &Net, anchor_id: &Hash256) -> Hash {
-        tagged::hash(
-            net,
-            "stamp",
-            &[&self.segment, &self.owner, &self.payout, &self.replica_root, &anchor_id.0, &self.nonce.to_le_bytes()],
-        )
+        self.stamp_of(net, &self.digest(net, anchor_id))
     }
 
-    pub fn replica(&self, net: &Net) -> Hash {
-        replica_id(net, &self.segment, &self.owner)
+    /// The stamp from a digest worked out once (a stamp is mined over many nonces).
+    pub fn stamp_of(&self, net: &Net, digest: &Hash) -> Hash {
+        tagged::hash(net, "stamp", &[digest, &self.nonce.to_le_bytes()])
+    }
+
+    /// Give the commit its stamp (at least `bits` of work) and signature.
+    pub fn finish(&mut self, net: &Net, anchor_id: &Hash256, bits: u32, key: &SigningKey) {
+        let d = self.digest(net, anchor_id);
+        while work_bits(&self.stamp_of(net, &d)) < bits {
+            self.nonce += 1;
+        }
+        self.sig = sign(key, &self.message(net, anchor_id));
+    }
+
+    /// The replica ids, in the batch's order.
+    pub fn replica_ids(&self, net: &Net) -> Vec<Hash> {
+        self.replicas.iter().map(|(seg, _)| replica_id(net, seg, &self.owner)).collect()
     }
 }
 
@@ -437,6 +473,13 @@ pub struct CatalogEntry {
 
 impl CatalogEntry {
     /// The segment id: the mask of every sealed leaf is made from it (§3.3).
+    /// The segment's place: chain, family and first height, known as soon as the segment before it closes. A replica's
+    /// leaves are sealed under it (sloth::mask), so a segment is sealed block by block as its blocks arrive, before its
+    /// last height, size and root are known (Martin 2026-11-12).
+    pub fn slot(&self, net: &Net) -> Hash {
+        slot(net, &self.chain, self.family, self.first)
+    }
+
     pub fn segment(&self, net: &Net) -> Hash {
         tagged::hash(
             net,
@@ -511,6 +554,120 @@ pub enum Item {
     CatalogEntry(CatalogEntry),
     Attest(Attest),
     Equivocation(Box<Equivocation>),
+    BadHeader(Box<BadHeader>),
+    TxChallenge(Box<TxChallenge>),
+    TxAnswer(TxAnswer),
+    RevealDemand(RevealDemand),
+    RevealAnswer(RevealAnswer),
+}
+
+/// A reveal demand (§2.4): the holders of a listed segment must show `count` of its leaves from `first` (at most
+/// 64 kB) on the chain within REVEAL_WINDOW blocks, or it goes. Signed by the demander (an arcade with draw weight, one
+/// open at a time); answered, it has no draw weight for an audit period, so demands against good segments aren't free.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevealDemand {
+    pub segment: Hash,
+    pub first: u64,
+    pub count: u64,
+    pub demander: Key,
+    pub sig: Sig,
+}
+
+impl RevealDemand {
+    pub fn id(&self, net: &Net) -> Hash {
+        tagged::hash(net, "reveal", &[&self.segment, &self.first.to_le_bytes(), &self.count.to_le_bytes()])
+    }
+
+    pub fn message(&self, net: &Net) -> Vec<u8> {
+        tagged::message(net, "reveal", &[&self.id(net), &self.demander])
+    }
+}
+
+/// The answer to a reveal demand: the leaves, with their path to the segment's root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevealAnswer {
+    pub demand: Hash,
+    pub run: crate::segment::Run,
+}
+
+/// Most leaves in a challenged transaction's run (64 kB: the challenge always fits in a block).
+pub const MAX_TX_LEAVES: usize = params::MAX_REVEAL_BYTES / DATA_LEAF + 1;
+
+/// A fraud challenge, second kind (§2.4): a listed segment's block at `height` has the source chain's header, but holds
+/// a transaction (`len` bytes at byte `at` of the segment) that the challenger says isn't in it. A holder answers with
+/// its path to the header's Merkle root within REVEAL_WINDOW blocks, or the segment goes. Signed by the challenger (an
+/// arcade with draw weight; one open at a time; answered, it loses its draw weight for an audit period).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxChallenge {
+    pub segment: Hash,
+    pub height: u64,
+    pub row: crate::segment::Run,
+    pub header: crate::segment::Run,
+    pub at: u64,
+    pub len: u64,
+    pub tx: crate::segment::Run,
+    pub challenger: Key,
+    pub sig: Sig,
+}
+
+impl TxChallenge {
+    /// The challenge's id: what it is about (the challenger's signature isn't in it).
+    pub fn id(&self, net: &Net) -> Hash {
+        tagged::hash(net, "tx challenge", &[&self.segment, &self.height.to_le_bytes(), &self.at.to_le_bytes(), &self.len.to_le_bytes()])
+    }
+
+    pub fn message(&self, net: &Net) -> Vec<u8> {
+        tagged::message(net, "tx challenge", &[&self.id(net), &self.challenger])
+    }
+}
+
+/// The answer to a TxChallenge: the transaction of the block that covers the challenged byte (`len` bytes at `at`, a
+/// run of the segment's leaves), its position in the block and its Merkle path to the header's root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxAnswer {
+    pub challenge: Hash,
+    pub at: u64,
+    pub len: u64,
+    pub tx: crate::segment::Run,
+    pub index: u64,
+    pub path: Vec<Hash>,
+}
+
+/// Most leaves in one run of a fraud proof (a table row or an 80-byte header lies in at most 2).
+pub const MAX_PROOF_LEAVES: usize = 4;
+
+/// A fraud proof (§2.4): a listed segment of blocks holds, at `height`, a header that isn't the source chain's. `row`
+/// holds the table row saying where that block starts, `header` the leaves holding its first 80 bytes, each with its
+/// path to the segment's root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BadHeader {
+    pub segment: Hash,
+    pub height: u64,
+    pub row: crate::segment::Run,
+    pub header: crate::segment::Run,
+}
+
+fn put_run(o: &mut Vec<u8>, r: &crate::segment::Run) {
+    o.extend_from_slice(&r.first.to_le_bytes());
+    write_varint(o, r.leaves.len() as u64);
+    for l in &r.leaves {
+        o.extend_from_slice(l);
+    }
+    put_path(o, &r.path);
+}
+
+fn get_run(r: &mut Reader) -> Result<crate::segment::Run, DecodeError> {
+    get_run_of(r, MAX_PROOF_LEAVES)
+}
+
+fn get_run_of(r: &mut Reader, most: usize) -> Result<crate::segment::Run, DecodeError> {
+    let first = r.u64()?;
+    let n = r.len()?;
+    if n == 0 || n > most {
+        return Err(DecodeError::Invalid("a fraud proof's run holds too many leaves, or none"));
+    }
+    let leaves = (0..n).map(|_| r.array()).collect::<Result<Vec<_>, _>>()?;
+    Ok(crate::segment::Run { first, leaves, path: get_path(r)? })
 }
 
 pub const TAG_AUDIT_OPENING: u8 = 0x10;
@@ -522,6 +679,11 @@ pub const TAG_REG_COMMIT: u8 = 0x50;
 pub const TAG_CATALOG_ENTRY: u8 = 0x60;
 pub const TAG_ATTEST: u8 = 0x61;
 pub const TAG_EQUIVOCATION: u8 = 0x64;
+pub const TAG_BAD_HEADER: u8 = 0x62;
+pub const TAG_TX_CHALLENGE: u8 = 0x63;
+pub const TAG_TX_ANSWER: u8 = 0x11;
+pub const TAG_REVEAL_ANSWER: u8 = 0x12;
+pub const TAG_REVEAL_DEMAND: u8 = 0x65;
 
 impl Item {
     pub fn tag(&self) -> u8 {
@@ -535,6 +697,11 @@ impl Item {
             Item::CatalogEntry(_) => TAG_CATALOG_ENTRY,
             Item::Attest(_) => TAG_ATTEST,
             Item::Equivocation(_) => TAG_EQUIVOCATION,
+            Item::BadHeader(_) => TAG_BAD_HEADER,
+            Item::TxChallenge(_) => TAG_TX_CHALLENGE,
+            Item::TxAnswer(_) => TAG_TX_ANSWER,
+            Item::RevealDemand(_) => TAG_REVEAL_DEMAND,
+            Item::RevealAnswer(_) => TAG_REVEAL_ANSWER,
         }
     }
 
@@ -565,13 +732,13 @@ impl Item {
                 o.extend_from_slice(&x.sig);
             }
             Item::RegProof(x) => {
-                o.extend_from_slice(&x.replica);
+                o.extend_from_slice(&x.owner);
                 for opened in &x.leaves {
                     opened.encode(&mut o);
                 }
             }
             Item::Verdict(x) => {
-                o.extend_from_slice(&x.replica);
+                o.extend_from_slice(&x.owner);
                 o.extend_from_slice(&x.height.to_le_bytes());
                 o.extend_from_slice(&x.checker);
                 o.extend_from_slice(&x.vrf_proof);
@@ -579,10 +746,13 @@ impl Item {
                 o.extend_from_slice(&x.sig);
             }
             Item::RegCommit(x) => {
-                o.extend_from_slice(&x.segment);
                 o.extend_from_slice(&x.owner);
                 o.extend_from_slice(&x.payout);
-                o.extend_from_slice(&x.replica_root);
+                write_varint(&mut o, x.replicas.len() as u64);
+                for (seg, root) in &x.replicas {
+                    o.extend_from_slice(seg);
+                    o.extend_from_slice(root);
+                }
                 o.extend_from_slice(&x.anchor.to_le_bytes());
                 o.extend_from_slice(&x.nonce.to_le_bytes());
                 o.extend_from_slice(&x.sig);
@@ -602,6 +772,42 @@ impl Item {
                 o.extend_from_slice(&x.segment);
                 o.extend_from_slice(&x.attester);
                 o.extend_from_slice(&x.sig);
+            }
+            Item::TxChallenge(x) => {
+                o.extend_from_slice(&x.segment);
+                o.extend_from_slice(&x.height.to_le_bytes());
+                put_run(&mut o, &x.row);
+                put_run(&mut o, &x.header);
+                o.extend_from_slice(&x.at.to_le_bytes());
+                o.extend_from_slice(&x.len.to_le_bytes());
+                put_run(&mut o, &x.tx);
+                o.extend_from_slice(&x.challenger);
+                o.extend_from_slice(&x.sig);
+            }
+            Item::RevealDemand(x) => {
+                o.extend_from_slice(&x.segment);
+                o.extend_from_slice(&x.first.to_le_bytes());
+                o.extend_from_slice(&x.count.to_le_bytes());
+                o.extend_from_slice(&x.demander);
+                o.extend_from_slice(&x.sig);
+            }
+            Item::RevealAnswer(x) => {
+                o.extend_from_slice(&x.demand);
+                put_run(&mut o, &x.run);
+            }
+            Item::TxAnswer(x) => {
+                o.extend_from_slice(&x.challenge);
+                o.extend_from_slice(&x.at.to_le_bytes());
+                o.extend_from_slice(&x.len.to_le_bytes());
+                put_run(&mut o, &x.tx);
+                o.extend_from_slice(&x.index.to_le_bytes());
+                put_path(&mut o, &x.path);
+            }
+            Item::BadHeader(x) => {
+                o.extend_from_slice(&x.segment);
+                o.extend_from_slice(&x.height.to_le_bytes());
+                put_run(&mut o, &x.row);
+                put_run(&mut o, &x.header);
             }
             Item::Equivocation(x) => {
                 x.a.encode(&mut o);
@@ -648,15 +854,15 @@ impl Item {
             }
             TAG_REAUDIT => Item::Reaudit(Reaudit { replica: p.array()?, missed: p.u64()?, sig: p.array()? }),
             TAG_REG_PROOF => {
-                let replica = p.array()?;
+                let owner = p.array()?;
                 let mut leaves = Vec::with_capacity(params::REGISTRATION_LEAVES);
                 for _ in 0..params::REGISTRATION_LEAVES {
                     leaves.push(Opened::decode(p)?);
                 }
-                Item::RegProof(RegProof { replica, leaves })
+                Item::RegProof(RegProof { owner, leaves })
             }
             TAG_VERDICT => Item::Verdict(Verdict {
-                replica: p.array()?,
+                owner: p.array()?,
                 height: p.u64()?,
                 checker: p.array()?,
                 vrf_proof: p.array()?,
@@ -667,15 +873,19 @@ impl Item {
                 },
                 sig: p.array()?,
             }),
-            TAG_REG_COMMIT => Item::RegCommit(RegCommit {
-                segment: p.array()?,
-                owner: p.array()?,
-                payout: p.array()?,
-                replica_root: p.array()?,
-                anchor: p.u64()?,
-                nonce: p.u64()?,
-                sig: p.array()?,
-            }),
+            TAG_REG_COMMIT => {
+                let owner = p.array()?;
+                let payout = p.array()?;
+                let n = p.len()?;
+                if n == 0 || n > MAX_BATCH {
+                    return Err(BlockError::Invalid("a registration batch holds 1 to MAX_BATCH replicas"));
+                }
+                let mut replicas = Vec::with_capacity(n);
+                for _ in 0..n {
+                    replicas.push((p.array()?, p.array()?));
+                }
+                Item::RegCommit(RegCommit { owner, payout, replicas, anchor: p.u64()?, nonce: p.u64()?, sig: p.array()? })
+            }
             TAG_CATALOG_ENTRY => {
                 let chain = get_bytes(p, MAX_CHAIN_KEY, "chain key too long")?;
                 if chain.is_empty() || !chain.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
@@ -695,6 +905,21 @@ impl Item {
             }
             TAG_ATTEST => Item::Attest(Attest { segment: p.array()?, attester: p.array()?, sig: p.array()? }),
             TAG_EQUIVOCATION => Item::Equivocation(Box::new(Equivocation { a: Header::decode(p)?, b: Header::decode(p)? })),
+            TAG_TX_CHALLENGE => Item::TxChallenge(Box::new(TxChallenge {
+                segment: p.array()?,
+                height: p.u64()?,
+                row: get_run(p)?,
+                header: get_run(p)?,
+                at: p.u64()?,
+                len: p.u64()?,
+                tx: get_run_of(p, MAX_TX_LEAVES)?,
+                challenger: p.array()?,
+                sig: p.array()?,
+            })),
+            TAG_REVEAL_DEMAND => Item::RevealDemand(RevealDemand { segment: p.array()?, first: p.u64()?, count: p.u64()?, demander: p.array()?, sig: p.array()? }),
+            TAG_REVEAL_ANSWER => Item::RevealAnswer(RevealAnswer { demand: p.array()?, run: get_run_of(p, MAX_TX_LEAVES)? }),
+            TAG_TX_ANSWER => Item::TxAnswer(TxAnswer { challenge: p.array()?, at: p.u64()?, len: p.u64()?, tx: get_run_of(p, MAX_TX_LEAVES)?, index: p.u64()?, path: get_path(p)? }),
+            TAG_BAD_HEADER => Item::BadHeader(Box::new(BadHeader { segment: p.array()?, height: p.u64()?, row: get_run(p)?, header: get_run(p)? })),
             other => return Err(BlockError::UnknownTag(other)),
         };
         if !p.is_empty() {
@@ -749,6 +974,33 @@ impl Block {
             item.encode(&mut o);
         }
         o
+    }
+
+    /// Everything but the transactions: the header, then the storage section (how the chain
+    /// store keeps the rest of a block beside its transactions, crate::store).
+    pub fn encode_rest(&self) -> Vec<u8> {
+        let mut o = Vec::new();
+        self.header.encode(&mut o);
+        write_varint(&mut o, self.items.len() as u64);
+        for item in &self.items {
+            item.encode(&mut o);
+        }
+        o
+    }
+
+    /// A block again from its transactions and [`Block::encode_rest`].
+    pub fn from_rest(txs: Vec<Tx>, rest: &[u8]) -> Result<Block, BlockError> {
+        let r = &mut Reader::new(rest);
+        let header = Header::decode(r)?;
+        let m = r.len()?;
+        let mut items = Vec::with_capacity(m.min(1_024));
+        for _ in 0..m {
+            items.push(Item::decode(r)?);
+        }
+        if !r.is_empty() {
+            return Err(BlockError::Trailing("the block"));
+        }
+        Ok(Block { header, txs, items })
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Block, BlockError> {
@@ -828,6 +1080,12 @@ impl Block {
         }
         Ok(())
     }
+}
+
+
+/// A segment's place (CatalogEntry::slot): the mask of every leaf of its replicas.
+pub fn slot(net: &Net, chain: &str, family: u8, first: u64) -> Hash {
+    tagged::hash(net, "slot", &[&[chain.len() as u8], chain.as_bytes(), &[family], &first.to_le_bytes()])
 }
 
 #[cfg(test)]
@@ -916,9 +1174,9 @@ mod tests {
             }),
             Item::AuditCommit(audit),
             Item::Reaudit(Reaudit { replica: [1; 32], missed: 70, sig: [7; 64] }),
-            Item::RegProof(RegProof { replica: [1; 32], leaves: (0..16).map(opened).collect() }),
+            Item::RegProof(RegProof { owner: [1; 32], leaves: (0..16).map(opened).collect() }),
             Item::Verdict(Verdict {
-                replica: [1; 32],
+                owner: [1; 32],
                 height: 60,
                 checker: [4; 32],
                 vrf_proof: [5; 80],
@@ -926,10 +1184,9 @@ mod tests {
                 sig: [6; 64],
             }),
             Item::RegCommit(RegCommit {
-                segment: [1; 32],
                 owner: owner.verifying_key().to_bytes(),
                 payout: [0x53; 21],
-                replica_root: [2; 32],
+                replicas: vec![([1; 32], [2; 32]), ([3; 32], [4; 32])],
                 anchor: 50,
                 nonce: 123_456,
                 sig: [3; 64],
@@ -960,6 +1217,19 @@ mod tests {
             assert!(r.is_empty());
             assert_eq!(h.check(&TESTNET), Ok(()));
         }
+    }
+
+    #[test]
+    fn a_header_of_newer_rules_says_to_update() {
+        let mut h = header(5);
+        h.version = params::RULES_KNOWN + 1;
+        let mut bytes = Vec::new();
+        h.encode(&mut bytes);
+        assert_eq!(Header::decode(&mut Reader::new(&bytes)), Err(DecodeError::Invalid("a block made under newer rules than this arcade knows: update this arcade")));
+        h.version = 0;
+        let mut bytes = Vec::new();
+        h.encode(&mut bytes);
+        assert!(Header::decode(&mut Reader::new(&bytes)).is_err());
     }
 
     #[test]
@@ -1073,7 +1343,8 @@ mod tests {
         assert_eq!(sizes[1], 1 + 1 + 136, "audit commit");
         assert!((28_000..30_000).contains(&sizes[3]), "registration proof {}", sizes[3]);
         assert_eq!(sizes[4], 1 + 1 + 217, "verdict");
-        assert_eq!(sizes[5], 1 + 1 + 197, "registration commit");
+        // A batch: 134 bytes, and 64 per replica (two here); the item's length takes 3 bytes past 252.
+        assert_eq!(sizes[5], 1 + 3 + 134 + 2 * 64, "registration commit");
     }
 
     #[test]
@@ -1091,10 +1362,9 @@ mod tests {
         assert!(!verify(&key(2).verifying_key().to_bytes(), &a.message(net, &pick), &a.sig));
 
         let c = RegCommit {
-            segment: [1; 32],
             owner: pk,
             payout: [0x53; 21],
-            replica_root: [2; 32],
+            replicas: vec![([1; 32], [2; 32])],
             anchor: 50,
             nonce: 0,
             sig: [0; 64],
@@ -1104,8 +1374,12 @@ mod tests {
         let mut d = c.clone();
         d.nonce = 1;
         assert_ne!(c.stamp(net, &anchor), d.stamp(net, &anchor));
-        assert_eq!(c.replica(net), replica_id(net, &[1; 32], &pk));
-        assert_ne!(c.replica(net), c.replica(&MAINNET));
+        // Another replica root in the batch: another stamp.
+        let mut e = c.clone();
+        e.replicas[0].1 = [3; 32];
+        assert_ne!(c.stamp(net, &anchor), e.stamp(net, &anchor));
+        assert_eq!(c.replica_ids(net), vec![replica_id(net, &[1; 32], &pk)]);
+        assert_ne!(c.replica_ids(net), c.replica_ids(&MAINNET));
     }
 
     #[test]
@@ -1246,11 +1520,11 @@ mod tests {
         let many = |item: &Item, n: usize| vec![item.clone(); n];
         assert_eq!(block(7, cb(), many(&all[3], 8)).check(&TESTNET), Ok(()));
         assert_eq!(block(7, cb(), many(&all[3], 9)).check(&TESTNET), Err(BlockError::ItemLimit("registration proofs")));
-        assert_eq!(block(7, cb(), many(&all[4], 400)).check(&TESTNET), Ok(()));
-        assert_eq!(block(7, cb(), many(&all[4], 401)).check(&TESTNET), Err(BlockError::ItemLimit("serving verdicts")));
+        assert_eq!(block(7, cb(), many(&all[4], params::MAX_VERDICTS)).check(&TESTNET), Ok(()));
+        assert_eq!(block(7, cb(), many(&all[4], params::MAX_VERDICTS + 1)).check(&TESTNET), Err(BlockError::ItemLimit("serving verdicts")));
         assert_eq!(block(7, cb(), many(&all[5], 201)).check(&TESTNET), Err(BlockError::ItemLimit("registration commits")));
         assert_eq!(block(7, cb(), many(&all[7], 65)).check(&TESTNET), Err(BlockError::ItemLimit("catalog items")));
-        // Openings have no count limit, only the section's size: 1 MB holds 96 of them.
+        // Openings have no count limit, only the section's size.
         let fits = params::MAX_STORAGE_BYTES / all[0].encoded_len();
         assert_eq!(block(7, cb(), many(&all[0], fits)).check(&TESTNET), Ok(()));
         assert_eq!(block(7, cb(), many(&all[0], fits + 1)).check(&TESTNET), Err(BlockError::TooBig("storage items")));

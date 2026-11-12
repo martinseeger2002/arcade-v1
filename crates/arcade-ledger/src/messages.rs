@@ -49,6 +49,10 @@ impl Indexer for MessageIndexer {
     fn name(&self) -> &'static str {
         "messages.v1"
     }
+    /// Its tables are journaled as family MESSAGES (docs/ARCADECHAIN.md §2.2).
+    fn journals(&self) -> Vec<(u8, Vec<&'static str>)> {
+        vec![(arcade_chaindb::journal::MESSAGES, self.tables().iter().map(|t| t.name).collect())]
+    }
     fn tables(&self) -> Vec<TableDef> {
         TABLES.iter().map(|t| TableDef::plain(t)).collect()
     }

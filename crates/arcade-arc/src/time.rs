@@ -78,6 +78,50 @@ impl TimeProofs for StandIn {
     }
 }
 
+/// **The proof of time** (§6.2): Chia's VDF, repeated squaring in the class group of a 1,024-bit imaginary quadratic
+/// discriminant made from the challenge, with a Wesolowski proof (chiavdf, the implementation Chia's own chain runs).
+/// It starts from Chia's generator form; a proof is the result form and the proof form, 100 bytes each. Made one step
+/// after another (about 270,000 steps a second on one core of the GX10, 2026-11-12); checked in milliseconds.
+#[cfg(feature = "vdf")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChiaVdf;
+
+#[cfg(feature = "vdf")]
+impl ChiaVdf {
+    /// Bits of the discriminant (Chia's).
+    pub const BITS: usize = 1024;
+    /// Bytes of a form: the result and the proof are one each.
+    pub const FORM: usize = 100;
+
+    /// Chia's generator form, where every calculation starts.
+    pub fn start() -> [u8; 100] {
+        let mut x = [0u8; 100];
+        x[0] = 0x08;
+        x
+    }
+
+    /// Run `steps` steps from `challenge` (blocks the calling thread for as long as they take).
+    pub fn prove(&self, challenge: &Hash, steps: u64) -> Option<TimeProof> {
+        let out = chiavdf::prove(challenge, &Self::start(), Self::BITS, steps.max(1))?;
+        (out.len() == 2 * Self::FORM).then(|| TimeProof { output: out[..Self::FORM].to_vec(), proof: out[Self::FORM..].to_vec() })
+    }
+}
+
+#[cfg(feature = "vdf")]
+impl TimeProofs for ChiaVdf {
+    fn verify(&self, challenge: &Hash, steps: u64, proof: &TimeProof) -> bool {
+        if proof.output.len() != Self::FORM || proof.proof.len() != Self::FORM || steps == 0 {
+            return false;
+        }
+        let mut disc = [0u8; Self::BITS / 8];
+        if !chiavdf::create_discriminant(challenge, &mut disc) {
+            return false;
+        }
+        let blob = [&proof.output[..], &proof.proof[..]].concat();
+        chiavdf::verify_n_wesolowski(&disc, &Self::start(), &blob, steps, 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,6 +140,33 @@ mod tests {
         padded.proof.push(0);
         assert!(!StandIn.verify(&c, 1_000, &padded));
         assert!(!StandIn.takes_time());
+    }
+
+    #[cfg(feature = "vdf")]
+    #[test]
+    fn the_real_proof_of_time_holds_for_its_challenge_and_count_only() {
+        let c = block_challenge(&TESTNET, &Hash256([1; 32]));
+        let p = ChiaVdf.prove(&c, 20_000).unwrap();
+        assert_eq!((p.output.len(), p.proof.len()), (100, 100));
+        assert!(ChiaVdf.verify(&c, 20_000, &p));
+        assert!(ChiaVdf.takes_time());
+        // Another count, another challenge, another network.
+        assert!(!ChiaVdf.verify(&c, 19_999, &p));
+        assert!(!ChiaVdf.verify(&c, 20_001, &p));
+        assert!(!ChiaVdf.verify(&block_challenge(&TESTNET, &Hash256([2; 32])), 20_000, &p));
+        assert!(!ChiaVdf.verify(&block_challenge(&MAINNET, &Hash256([1; 32])), 20_000, &p));
+        // A changed byte, or bytes riding along.
+        let mut bad = p.clone();
+        bad.output[50] ^= 1;
+        assert!(!ChiaVdf.verify(&c, 20_000, &bad));
+        let mut bad = p.clone();
+        bad.proof[10] ^= 1;
+        assert!(!ChiaVdf.verify(&c, 20_000, &bad));
+        let mut padded = p.clone();
+        padded.proof.push(0);
+        assert!(!ChiaVdf.verify(&c, 20_000, &padded));
+        // The same calculation gives the same output (one output per challenge and count).
+        assert_eq!(ChiaVdf.prove(&c, 20_000).unwrap().output, p.output);
     }
 
     #[test]

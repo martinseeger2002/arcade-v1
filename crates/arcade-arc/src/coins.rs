@@ -58,6 +58,8 @@ impl Coins for HashMap<OutPoint, Coin> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TxError {
+    #[error("the block's transactions aren't in the order its seed sets")]
+    Order,
     #[error("a transaction of more than 100,000 bytes")]
     TooBig,
     #[error("the transaction's version isn't 1")]
@@ -282,7 +284,9 @@ pub fn check_block(txs: &[Tx], height: u64, prev: &Hash256, coins: &impl Coins, 
         return Err(TxError::CoinbasePayouts);
     }
     changes.claimed = own.iter().map(|o| o.value).sum(); // check_form: no overflow
-    if changes.claimed > changes.fees {
+    // Fees join the pot, shared by weight like the block reward (docs/ARCADECHAIN.md §14.18):
+    // the coinbase pays what is owed and nothing to its writer.
+    if changes.claimed > 0 {
         return Err(TxError::CoinbaseAmount);
     }
     add(&mut within, &mut order, coinbase, true);
@@ -438,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn a_coinbase_names_its_block_and_takes_no_more_than_the_fees() {
+    fn a_coinbase_names_its_block_and_leaves_the_fees_to_the_pot() {
         let (sk, pk) = key(1);
         let lock = p2pkh(&pk);
         let writer = p2pkh(&key(7).1);
@@ -446,22 +450,18 @@ mod tests {
         coins.insert(point(1), held(100 * DUST, &lock, 5, false));
         let payment = pay(&[point(1)], vec![(97 * DUST, lock.clone())], &sk, &pk); // fee 3 × dust
 
-        let good = coinbase(10, &PREV, vec![(3 * DUST, writer.clone())]);
+        // The fees join the pot: the coinbase takes none of them.
+        let good = coinbase(10, &PREV, vec![burn()]);
         let changes = check_block(&[good.clone(), payment.clone()], 10, &PREV, &coins, &[]).unwrap();
-        assert_eq!((changes.fees, changes.claimed), (3 * DUST, 3 * DUST));
+        assert_eq!((changes.fees, changes.claimed), (3 * DUST, 0));
         assert_eq!(changes.spent, vec![(point(1), held(100 * DUST, &lock, 5, false))]);
-        assert_eq!(
-            changes.made,
-            vec![
-                (OutPoint { txid: payment.txid, vout: 0 }, held(97 * DUST, &lock, 10, false)),
-                (OutPoint { txid: good.txid, vout: 0 }, held(3 * DUST, &writer, 10, true)),
-            ]
-        );
-        // Less than the fees is fine (the rest is burned); more isn't.
-        assert!(check_block(&[coinbase(10, &PREV, vec![(2 * DUST, writer.clone())]), payment.clone()], 10, &PREV, &coins, &[]).is_ok());
-        let greedy = coinbase(10, &PREV, vec![(3 * DUST + 1, writer.clone())]);
-        assert_eq!(check_block(&[greedy, payment.clone()], 10, &PREV, &coins, &[]), Err(TxError::CoinbaseAmount));
-        // No fees, nothing to take: an empty block's coinbase burns nothing.
+        assert_eq!(changes.made, vec![(OutPoint { txid: payment.txid, vout: 0 }, held(97 * DUST, &lock, 10, false))]);
+        // A writer that pays itself any of them is refused.
+        for take in [DUST, 3 * DUST] {
+            let greedy = coinbase(10, &PREV, vec![(take, writer.clone())]);
+            assert_eq!(check_block(&[greedy, payment.clone()], 10, &PREV, &coins, &[]), Err(TxError::CoinbaseAmount));
+        }
+        // An empty block's coinbase burns nothing.
         assert_eq!(check_block(&[coinbase(10, &PREV, vec![burn()])], 10, &PREV, &coins, &[]).map(|c| c.made), Ok(vec![]));
         assert_eq!(check_block(&[coinbase(10, &PREV, vec![(DUST, writer.clone())])], 10, &PREV, &coins, &[]), Err(TxError::CoinbaseAmount));
 
@@ -507,6 +507,38 @@ mod tests {
     }
 
     #[test]
+    fn the_seed_orders_a_blocks_transactions_and_parents_come_first() {
+        let net = crate::params::TESTNET;
+        let to = p2pkh(&key(7).1);
+        // Six unrelated payments, a child of the first and a grandchild.
+        let mut txs: Vec<Tx> = (1..=6).map(|i| tx(vec![(point(i), vec![], u32::MAX)], vec![(DUST, to.clone())], 0)).collect();
+        let child = tx(vec![(OutPoint { txid: txs[0].txid, vout: 0 }, vec![], u32::MAX)], vec![(DUST, to.clone())], 0);
+        let grandchild = tx(vec![(OutPoint { txid: child.txid, vout: 0 }, vec![], u32::MAX), (point(9), vec![], u32::MAX)], vec![(DUST, to.clone())], 0);
+        txs.push(child.clone());
+        txs.push(grandchild.clone());
+        let ids = |v: &[Tx]| v.iter().map(|t| t.txid).collect::<Vec<_>>();
+        let at = |v: &[Tx], t: &Tx| v.iter().position(|x| x.txid == t.txid).unwrap();
+        let a = canonical_order(&net, &[1; 32], txs.clone());
+        // The same set in any order comes out the same.
+        let mut shuffled = txs.clone();
+        shuffled.reverse();
+        shuffled.swap(0, 3);
+        assert_eq!(ids(&canonical_order(&net, &[1; 32], shuffled)), ids(&a));
+        let mut all = ids(&a);
+        all.sort();
+        let mut want = ids(&txs);
+        want.sort();
+        assert_eq!(all, want);
+        // Parents before children.
+        for seed in 0..20u8 {
+            let o = canonical_order(&net, &[seed; 32], txs.clone());
+            assert!(at(&o, &txs[0]) < at(&o, &child) && at(&o, &child) < at(&o, &grandchild));
+        }
+        // Another seed, another order.
+        assert!((2..20u8).any(|seed| ids(&canonical_order(&net, &[seed; 32], txs.clone())) != ids(&a)));
+    }
+
+    #[test]
     fn within_a_block_a_coin_is_spent_once_and_in_order() {
         let (sk, pk) = key(1);
         let lock = p2pkh(&pk);
@@ -541,4 +573,42 @@ mod tests {
         let changes = check_block(&[cb, open.clone()], 10, &PREV, &coins, &[]).unwrap();
         assert_eq!(changes.made, vec![(OutPoint { txid: open.txid, vout: 0 }, held(90 * DUST, &[OP_1], 10, false))]);
     }
+}
+
+/// A block's transactions after the coinbase in the order the chain requires
+/// (docs/ARCADECHAIN.md §14.18): by `H(block seed ‖ txid)`, each after the transactions of the
+/// block it spends from, so no writer chooses the order.
+pub fn canonical_order(net: &crate::params::Net, seed: &crate::merkle::Hash, txs: Vec<Tx>) -> Vec<Tx> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let ids: HashSet<Hash256> = txs.iter().map(|t| t.txid).collect();
+    let key = |t: &Tx| crate::tagged::hash(net, "txorder", &[seed, &t.txid.0]);
+    // Waiting parents inside the block, per transaction.
+    let mut parents: HashMap<Hash256, usize> = HashMap::new();
+    let mut children: HashMap<Hash256, Vec<Hash256>> = HashMap::new();
+    for t in &txs {
+        let ps: BTreeSet<Hash256> = t.inputs.iter().map(|i| i.prevout.txid).filter(|p| ids.contains(p) && *p != t.txid).collect();
+        parents.insert(t.txid, ps.len());
+        for p in ps {
+            children.entry(p).or_default().push(t.txid);
+        }
+    }
+    let mut by_id: HashMap<Hash256, Tx> = txs.into_iter().map(|t| (t.txid, t)).collect();
+    let mut ready: BTreeMap<crate::merkle::Hash, Hash256> = by_id.values().filter(|t| parents[&t.txid] == 0).map(|t| (key(t), t.txid)).collect();
+    let mut out = Vec::with_capacity(by_id.len());
+    while let Some((_, id)) = ready.pop_first() {
+        let t = by_id.remove(&id).expect("each once");
+        for c in children.remove(&id).unwrap_or_default() {
+            let n = parents.get_mut(&c).expect("known");
+            *n -= 1;
+            if *n == 0 {
+                ready.insert(key(&by_id[&c]), c);
+            }
+        }
+        out.push(t);
+    }
+    // (A cycle can't happen with real txids; anything left goes last, in key order.)
+    let mut left: Vec<Tx> = by_id.into_values().collect();
+    left.sort_by_cached_key(|t| key(t));
+    out.extend(left);
+    out
 }

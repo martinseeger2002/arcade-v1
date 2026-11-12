@@ -29,6 +29,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+/// The most a maker fee may be: 5% (the website's Marketplace tab allows 0-5%).
+const MAX_FEE_BPS: u64 = 500;
 /// A note's coin and an inscription lock's reserve (token20_send.POSTAGE, htlc.DOGINAL_RESERVE).
 pub(crate) const POSTAGE: u64 = 100_000;
 const RESERVE: u64 = htlc::SPEND_FEE + htlc::DUST;
@@ -70,6 +72,52 @@ pub(crate) fn wallet_key(node: &Node, p: &ChainParams) -> Result<(arcade_wallet:
     let sk = node.app.tag_key(p, 0).map_err(|e| e.to_string())?.1;
     Ok((sk, PublicKey::from_secret_key(SECP256K1, &sk)))
 }
+/// The key one side of a swap uses on `p`: an order's own key there (an order placed for somebody else with a key of
+/// its own, the website's delegated orders: Martin 2026-11-12, maker side first), else this wallet's.
+fn key_of(node: &Node, p: &ChainParams, o: Option<&Value>) -> Result<(arcade_wallet::SecretKey, PublicKey), String> {
+    if let Some(h) = o.and_then(|o| o["own"]["keys"][p.key].as_str()) {
+        let b = hex::decode(h).map_err(|_| "an order's key is 32 bytes of hex")?;
+        let sk = arcade_wallet::SecretKey::from_slice(&b).map_err(|_| "an order's key is not a key")?;
+        return Ok((sk, PublicKey::from_secret_key(SECP256K1, &sk)));
+    }
+    wallet_key(node, p)
+}
+
+/// Where an order's coins and tokens come out on `p`: its payout address there (the person it was placed for), else
+/// `own` (this wallet).
+fn payout(p: &ChainParams, o: Option<&Value>, own: Vec<u8>) -> Vec<u8> {
+    o.and_then(|o| o["own"]["payout"][p.key].as_str()).and_then(|a| arcade_ledger::address::script_for_address(p, a)).unwrap_or(own)
+}
+
+/// The maker's operator fee on `p` for `amount` (the order's `maker_fee {bps, to: {chain: address}}`): Martin
+/// 2026-11-12, "the maker fee can be in the maker token": a share of what the maker gives, paid with its lock (for an
+/// inscription given, of the coins it gets, at its claim). None when there is none, or under the dust line.
+fn maker_fee(p: &ChainParams, o: Option<&Value>, amount: u64) -> Option<(u64, Vec<u8>)> {
+    let f = &o?["maker_fee"];
+    let bps = f["bps"].as_u64().filter(|b| *b > 0 && *b <= MAX_FEE_BPS)?;
+    let to = arcade_ledger::address::script_for_address(p, f["to"][p.key].as_str()?)?;
+    let fee = (amount as u128 * bps as u128 / 10_000) as u64;
+    (fee >= htlc::DUST).then_some((fee, to))
+}
+
+/// The maker fee in a token's own units (an arcade-ledger token: no dust line), to the operator's address on `p`.
+fn token_fee(o: Option<&Value>, amount: u64, p: &ChainParams) -> Option<(u64, Vec<u8>)> {
+    let f = &o?["maker_fee"];
+    let bps = f["bps"].as_u64().filter(|b| *b > 0 && *b <= MAX_FEE_BPS)?;
+    let to = arcade_ledger::address::script_for_address(p, f["to"][p.key].as_str()?)?;
+    let fee = (amount as u128 * bps as u128 / 10_000) as u64;
+    (fee > 0).then_some((fee, to))
+}
+
+/// An order as anybody else sees it: never its own keys or payout addresses.
+pub fn public_order(o: &Value) -> Value {
+    let mut o = o.clone();
+    if let Some(m) = o.as_object_mut() {
+        m.remove("own");
+    }
+    o
+}
+
 pub(crate) fn p2pkh_of(pk: &PublicKey) -> Vec<u8> {
     arcade_ledger::address::p2pkh_script(&arcade_ledger::address::hash160(&pk.serialize()))
 }
@@ -372,16 +420,20 @@ fn units(leg: &Value) -> u64 {
 }
 
 /// One step of locking `leg` under `spec`; `st` is the lock's own record. Done when st.step is "locked".
-fn lock_step(node: &Node, leg: &Value, spec: &Spec, st: &mut Value) -> Result<(), String> {
+fn lock_step(node: &Node, leg: &Value, spec: &Spec, st: &mut Value, o: Option<&Value>) -> Result<(), String> {
     let p = leg_ok(node, leg)?;
-    let (sk, pk) = wallet_key(node, p)?;
+    let (sk, pk) = key_of(node, p, o)?;
     let own = crate::coinsend::key_scripts(p, &pk)[0].1.clone();
     let kind = leg["kind"].as_str().unwrap_or("");
     let script = spec.script(kind)?;
     let ready = |k: &str| st[k].as_str().and_then(|x| Hash256::from_hex(x).ok()).is_some_and(|h| depth(node, p, &h) >= 1);
     match (kind, st["step"].as_str().unwrap_or("start")) {
         ("coin", "start") => {
-            let tx = build(node, p, &sk, vec![], coins(node, p, &pk), vec![TxOutSpec { value: units(leg) + htlc::SPEND_FEE, script: script.clone() }], &own)?;
+            let mut outs = vec![TxOutSpec { value: units(leg) + htlc::SPEND_FEE, script: script.clone() }];
+            if let Some((fee, to)) = maker_fee(p, o, units(leg)) {
+                outs.push(TxOutSpec { value: fee, script: to });
+            }
+            let tx = build(node, p, &sk, vec![], coins(node, p, &pk), outs, &own)?;
             st["txid"] = json!(send(node, p, &tx)?);
             st["vout"] = json!(0);
             st["step"] = json!("locked");
@@ -399,8 +451,19 @@ fn lock_step(node: &Node, leg: &Value, spec: &Spec, st: &mut Value) -> Result<()
             payload.extend_from_slice(&pid.to_be_bytes());
             payload.extend_from_slice(&units(leg).to_be_bytes());
             let tx = arcade_wallet::tx::build_arcade(p, &payload, vec![TxOutSpec { value: LEDGER_COIN, script: script.clone() }], &sk, &coins(node, p, &pk), crate::claims::FEE_PER_KB, crate::claims::DUST, now()).map_err(|e| e.to_string())?;
-            st["vout"] = json!(tx.outputs.iter().position(|o| o.script_pubkey == script).ok_or("no lock output")?);
+            st["vout"] = json!(tx.outputs.iter().position(|x| x.script_pubkey == script).ok_or("no lock output")?);
             st["txid"] = json!(send(node, p, &tx)?);
+            // The maker fee in the token itself: a ledger send of it to the operator, made with the lock.
+            if let Some((fee, to)) = token_fee(o, units(leg), p) {
+                let mut fp = vec![0, 0, 0, 0];
+                fp.extend_from_slice(&pid.to_be_bytes());
+                fp.extend_from_slice(&fee.to_be_bytes());
+                let left: Vec<Utxo> = coins(node, p, &pk).into_iter().filter(|c| !tx.inputs.iter().any(|i| i.prevout == c.outpoint)).collect();
+                match arcade_wallet::tx::build_arcade(p, &fp, vec![TxOutSpec { value: LEDGER_COIN, script: to }], &sk, &left, crate::claims::FEE_PER_KB, crate::claims::DUST, now()) {
+                    Ok(t) => st["fee_tx"] = json!(send(node, p, &t)?),
+                    Err(e) => st["fee_error"] = json!(e.to_string()),
+                }
+            }
             st["step"] = json!("locked");
         }
         ("ord", "start") => {
@@ -523,9 +586,9 @@ fn lock_coins(node: &Node, leg: &Value, st: &Value) -> Result<(Tx, Vec<(OutPoint
 }
 
 /// Claim (with `secret`) or refund (None) a lock of `leg`: the coins to this wallet.
-fn spend(node: &Node, leg: &Value, spec: &Spec, st: &Value, secret: Option<&[u8]>) -> Result<String, String> {
+fn spend(node: &Node, leg: &Value, spec: &Spec, st: &Value, secret: Option<&[u8]>, o: Option<&Value>) -> Result<String, String> {
     let p = leg_ok(node, leg)?;
-    let (sk, pk) = wallet_key(node, p)?;
+    let (sk, pk) = key_of(node, p, o)?;
     let kind = leg["kind"].as_str().unwrap_or("");
     let (tx, cs) = lock_coins(node, leg, st)?;
     // Built only when the coin is held by exactly the lock computed here (2026-11-10, c3c6e1b3).
@@ -555,11 +618,23 @@ fn spend(node: &Node, leg: &Value, spec: &Spec, st: &Value, secret: Option<&[u8]
             d.extend_from_slice(&[0, 0, 0, 0]);
             d.extend_from_slice(&pid.to_be_bytes());
             d.extend_from_slice(&units(leg).to_be_bytes());
-            vec![(0, arcade_wallet::tx::op_return(&d)), (htlc::DUST, p2pkh_of(&pk))]
+            vec![(0, arcade_wallet::tx::op_return(&d)), (htlc::DUST, payout(p, o, p2pkh_of(&pk)))]
         }
-        // The inscribed coin whole to this wallet as output 0; the reserve is the fee.
-        "token20" | "ord" => vec![(cs[0].1, p2pkh_of(&pk))],
-        _ => htlc::pay_out(&cs, &own, htlc::SPEND_FEE)?,
+        // The inscribed coin whole to this wallet (or the order's payout address) as output 0; the reserve is the fee.
+        "token20" | "ord" => vec![(cs[0].1, payout(p, o, p2pkh_of(&pk)))],
+        _ => {
+            let mut outs = htlc::pay_out(&cs, &payout(p, o, own.clone()), htlc::SPEND_FEE)?;
+            // A maker that gave an inscription pays its fee from the coins it gets, as an output of this claim.
+            if secret.is_some() && o.is_some_and(|o| o["give"]["kind"] == "ord") {
+                if let Some((fee, to)) = maker_fee(p, o, units(leg)) {
+                    if outs[0].0 >= fee + htlc::DUST {
+                        outs[0].0 -= fee;
+                        outs.push((fee, to));
+                    }
+                }
+            }
+            outs
+        }
     };
     let raw = match secret {
         Some(s) => htlc::claim(p, &lock, &cs, outs, s, &sk)?,
@@ -598,15 +673,123 @@ fn pair_ok(node: &Node, give: &Value, get_leg: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Place an order: give `give`, get `get` (whole, one fill).
-pub fn place(node: &Node, give: &Value, get_leg: &Value) -> Result<Value, String> {
-    leg_ok(node, give)?;
-    leg_ok(node, get_leg)?;
+/// Place an order: give `give`, get `get` (whole, one fill). `opts` (all optional): `key` {chain: 32-byte secret hex}
+/// and `payout` {chain: address}, an order run with its own key for somebody else, its result paid to them (the
+/// website's delegated orders; kept here, never in what is shared); `maker_fee` {bps (at most 500), to: {chain:
+/// address}}, the maker's operator's fee, paid in what the maker gives.
+pub fn place(node: &Node, give: &Value, get_leg: &Value, opts: &Value) -> Result<Value, String> {
+    let gp = leg_ok(node, give)?;
+    let wp = leg_ok(node, get_leg)?;
     pair_ok(node, give, get_leg)?;
     let id = arcade_mesh::random::hex(8);
-    let o = json!({"id": id, "give": give, "get": get_leg, "status": "open", "created": arcade_app::now(), "node": node.id_hex()});
+    let mut o = json!({"id": id, "give": give, "get": get_leg, "status": "open", "created": arcade_app::now(), "node": node.id_hex()});
+    if opts["key"].is_object() || opts["payout"].is_object() {
+        for p in [gp, wp] {
+            let k = opts["key"][p.key].as_str().ok_or_else(|| format!("an order with its own key names its key on {}", p.name))?;
+            let b = hex::decode(k).map_err(|_| "an order's key is 32 bytes of hex")?;
+            arcade_wallet::SecretKey::from_slice(&b).map_err(|_| "an order's key is not a key")?;
+            let a = opts["payout"][p.key].as_str().ok_or_else(|| format!("an order with its own key names where its {} goes", p.name))?;
+            arcade_ledger::address::script_for_address(p, a).ok_or_else(|| format!("{a} is not a {} address", p.name))?;
+        }
+        if matches!(give["kind"].as_str(), Some("dd" | "token20")) || matches!(get_leg["kind"].as_str(), Some("dd" | "token20")) {
+            return Err("an order with its own key gives and gets coins, arcade tokens or inscriptions for now".into());
+        }
+        o["own"] = json!({"keys": opts["key"], "payout": opts["payout"]});
+    }
+    if opts["maker_fee"].is_object() {
+        let bps = opts["maker_fee"]["bps"].as_u64().ok_or("a maker fee names its bps")?;
+        if bps > MAX_FEE_BPS {
+            return Err("a maker fee is at most 5%".into());
+        }
+        // Paid on the chain of what the maker gives (for an inscription given, of the coins it gets).
+        let fp = if give["kind"] == "ord" { wp } else { gp };
+        let a = opts["maker_fee"]["to"][fp.key].as_str().ok_or_else(|| format!("a maker fee names its address on {}", fp.name))?;
+        arcade_ledger::address::script_for_address(fp, a).ok_or_else(|| format!("{a} is not a {} address", fp.name))?;
+        if matches!(give["kind"].as_str(), Some("dd" | "token20")) {
+            return Err("a maker fee in DigiDollars or DRC-20 / PRC-20 tokens comes next".into());
+        }
+        o["maker_fee"] = json!({"bps": bps, "to": opts["maker_fee"]["to"]});
+    }
+    put(node, "sorder", &o);
+    Ok(public_order(&o))
+}
+
+/// Give back an open order placed with its own key (`swap.release`): cancelled, and its key and payout addresses
+/// forgotten here. One being taken is refused: its swap finishes or refunds by itself.
+pub fn release(node: &Node, id: &str) -> Result<Value, String> {
+    let mut o = get(node, "sorder", id).ok_or("no such order here")?;
+    if o["status"] != "open" {
+        return Err(format!("that order is {}: a running swap finishes or refunds by itself", o["status"].as_str().unwrap_or("closed")));
+    }
+    // What the order's key holds goes back to the payout addresses first (the website's visitor gave it to this key to
+    // place the order): an inscription given, whole and first; an arcade token given, by a ledger send; then the coins.
+    let mut back = Vec::new();
+    if o["own"].is_object() {
+        o["status"] = json!("releasing");
+        put(node, "sorder", &o);
+        for leg in [o["give"].clone(), o["get"].clone()] {
+            let p = leg_ok(node, &leg)?;
+            if back.iter().any(|b: &Value| b["chain"] == p.key) {
+                continue;
+            }
+            match sweep(node, p, &o, if leg == o["give"] { Some(&leg) } else { None }) {
+                Ok(txids) => back.push(json!({"chain": p.key, "txids": txids})),
+                Err(e) => back.push(json!({"chain": p.key, "error": e})),
+            }
+        }
+    }
+    o["status"] = json!("released");
+    o["returned"] = json!(back);
+    if let Some(m) = o.as_object_mut() {
+        m.remove("own");
+    }
     put(node, "sorder", &o);
     Ok(o)
+}
+
+/// Everything an own-key order's key holds on `p` back to its payout address there: `give` is the order's own leg on
+/// that chain (its inscription or arcade token first), then every coin. The txids sent.
+fn sweep(node: &Node, p: &'static ChainParams, o: &Value, give: Option<&Value>) -> Result<Vec<String>, String> {
+    let (sk, pk) = key_of(node, p, Some(o))?;
+    let own = crate::coinsend::key_scripts(p, &pk)[0].1.clone();
+    let to = payout(p, Some(o), own.clone());
+    if to == own {
+        return Err("no payout address to send it back to".into());
+    }
+    let mut sent = Vec::new();
+    match give.and_then(|g| g["kind"].as_str()) {
+        Some("ord") => {
+            let id = give.unwrap()["asset"].as_str().unwrap_or("");
+            if let Some((at, 0)) = arcade_ledger::ord::location(&node.chain, p, id) {
+                if let Some(coin) = node.chain.coin(p, &at).ok().flatten().filter(|c| c.script == own || c.script == p2pkh_of(&pk)) {
+                    let first = vec![Utxo { outpoint: at, value: coin.value, script: coin.script.clone() }];
+                    let tx = build(node, p, &sk, first, coins(node, p, &pk), vec![TxOutSpec { value: coin.value, script: to.clone() }], &to)?;
+                    sent.push(send(node, p, &tx)?);
+                    return Ok(sent); // its fee coins went with it, change to the payout address
+                }
+            }
+        }
+        Some("token") => {
+            let g = give.unwrap();
+            let pid: u32 = g["asset"].as_str().and_then(|a| a.parse().ok()).ok_or("bad property")?;
+            let addr = arcade_ledger::address::address_of(&own, p).ok_or("no address")?;
+            let held = led::holdings(&node.chain, p.chain_no, &addr).into_iter().find(|(x, _)| *x == pid).map(|x| x.1).unwrap_or(0);
+            if held > 0 {
+                let mut payload = vec![0, 0, 0, 0];
+                payload.extend_from_slice(&pid.to_be_bytes());
+                payload.extend_from_slice(&held.to_be_bytes());
+                let t = arcade_wallet::tx::build_arcade(p, &payload, vec![TxOutSpec { value: LEDGER_COIN, script: to.clone() }], &sk, &coins(node, p, &pk), crate::claims::FEE_PER_KB, crate::claims::DUST, now()).map_err(|e| e.to_string())?;
+                sent.push(send(node, p, &t)?);
+            }
+        }
+        _ => {}
+    }
+    let left = coins(node, p, &pk);
+    if !left.is_empty() {
+        let tx = build(node, p, &sk, left, vec![], vec![], &to)?;
+        sent.push(send(node, p, &tx)?);
+    }
+    Ok(sent)
 }
 
 /// Take back an open order of this arcade's (a running swap finishes or refunds by itself).
@@ -614,12 +797,12 @@ pub fn cancel(node: &Node, id: &str) -> Result<Value, String> {
     let mut o = get(node, "sorder", id).filter(|o| o["status"] == "open").ok_or("that is not an open swap order of this arcade's")?;
     o["status"] = json!("cancelled");
     put(node, "sorder", &o);
-    Ok(o)
+    Ok(public_order(&o))
 }
 
 /// This arcade's own open orders.
 pub fn own_orders(node: &Node) -> Vec<Value> {
-    list(node, "sorder").into_iter().filter(|o| o["status"] == "open").collect()
+    list(node, "sorder").into_iter().filter(|o| o["status"] == "open").map(|o| public_order(&o)).collect()
 }
 
 /// Linked arcades' open orders as each last answered: peer -> (when, orders).
@@ -636,7 +819,7 @@ const BOOK_KEEP: u32 = 600;
 /// the book answers within BOOK_WAIT with each one's newest answer: one asked in turn, each up to
 /// 30 s, held a page's book for minutes on an arcade with a dozen links (some never answer).
 pub fn book(node: &Node) -> Vec<Value> {
-    let mut all: Vec<Value> = list(node, "sorder").into_iter().filter(|o| o["status"] == "open").collect();
+    let mut all: Vec<Value> = list(node, "sorder").into_iter().filter(|o| o["status"] == "open").map(|o| public_order(&o)).collect();
     let peers = crate::shares::linked_ids(node);
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     let mut asked = 0;
@@ -675,18 +858,19 @@ pub fn book(node: &Node) -> Vec<Value> {
     all
 }
 
-fn keys_for(node: &Node, legs: &[&Value]) -> Result<Value, String> {
+fn keys_for(node: &Node, legs: &[&Value], o: Option<&Value>) -> Result<Value, String> {
     let mut m = serde_json::Map::new();
     for leg in legs {
         let p = leg_ok(node, leg)?;
-        m.insert(p.key.to_string(), json!(hex::encode(wallet_key(node, p)?.1.serialize())));
+        m.insert(p.key.to_string(), json!(hex::encode(key_of(node, p, o)?.1.serialize())));
     }
     Ok(Value::Object(m))
 }
 
 pub fn answer(node: &Node, q: &Value) -> Result<Value, String> {
     match q["op"].as_str().unwrap_or("") {
-        "sbook" => Ok(json!({"orders": list(node, "sorder").into_iter().filter(|o| o["status"] == "open").map(|mut o| {
+        "sbook" => Ok(json!({"orders": list(node, "sorder").into_iter().filter(|o| o["status"] == "open").map(|o| {
+            let mut o = public_order(&o);
             o["taking"] = json!(o["held_until"].as_u64().unwrap_or(0) as u32 > now());
             o
         }).collect::<Vec<_>>()})),
@@ -705,7 +889,7 @@ pub fn answer(node: &Node, q: &Value) -> Result<Value, String> {
             pair_ok(node, &o["give"], &o["get"])?;
             // "sized": this maker's lock takes only a 32-byte secret (an older taker doesn't know to look for it:
             // it never finds this side's lock, and both sides refund).
-            Ok(json!({"order": o, "maker_keys": keys_for(node, &[&o["give"], &o["get"]])?, "maker_secs": maker_secs(), "sized": sized_on(node, &o["give"])}))
+            Ok(json!({"order": public_order(&o), "maker_keys": keys_for(node, &[&o["give"], &o["get"]], Some(&o))?, "maker_secs": maker_secs(), "sized": sized_on(node, &o["give"])}))
         }
         "slocked" => maker_begin(node, q),
         "sstatus" => {
@@ -751,7 +935,7 @@ fn maker_begin(node: &Node, q: &Value) -> Result<Value, String> {
     if taker_time < now() + maker_secs() * 3 / 2 {
         return Err("that lock ends too soon".into());
     }
-    let mut s = json!({"id": id, "role": "maker", "order": o, "peer": q["taker"], "maker_keys": keys_for(node, &[&o["give"], &o["get"]])?,
+    let mut s = json!({"id": id, "role": "maker", "order": public_order(&o), "peer": q["taker"], "maker_keys": keys_for(node, &[&o["give"], &o["get"]], Some(&o))?,
                        "taker_keys": q["taker_keys"], "taker_time": taker_time, "maker_time": now() + maker_secs(),
                        "taker_lock": q["taker_lock"], "maker_lock": {"step": "start"}, "step": "locking", "at": arcade_app::now(),
                        "sized": sized_on(node, &o["give"])});
@@ -777,7 +961,7 @@ fn maker_begin(node: &Node, q: &Value) -> Result<Value, String> {
     }
     o["status"] = json!("taken");
     put(node, "sorder", &o);
-    s["order"] = o;
+    s["order"] = public_order(&o);
     put(node, "swap", &s);
     Ok(json!({"step": "locking"}))
 }
@@ -809,7 +993,7 @@ pub fn take(node: &Node, maker: &str, order: &str, shown: Option<&Value>) -> Res
     let secs = quote["maker_secs"].as_u64().unwrap_or(4 * 3600) as u32;
     let f = taker_factor(&o);
     let mut s = json!({"id": id, "role": "taker", "order": o, "peer": maker, "secret": hex::encode(secret), "maker_keys": quote["maker_keys"],
-                   "taker_keys": keys_for(node, &[&o["give"], &o["get"]])?, "taker_time": now() + f * secs,
+                   "taker_keys": keys_for(node, &[&o["give"], &o["get"]], None)?, "taker_time": now() + f * secs,
                    "taker_lock": {"step": "start"}, "step": "locking", "at": arcade_app::now(), "sized": quote["sized"] == true});
     let gp = leg_ok(node, &o["get"])?;
     if by_height(gp) {
@@ -872,7 +1056,7 @@ fn step(node: &Node, s: &mut Value) -> Result<(), String> {
         // The taker's own lock comes back after its time if the swap never finished.
         if s["step"] != "claimed" && s["taker_lock"]["step"] == "locked" && ended(node, leg_ok(node, &get_leg)?, tspec.time) {
             if spent_secret(node, &get_leg, &tspec, &s["taker_lock"])?.is_none() {
-                s["refund_tx"] = json!(spend(node, &get_leg, &tspec, &s["taker_lock"], None)?);
+                s["refund_tx"] = json!(spend(node, &get_leg, &tspec, &s["taker_lock"], None, None)?);
                 s["step"] = json!("refunded");
             }
             return Ok(());
@@ -880,7 +1064,7 @@ fn step(node: &Node, s: &mut Value) -> Result<(), String> {
         match s["step"].as_str().unwrap_or("") {
             "locking" => {
                 let mut st = s["taker_lock"].clone();
-                lock_step(node, &get_leg, &tspec, &mut st)?;
+                lock_step(node, &get_leg, &tspec, &mut st, None)?;
                 s["taker_lock"] = st;
                 if s["taker_lock"]["step"] == "locked" {
                     s["step"] = json!("telling");
@@ -915,7 +1099,7 @@ fn step(node: &Node, s: &mut Value) -> Result<(), String> {
                 match seen(node, &give, &mspec, &s["maker_lock"]) {
                     Ok(true) => {
                         let secret = hex::decode(s["secret"].as_str().unwrap_or("")).map_err(|_| "no secret")?;
-                        s["claim_tx"] = json!(spend(node, &give, &mspec, &s["maker_lock"], Some(&secret))?);
+                        s["claim_tx"] = json!(spend(node, &give, &mspec, &s["maker_lock"], Some(&secret), None)?);
                         s["step"] = json!("claimed");
                     }
                     Ok(false) => {}
@@ -926,7 +1110,9 @@ fn step(node: &Node, s: &mut Value) -> Result<(), String> {
         }
         return Ok(());
     }
-    // The maker.
+    // The maker: with the order's own key and payout addresses when it has them (own_order).
+    let order = own_order(node, s);
+    let o = order.as_ref();
     match s["step"].as_str().unwrap_or("") {
         // Its lock never started and its time is up: nothing of this wallet's is out; the taker refunds its own.
         "locking" if s["maker_lock"]["step"] == "start" && t > s["maker_time"].as_u64().unwrap_or(0) as u32 => {
@@ -935,7 +1121,7 @@ fn step(node: &Node, s: &mut Value) -> Result<(), String> {
         }
         "locking" => {
             let mut st = s["maker_lock"].clone();
-            lock_step(node, &give, &mspec, &mut st)?;
+            lock_step(node, &give, &mspec, &mut st, o)?;
             if st["step"] == "locked" {
                 // The lock's end as its script has it: a height on the ARCADE chain, else a clock time.
                 st["time"] = json!(mspec.time);
@@ -945,12 +1131,12 @@ fn step(node: &Node, s: &mut Value) -> Result<(), String> {
         }
         "locked" => match spent_secret(node, &give, &mspec, &s["maker_lock"])? {
             Some(Some(secret)) => {
-                s["claim_tx"] = json!(spend(node, &get_leg, &tspec, &s["taker_lock"], Some(&secret))?);
+                s["claim_tx"] = json!(spend(node, &get_leg, &tspec, &s["taker_lock"], Some(&secret), o)?);
                 s["step"] = json!("claimed");
             }
             Some(None) => s["step"] = json!("refunded"),
             None if ended(node, leg_ok(node, &give)?, mspec.time) => {
-                s["refund_tx"] = json!(spend(node, &give, &mspec, &s["maker_lock"], None)?);
+                s["refund_tx"] = json!(spend(node, &give, &mspec, &s["maker_lock"], None, o)?);
                 s["step"] = json!("refunded");
             }
             None => {}
@@ -958,6 +1144,12 @@ fn step(node: &Node, s: &mut Value) -> Result<(), String> {
         _ => {}
     }
     Ok(())
+}
+
+/// The order a maker's swap runs, with its own keys and payout addresses (kept in this arcade's order record only; the
+/// swap record carries the order as the taker saw it).
+fn own_order(node: &Node, s: &Value) -> Option<Value> {
+    get(node, "sorder", s["order"]["id"].as_str()?)
 }
 
 pub fn start(node: Arc<Node>) {
@@ -1028,4 +1220,55 @@ fn a_take_goes_ahead_only_on_the_terms_shown() {
     o2["give"]["chain"] = json!("dgb");
     assert!(!same_terms(&o2, &shown), "another chain");
     assert!(!same_terms(&shown, &json!({"order": "x"})), "nothing shown matches nothing");
+}
+
+#[cfg(test)]
+mod own_key_tests {
+    use super::*;
+
+    fn legs(t: &crate::sitesvc::tests::T) -> (Value, Value) {
+        let k = t.p.key;
+        (json!({"chain": k, "kind": "coin", "asset": "", "amount": "500000000"}), json!({"chain": k, "kind": "coin", "asset": "", "amount": "100000000"}))
+    }
+
+    #[test]
+    fn an_order_with_its_own_key_keeps_it_here_only() {
+        let t = crate::sitesvc::tests::setup();
+        let (give, get_leg) = legs(&t);
+        let sk = [9u8; 32];
+        let pay_to = arcade_ledger::address::base58check(t.p.p2pkh_version, &[4u8; 20]);
+        let k = t.p.key;
+        let opts = json!({"key": {k: hex::encode(sk)}, "payout": {k: pay_to}, "maker_fee": {"bps": 100, "to": {k: pay_to}}});
+        let shown = place(&t.node, &give, &get_leg, &opts).unwrap();
+        assert!(shown.get("own").is_none(), "what place answers carries no key");
+        let id = shown["id"].as_str().unwrap();
+        let kept = get(&t.node, "sorder", id).unwrap();
+        assert_eq!(kept["own"]["keys"][k], hex::encode(sk), "kept here");
+        assert!(own_orders(&t.node).iter().all(|o| o.get("own").is_none()));
+        assert!(book(&t.node).iter().all(|o| o.get("own").is_none()));
+        let sbook = answer(&t.node, &json!({"op": "sbook"})).unwrap();
+        assert!(!sbook.to_string().contains(&hex::encode(sk)), "the shared book never carries the key");
+        // The order's key is the maker's key it shows, not this wallet's.
+        let (_, pk) = key_of(&t.node, t.p, Some(&kept)).unwrap();
+        assert_eq!(pk, PublicKey::from_secret_key(SECP256K1, &arcade_wallet::SecretKey::from_slice(&sk).unwrap()));
+        assert_eq!(payout(t.p, Some(&kept), vec![1]), arcade_ledger::address::script_for_address(t.p, &pay_to).unwrap());
+        // 1% of 5 coins.
+        assert_eq!(maker_fee(t.p, Some(&kept), 500_000_000).map(|f| f.0), Some(5_000_000));
+        // Released: cancelled, key forgotten.
+        let r = release(&t.node, id).unwrap();
+        assert_eq!(r["status"], "released");
+        assert!(get(&t.node, "sorder", id).unwrap().get("own").is_none());
+    }
+
+    #[test]
+    fn an_order_with_its_own_key_is_checked() {
+        let t = crate::sitesvc::tests::setup();
+        let (give, get_leg) = legs(&t);
+        let k = t.p.key;
+        let addr = arcade_ledger::address::base58check(t.p.p2pkh_version, &[4u8; 20]);
+        assert!(place(&t.node, &give, &get_leg, &json!({"key": {k: "00"}, "payout": {k: addr}})).is_err(), "a bad key");
+        assert!(place(&t.node, &give, &get_leg, &json!({"key": {k: hex::encode([9u8; 32])}})).is_err(), "no payout");
+        assert!(place(&t.node, &give, &get_leg, &json!({"maker_fee": {"bps": 900, "to": {k: addr}}})).is_err(), "over 5%");
+        assert!(place(&t.node, &give, &get_leg, &Value::Null).is_ok(), "a plain order as before");
+    }
 }

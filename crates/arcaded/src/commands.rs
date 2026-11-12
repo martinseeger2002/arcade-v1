@@ -70,6 +70,8 @@ cmds! {
     "tx.activity" Public "addresses, since?, chain?" "What changed for up to 500 addresses: history rows above height since, and waiting transactions paying or spending them; height to pass as since next time.";
     "tx.fee" Public "chain?" "The fee rate (per 1000 bytes) and dust limit this arcade builds transactions with.";
     "swap.book" Public "" "Every open swap order of this arcade and the arcades linked to it (any leg for any leg, across chains).";
+    "swap.place" Local "give, get, key?, payout?, maker_fee?" "Place a swap order (give a leg, get a leg). key {chain: secret hex} and payout {chain: address}: an order run with its own key for somebody else (a website visitor), its result paid to them; kept here, never shared. maker_fee {bps <= 500, to: {chain: address}}: the maker's operator's fee, paid in what the maker gives.";
+    "swap.release" Local "order" "Give back an open order placed with its own key: cancelled, its key and payout addresses forgotten here.";
     "swap.quote" Admin "node, order, taker" "For a taker outside this arcade (a website visitor whose browser signs): ask the maker's arcade to hold its order for this taker (this arcade's name plus the visitor's reference) and give its terms, keys, lock time and whether its lock is sized.";
     "swap.told" Admin "node, order, hash, taker, taker_keys, taker_time, taker_height?, taker_lock" "For a taker outside this arcade: tell the maker's arcade the taker's lock is on the chain; it checks it on its own copy and locks its side.";
     "swap.status" Admin "node, hash" "For a taker outside this arcade: the maker's side of a swap (its step and its lock).";
@@ -131,11 +133,13 @@ cmds! {
     "group.update" Message "id, changes" "Admins: change admins, description, picture or pinned message.";
     "group.remove" Message "id, members" "Admins: remove members (gives everyone else a new group key).";
     // Feed
-    "feed" Public "order?, channel?, tag?, author?, txid?, limit?, offset?" "Public posts (popular, new or friends) with replies, counts and tips.";
+    "feed" Public "order?, channel?, tag?, author?, txid?, limit?, offset?" "Public posts (popular, new, friends or following) with replies, counts and tips.";
     "feed.channels" Public "" "Channels and how many posts each has.";
     "feed.settings" Read "set?" "Feed settings (hide muted, contacts only); set = {hide_muted, contacts_only} needs post.";
     "feed.post" Post "text?, channel?, file?" "Post publicly (needs a @tag).";
     "feed.act" Post "kind, target, text?, amount?" "Like, unlike, dislike, undislike, reply, share, edit, delete; tip (needs tip; amount in satoshis).";
+    "follows" Public "who" "An account's followers and the accounts it follows (who = @tag or address), with @tags and counts.";
+    "follow" Post "who, on?" "Follow an account (on: false unfollows): a feed act on the home chain from this wallet; the newest between two accounts counts.";
     "feed.file" Public "txid" "A post's file (base64).";
     // Protocol indexes
     "ledger" Public "" "The arcade ledger's fingerprints next to what other arcades report.";

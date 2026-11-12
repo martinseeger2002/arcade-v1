@@ -877,7 +877,7 @@ pub fn build_request(node: &Node, m: &Value, send: bool) -> Result<(String, u64,
             return Ok((String::new(), 0, vec![]));
         }
         let r = match m["op"].as_str().unwrap_or("") {
-            "swap_place" => crate::swaps::place(node, &m["give"], &m["get"])?,
+            "swap_place" => crate::swaps::place(node, &m["give"], &m["get"], &serde_json::Value::Null)?,
             // The legs the card showed (pinned when it was filed): the maker's terms must still be those.
             "swap_take" => crate::swaps::take(node, m["node"].as_str().unwrap_or(""), m["order"].as_str().unwrap_or(""), Some(m))?,
             _ => crate::swaps::cancel(node, m["order"].as_str().unwrap_or(""))?,

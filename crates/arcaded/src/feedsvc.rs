@@ -22,6 +22,11 @@ fn c(node: &Node) -> u16 {
 }
 
 /// Acts waiting in the mempool, and posts too (shown at once, read live each time).
+/// The feed acts still waiting for a block (follows.rs reads them too).
+pub(crate) fn pending_acts(node: &Node) -> Vec<Value> {
+    pending(node).1
+}
+
 fn pending(node: &Node) -> (Vec<Value>, Vec<Value>) {
     let (mut posts, mut acts) = (Vec::new(), Vec::new());
     let p = node.params;
@@ -147,6 +152,7 @@ pub fn feed(node: &Node, v: &View) -> Result<Value, String> {
     let muted = crate::msgsvc::mutes(node);
     let settings = settings(node);
     let friends = friend_addresses(node);
+    let following: BTreeSet<String> = if v.order == "following" { crate::follows::following_of(node, &me).into_iter().collect() } else { BTreeSet::new() };
     let mut cache = BTreeMap::new();
     let now = arcade_app::now();
     let render = |node: &Node, p: &Value, cache: &mut BTreeMap<String, Value>, depth: usize| -> Option<Value> {
@@ -185,6 +191,10 @@ pub fn feed(node: &Node, v: &View) -> Result<Value, String> {
             continue;
         }
         if v.order == "friends" && from != me && !friends.contains(from) {
+            continue;
+        }
+        // Following (2026-11-12): posts by the accounts this wallet follows, and its own.
+        if v.order == "following" && from != me && !following.contains(from) {
             continue;
         }
         let Some(mut row) = render(node, p, &mut cache, 0) else {

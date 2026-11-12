@@ -63,8 +63,8 @@ pub fn steps(score: u128, difficulty: u128) -> u64 {
 /// The difficulty for the next epoch (§6.2): `seconds` is the time from the last block of
 /// the epoch before to the last block of this one, `blocks` the blocks in between (100,
 /// or 99 for the first epoch, which is measured from block 0).
-pub fn retarget(difficulty: u128, seconds: u64, blocks: u64) -> u128 {
-    let target = blocks * params::BLOCK_SECONDS;
+pub fn retarget(difficulty: u128, seconds: u64, blocks: u64, block_seconds: u64) -> u128 {
+    let target = blocks * block_seconds;
     let seconds = seconds.clamp(target / params::RETARGET_CLAMP, target * params::RETARGET_CLAMP);
     let d = BigUint::from(difficulty) * target / seconds;
     d.to_u128().unwrap_or(u128::MAX).max(1)
@@ -185,16 +185,19 @@ mod tests {
     #[test]
     fn difficulty_follows_the_clock_within_four_times() {
         let d = 1u128 << 70;
-        assert_eq!(retarget(d, 15_000, 100), d);
-        assert_eq!(retarget(d, 30_000, 100), d / 2); // blocks came slowly: fewer steps
-        assert_eq!(retarget(d, 7_500, 100), d * 2);
-        assert_eq!(retarget(d, 1, 100), d * 4);
-        assert_eq!(retarget(d, 10_000_000, 100), d / 4);
+        assert_eq!(retarget(d, 15_000, 100, 150), d);
+        assert_eq!(retarget(d, 30_000, 100, 150), d / 2); // blocks came slowly: fewer steps
+        assert_eq!(retarget(d, 7_500, 100, 150), d * 2);
+        assert_eq!(retarget(d, 1, 100, 150), d * 4);
+        assert_eq!(retarget(d, 10_000_000, 100, 150), d / 4);
         // The first epoch is measured over 99 blocks.
-        assert_eq!(retarget(d, 99 * 150, 99), d);
+        assert_eq!(retarget(d, 99 * 150, 99, 150), d);
         // The ends of the range.
-        assert_eq!(retarget(1, 60_000, 100), 1);
-        assert_eq!(retarget(u128::MAX, 7_500, 100), u128::MAX);
+        assert_eq!(retarget(1, 60_000, 100, 150), 1);
+        assert_eq!(retarget(u128::MAX, 7_500, 100, 150), u128::MAX);
+        // A local test chain's own target: one second a block holds where 100 blocks take 100 s.
+        assert_eq!(retarget(d, 100, 100, 1), d);
+        assert_eq!(retarget(d, 15_000, 100, 1), d / 4);
     }
 
     #[test]

@@ -16,6 +16,56 @@ fn set_state(node: &Node, s: String) {
     *node.sync_state.lock().unwrap() = s;
 }
 
+/// With no coin peer: the blocks from arcades that offer the home chain and are ahead, as an
+/// installed chain follows them (chains.rs): their blocks over the mesh ("bk") or their Core node
+/// ("cr"), both reached by the offer's address. mesh_bootstrap alone dials only the arcades whose
+/// "hi" gave a height, and those ahead may not take incoming links (JB20B 2026-11-12: Pepecoin
+/// testnet 8 blocks behind for 20 minutes while seven arcades offered it through their Core nodes).
+fn follow_offers(node: &Node, syncer: &Syncer) {
+    let p = node.params;
+    let ours = || node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height as u64).unwrap_or(0);
+    for (id, addr, kind, their) in node.offers_for(p.key) {
+        if their <= ours() {
+            continue;
+        }
+        if crate::coreboot::held(p.key) {
+            return;
+        }
+        let short = &id[..id.len().min(12)];
+        let mut src: Box<dyn arcade_chaindb::sync::BlockSource + '_> = match kind {
+            "bk" => match crate::meshsource::MeshSource::dial_chain(node, &addr, p) {
+                Ok(s) => Box::new(s),
+                Err(_) => continue,
+            },
+            _ => match crate::crsource::CoreShareSource::dial(node, &addr, p) {
+                Ok(s) => Box::new(s),
+                Err(_) => continue,
+            },
+        };
+        let how = if kind == "bk" { "blocks" } else { "Core node" };
+        if syncer.ensure_genesis(src.as_mut()).is_err() {
+            continue;
+        }
+        loop {
+            if crate::coreboot::held(p.key) {
+                return;
+            }
+            set_state(node, format!("no coin peer reachable; following via arcade {short} ({how}): block {} of {their}", ours()));
+            match (syncer.sync_headers_once(src.as_mut()), syncer.sync_blocks(src.as_mut(), 500, 250)) {
+                (Ok(hn), Ok(pr)) if hn > 0 || pr.blocks > 0 => continue,
+                (Ok(_), Ok(_)) => break,
+                (Err(e), _) | (_, Err(e)) => {
+                    let _ = node.app.event("bootstrap", &format!("arcade {addr} stopped: {e}"));
+                    break;
+                }
+            }
+        }
+        if ours() >= their {
+            return;
+        }
+    }
+}
+
 /// Mesh first: sync from V1.0 arcades that are ahead of us, until none has more.
 fn mesh_bootstrap(node: &Node, syncer: &Syncer) {
     let p = node.params;
@@ -81,6 +131,7 @@ pub fn run(node: Arc<Node>) {
             if node.mesh_bootstrap {
                 set_state(&node, "no coin peer reachable; syncing from the mesh".into());
                 mesh_bootstrap(&node, &syncer);
+                follow_offers(&node, &syncer);
                 if let Err(e) = crate::ledger::catch_up(&node) {
                     set_state(&node, format!("tag index: {e}"));
                 }

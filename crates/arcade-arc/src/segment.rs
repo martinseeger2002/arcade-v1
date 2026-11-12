@@ -7,10 +7,14 @@
 //! A segment of the **blocks** family, for heights `first..=last`:
 //!
 //! ```text
+//! blocks   each block as its chain sends it (header, then transactions), in height order,
+//!          the first at byte 0
 //! table    one u64 (little-endian) per height: where that block starts, counted in bytes
-//!          from the start of the segment. The first block starts right after the table.
-//! blocks   each block as its chain sends it (header, then transactions), in height order
+//!          from the start of the segment
 //! ```
+//!
+//! The blocks come first (Martin 2026-11-12) so a segment is sealed block by block as its blocks arrive: a block's
+//! bytes are where they'll stay before the segment is cut, and only the table, known once it is, goes on the end.
 //!
 //! The root is the Merkle root (merkle.rs) over these bytes cut into 127-byte leaves, the last
 //! leaf filled up with zeros.
@@ -21,6 +25,17 @@ use crate::sloth::DATA_LEAF;
 
 /// The blocks family (a catalog entry's `family`).
 pub const FAMILY_BLOCKS: u8 = 0;
+/// The ord index's journals (§2.2, §14.17): the same layout, with each height's journal record
+/// (arcade_chaindb::journal) in place of its block.
+pub const FAMILY_ORD: u8 = 1;
+/// The families (2 to 8: the other indexes in the same layout, arcade_chaindb::journal: ledger,
+/// profiles, messages, names, tokens, maps, tags) the catalog lists.
+pub const FAMILIES: &[u8] = &[FAMILY_BLOCKS, FAMILY_ORD, 2, 3, 4, 5, 6, 7, 8, FAMILY_COINS];
+/// The coins each block spends (Martin 2026-11-12): with the blocks, everything the coin tables and the address index
+/// are rebuilt from. Per height: u32 count, then per input of every transaction but the coinbase, in block order: the
+/// coin's txid (32), vout (u32), value (u64), the height it was made at (u32), 1 if a coinbase made it else 0, its
+/// script (u32 length + bytes). All little-endian.
+pub const FAMILY_COINS: u8 = 9;
 /// Bytes of one table row.
 pub const ROW: u64 = 8;
 
@@ -74,10 +89,10 @@ pub fn cut(range_bytes: &[u64], full: u64) -> Vec<Span> {
     out
 }
 
-/// The table of a segment whose blocks have these sizes, in height order.
+/// The table of a segment whose blocks have these sizes, in height order (it follows the blocks).
 pub fn table(block_sizes: &[u64]) -> Vec<u8> {
     let mut out = Vec::with_capacity(block_sizes.len() * ROW as usize);
-    let mut at = table_bytes(block_sizes.len() as u64);
+    let mut at = 0u64;
     for &size in block_sizes {
         out.extend_from_slice(&at.to_le_bytes());
         at += size;
@@ -85,9 +100,10 @@ pub fn table(block_sizes: &[u64]) -> Vec<u8> {
     out
 }
 
-/// Where the table row of `height` lies in a segment that starts at height `first`.
-pub fn row_at(first: u64, height: u64) -> u64 {
-    (height - first) * ROW
+/// Where the table row of `height` lies in a segment that starts at height `first` and whose blocks hold
+/// `block_bytes` (the table starts there).
+pub fn row_at(block_bytes: u64, first: u64, height: u64) -> u64 {
+    block_bytes + (height - first) * ROW
 }
 
 /// The leaves that hold bytes `at .. at + len` (`len > 0`): the first leaf and how many.
@@ -230,10 +246,11 @@ mod tests {
     }
 
     fn segment(sizes: &[u64]) -> Vec<u8> {
-        let mut bytes = table(sizes);
+        let mut bytes = Vec::new();
         for (i, &s) in sizes.iter().enumerate() {
             bytes.extend(std::iter::repeat_n(i as u8 + 1, s as usize));
         }
+        bytes.extend(table(sizes));
         bytes
     }
 
@@ -242,14 +259,15 @@ mod tests {
         let sizes = [81, 300, 5, 1000];
         let bytes = segment(&sizes);
         assert_eq!(bytes.len() as u64, table_bytes(4) + 1386);
-        let mut at = 32;
+        let mut at = 0;
         for (i, &s) in sizes.iter().enumerate() {
-            let row = u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
+            let r = row_at(1386, 0, i as u64) as usize;
+            let row = u64::from_le_bytes(bytes[r..r + 8].try_into().unwrap());
             assert_eq!(row, at);
             assert!(bytes[row as usize..(row + s) as usize].iter().all(|&b| b == i as u8 + 1));
             at += s;
         }
-        assert_eq!(row_at(70_000, 70_003), 24);
+        assert_eq!(row_at(1386, 70_000, 70_003), 1386 + 24);
     }
 
     #[test]
@@ -294,12 +312,12 @@ mod tests {
         let (root, len) = r.finish().unwrap();
 
         // The row of the third block, then that block's bytes.
-        let at = row_at(0, 2);
+        let at = row_at(1386, 0, 2);
         let (first, count) = leaves_of(at, ROW);
         let run = Run::of(&bytes, first, count).unwrap();
         assert!(run.proves(&root, len));
         let start = run.row(at).unwrap();
-        assert_eq!(start, 32 + 81 + 300);
+        assert_eq!(start, 81 + 300);
         let (first, count) = leaves_of(start, 5);
         let block = Run::of(&bytes, first, count).unwrap();
         assert!(block.proves(&root, len));

@@ -241,6 +241,9 @@ pub enum Act {
     Dislike = 8,
     Undislike = 9,
     TipToken = 10,
+    /// Follow / unfollow an account (2026-11-12): the target is its address hash160 and 12 zero bytes.
+    Follow = 11,
+    Unfollow = 12,
 }
 
 impl Act {
@@ -257,6 +260,8 @@ impl Act {
             8 => Dislike,
             9 => Undislike,
             10 => TipToken,
+            11 => Follow,
+            12 => Unfollow,
             _ => return None,
         })
     }

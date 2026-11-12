@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 arcade-app = { version = "0.1.0", path = "../arcade-app" }
-arcade-arc = { version = "0.1.0", path = "../arcade-arc" }
+arcade-arc = { version = "0.1.0", path = "../arcade-arc", features = ["vdf"] }
 arcade-local = { version = "0.1.0", path = "../arcade-local" }
 arcade-chain = { version = "0.1.0", path = "../arcade-chain" }
 arcade-chaindb = { version = "0.1.0", path = "../arcade-chaindb" }

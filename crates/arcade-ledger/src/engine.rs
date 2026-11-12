@@ -1250,6 +1250,10 @@ impl Indexer for LedgerIndexer {
     fn name(&self) -> &'static str {
         "ledger.v1"
     }
+    /// Its tables are journaled as family LEDGER (docs/ARCADECHAIN.md §2.2).
+    fn journals(&self) -> Vec<(u8, Vec<&'static str>)> {
+        vec![(arcade_chaindb::journal::LEDGER, self.tables().iter().map(|t| t.name).collect())]
+    }
     fn tables(&self) -> Vec<TableDef> {
         [ROWS, PROPERTY, PROPERTY_BY_BLOCK, BALANCE, BOOK, TAKE, INSCRIPTION, CHUNK, PIECE, OFFER, ASK, COLLECTION, META, BY_NUMBER, TAG, TAG_BY_ADDRESS]
             .iter()

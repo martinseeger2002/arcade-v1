@@ -2,13 +2,16 @@
 //!
 //! The rules in this crate decide which blocks are the chain. The store (arcade-chaindb) is
 //! where everything else in the arcade looks a chain up: wallets, the Explorer, the address
-//! index. So the best branch is copied into the store in the store's own shape, and
-//! nothing there is ever read back to decide what is valid.
+//! index. The best branch is kept in the store in the store's own shape, whole, and it is the
+//! chain's only copy on disk (docs/ARCADECHAIN.md §14.17): at start the blocks are read back
+//! from it ([`unstored`]) and handed to the rules again, every check run again.
 //!
 //! The store's blocks have an 80-byte header whose hash is the block's id. An ARCADE header
 //! is longer and of another shape, so the copy's header stands in for it: the block before,
 //! the time, and the ARCADE block's id carried in the merkle root field
-//! ([`Format::ARCADE`]). The transactions are copied as they are.
+//! ([`Format::ARCADE`]). The transactions are copied as they are; the rest of the block (its
+//! header and storage section, [`Block::encode_rest`]) follows them as the stored block's
+//! extra bytes.
 
 use crate::block::Block;
 use crate::params::{self, Net};
@@ -59,7 +62,7 @@ pub fn chain_params(net: &Net, genesis: &Hash256) -> &'static ChainParams {
     }))
 }
 
-fn stored(id: Hash256, prev: Hash256, time: u64, txs: Vec<arcade_chain::Tx>) -> StoredBlock {
+fn stored(id: Hash256, prev: Hash256, time: u64, txs: Vec<arcade_chain::Tx>, extra: Vec<u8>) -> StoredBlock {
     StoredBlock {
         id,
         // The time field is 32 bits (good until 2106); the block itself holds all 64.
@@ -67,18 +70,28 @@ fn stored(id: Hash256, prev: Hash256, time: u64, txs: Vec<arcade_chain::Tx>) -> 
         auxpow: None,
         txs,
         sig: None,
-        extra: Vec::new(),
+        extra,
     }
 }
 
 /// Block 0 for the store: it has no transactions.
 pub fn stored_block_0(id: Hash256, time: u64) -> StoredBlock {
-    stored(id, Hash256::ZERO, time, Vec::new())
+    stored(id, Hash256::ZERO, time, Vec::new(), Vec::new())
 }
 
 /// A block for the store.
 pub fn stored_block(block: &Block) -> StoredBlock {
-    stored(block.id(), block.header.prev, block.header.time, block.txs.clone())
+    stored(block.id(), block.header.prev, block.header.time, block.txs.clone(), block.encode_rest())
+}
+
+/// The block a stored block (1 or later) holds, whole; None for one stored without the rest
+/// of its block (block 0, or a copy from before the store held it all).
+pub fn unstored(s: &StoredBlock) -> Option<Block> {
+    if s.extra.is_empty() {
+        return None;
+    }
+    let b = Block::from_rest(s.txs.clone(), &s.extra).ok()?;
+    (b.id() == s.id).then_some(b)
 }
 
 #[cfg(test)]
@@ -114,5 +127,11 @@ mod tests {
         assert_eq!(p.block_id(&s.header), b.id());
         assert_eq!(s.header.prev, zero);
         assert_eq!(s.txs, b.txs);
+        // The whole block comes back, also from the bytes the store keeps.
+        assert_eq!(unstored(&s), Some(b.clone()));
+        let raw = s.encode();
+        let again = StoredBlock::parse_with(&raw, &p.format).unwrap();
+        assert_eq!(unstored(&again), Some(b));
+        assert_eq!(unstored(&s0), None);
     }
 }

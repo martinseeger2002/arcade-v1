@@ -16,14 +16,14 @@ use arcade_arc::block::{Block, Header};
 use arcade_arc::chain::Entry;
 use arcade_arc::light::{Headers, Round, Source};
 use arcade_arc::store::{stored_block, stored_block_0};
-use arcade_arc::time::StandIn;
+use crate::arcsvc::Clock;
 use arcade_chain::params::ChainParams;
 use arcade_chain::{Block as StoredBlock, Hash256, Reader};
 use serde_json::{json, Value};
 use std::sync::Mutex;
 
 /// The headers followed, once read from the store.
-static LIGHT: Mutex<Option<Headers<StandIn>>> = Mutex::new(None);
+static LIGHT: Mutex<Option<Headers<Clock>>> = Mutex::new(None);
 
 /// One batch of calls on a lender.
 pub type Call<'a> = &'a dyn Fn(Value) -> Result<Vec<Value>, String>;
@@ -98,7 +98,7 @@ fn drop_rows(node: &Node, key: &str, part: &str) {
 }
 
 /// The headers as this arcade left them, or block 0 when it kept none it can go on from.
-fn load(node: &Node, key: &str) -> Result<Headers<StandIn>, String> {
+fn load(node: &Node, key: &str) -> Result<Headers<Clock>, String> {
     let pre = format!("borrow/{key}/ae/").into_bytes();
     let rows = node.app.store.read(|r| r.scan_prefix(arcade_app::META, &pre)).map_err(e)?;
     let entries: Option<Vec<Entry>> = rows.iter().map(|(_, v)| Entry::decode(v)).collect();
@@ -121,7 +121,7 @@ fn load(node: &Node, key: &str) -> Result<Headers<StandIn>, String> {
 
 /// What a round changed, written down: the ids from where the branch is new, and what the
 /// rules need of the newest blocks. One commit.
-fn keep(node: &Node, key: &str, light: &Headers<StandIn>, round: &Round, was: (u64, u64)) -> Result<(), String> {
+fn keep(node: &Node, key: &str, light: &Headers<Clock>, round: &Round, was: (u64, u64)) -> Result<(), String> {
     let (old_base, old_tip) = was;
     node.app
         .store

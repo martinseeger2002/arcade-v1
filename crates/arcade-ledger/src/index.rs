@@ -77,6 +77,10 @@ impl Indexer for TagIndexer {
     fn name(&self) -> &'static str {
         "tags.v1"
     }
+    /// Its tables are journaled as family TAGS (docs/ARCADECHAIN.md §2.2).
+    fn journals(&self) -> Vec<(u8, Vec<&'static str>)> {
+        vec![(arcade_chaindb::journal::TAGS, self.tables().iter().map(|t| t.name).collect())]
+    }
     fn tables(&self) -> Vec<TableDef> {
         vec![TableDef::plain(TAG), TableDef::plain(TAG_BY_ADDRESS)]
     }
@@ -248,6 +252,10 @@ pub struct ProfileIndexer;
 impl Indexer for ProfileIndexer {
     fn name(&self) -> &'static str {
         "profiles.v1"
+    }
+    /// Its tables are journaled as family PROFILES (docs/ARCADECHAIN.md §2.2).
+    fn journals(&self) -> Vec<(u8, Vec<&'static str>)> {
+        vec![(arcade_chaindb::journal::PROFILES, self.tables().iter().map(|t| t.name).collect())]
     }
     fn tables(&self) -> Vec<TableDef> {
         vec![TableDef::plain(PROFILE), TableDef::plain(LINKED)]

@@ -1,13 +1,13 @@
 {
  "net": "arctest",
- "_note": "The ARCADE testnet built into V1.0 (Martin 2026-11-11). Genesis writers: the GX10 and the JB20B; anyone else joins by sealing a listed segment and registering it. The lists and beacons are placeholders until the genesis list (docs/ARCADECHAIN.md \u00a710) exists.",
+ "_note": "The ARCADE testnet built into V1.0. Restarted 2026-11-12 with: the real proof of time (Chia's VDF), 16 MiB segments sealed block by block, the coins family, batch registration, per-owner serving checks, pay at each owner's turn, storage audits with re-audits, a 200-block draw wait after the first passed audit, the double-signing penalty, fraud proofs (bad headers, transaction challenges), reveal demands, and rules versions. Genesis writers: the GX10 and the JB20B.",
  "genesis": {
-  "time": 1794435060,
+  "time": 1794514211,
   "closed_list": "9d2129f082fcbf9dc431d0f924d6643d68f906abf140459456f8327913006c5c",
   "final_list": "65f88bb715c6baa4efdfcc4fdd106c087ea1475bdff9301c417a53bca1d45e0d",
   "beacon_1": "61f17a562dd36624d26654276663e2b79b7f7e060bb77081ff92f44d5f8f3245",
   "beacon_2": "71c8f77c955ad45664d9fd176c9d3a2bc71f454f51ad517eaa3737e22f84c7b0",
-  "difficulty": "223277567893532960"
+  "difficulty": "55819391973383240"
  },
  "holders": [
   {
@@ -23,5 +23,7 @@
    "_who": "JB20B"
   }
  ],
- "steps_per_second": 1000000
+ "steps_per_second": 250000,
+ "segment_bytes": 16777216,
+ "time": "vdf"
 }

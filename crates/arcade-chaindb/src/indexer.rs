@@ -33,4 +33,9 @@ pub trait Indexer: Send + Sync {
     fn start_height(&self, params: &ChainParams) -> u32;
     /// Fold one block in. All writes go through `ctx.l` so they are undo-logged.
     fn connect(&self, ctx: &BlockCtx) -> Result<()>;
+    /// The journal families this index's changes are kept under, each with the tables it
+    /// covers (docs/ARCADECHAIN.md §2.2; crate::journal). None for an index without one.
+    fn journals(&self) -> Vec<(u8, Vec<&'static str>)> {
+        Vec::new()
+    }
 }

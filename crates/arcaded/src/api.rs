@@ -201,6 +201,8 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         }
         "feed.act" => crate::feedsvc::act(node, &s("kind").ok_or("kind required")?, &s("target").ok_or("target required (txid)")?, &s("text").unwrap_or_default(), req["amount"].as_u64().unwrap_or(0)),
         "feed.file" => crate::feedsvc::file(node, &s("txid").ok_or("txid required")?),
+        "follows" => crate::follows::follows(node, &s("who").ok_or("give an @tag or an address")?),
+        "follow" => crate::follows::follow(node, &s("who").ok_or("give an @tag or an address")?, req["on"] != false),
         "group.list" => Ok(crate::grpsvc::list(node)),
         "group.create" => {
             let names: Vec<String> = req["members"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
@@ -425,7 +427,21 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
                 None => q.clone(),
             };
             let tag = index::tag_of(&node.chain, c, &address).map_err(|e| e.to_string())?;
-            let prof = index::profile(&node.chain, c, &address).map_err(|e| e.to_string())?;
+            let mut prof = index::profile(&node.chain, c, &address).map_err(|e| e.to_string())?;
+            // A chain this arcade did not know when the profile was indexed is kept as "h160:<hex>": its address is
+            // read now (2026-11-12: Bellscoin and Luckycoin showed as hashes, so nobody could pay them there).
+            if let Some(list) = prof.as_mut().and_then(|v| v["linked"].as_array_mut()) {
+                for l in list {
+                    let (Some(net), Some(h)) = (l["chain"].as_str(), l["address"].as_str().and_then(|a| a.strip_prefix("h160:"))) else { continue };
+                    if let (Some(np), Ok(b)) = (arcade_chain::params::by_key(net), hex::decode(h)) {
+                        if b.len() == 20 {
+                            l["address"] = json!(arcade_ledger::address::base58check(np.p2pkh_version, &b));
+                        }
+                    }
+                }
+            }
+            // Who follows this account and whom it follows (follows.rs), as counts.
+            let follow_counts = json!({"followers": crate::follows::followers_of(node, &address).len(), "following": crate::follows::following_of(node, &address).len()});
             let script = arcade_ledger::address::script_for_address(p, &address);
             let (balance, history) = match &script {
                 Some(sc) => (node.chain.balance_for_script(c, sc).unwrap_or(0), node.chain.history_for_script(c, sc).map(|h| h.len()).unwrap_or(0)),
@@ -440,7 +456,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
                 _ => None,
             };
             Ok(json!({"address": address, "tag": tag, "balance": balance, "history_rows": history,
-                      "profile": prof, "profile_tag_verified": tag_verified, "stated_by": linked_by}))
+                      "profile": prof, "profile_tag_verified": tag_verified, "stated_by": linked_by, "follows": follow_counts}))
         }
         "ord" | "ord.chunks" | "name" | "map" | "token" | "tokens" => {
             let cp = match s("chain") {
@@ -512,7 +528,8 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "token20.send" => crate::tokensend::t20_send(node, &s("chain").ok_or("chain required")?, &s("tick").ok_or("tick required")?, &s("amount").ok_or("amount required")?, &s("to").ok_or("to required")?, req["send"] == true),
         "token20.sends" => Ok(crate::tokensend::t20_sends(node)),
         "ord.send" => crate::ordsend::send(node, s("chain").as_deref(), &s("inscription").ok_or("inscription required")?, &s("to").ok_or("to required")?, req["send"] == true),
-        "swap.place" => crate::swaps::place(node, &req["give"], &req["get"]),
+        "swap.place" => crate::swaps::place(node, &req["give"], &req["get"], &req),
+        "swap.release" => crate::swaps::release(node, &s("order").ok_or("order required")?),
         "swap.book" => Ok(json!(crate::swaps::book(node))),
         // With the legs shown ({give, get}), only on exactly those terms.
         "swap.take" => crate::swaps::take(node, &s("node").ok_or("node required")?, &s("order").ok_or("order required")?, req["give"].is_object().then_some(req)),
@@ -541,7 +558,18 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "arc.segment_root" => crate::arcsvc::segment_root(node, req),
         "arc.seal" => crate::arcsvc::seal(&node.self_arc(), req),
         "arc.replicas" => crate::arcsvc::replicas(node),
+        // A reveal demand by hand (§2.4): the holders of a listed segment must show its leaves on the chain.
+        "arc.reveal" => {
+            let svc = crate::arcsvc::svc().ok_or("the ARCADE chain isn't running here")?;
+            let seg: [u8; 32] = s("segment").and_then(|x| hex::decode(x).ok()).and_then(|b| b.try_into().ok()).ok_or("segment required (64 hex)")?;
+            let first = req["first"].as_u64().unwrap_or(0);
+            let count = req["count"].as_u64().unwrap_or(16);
+            let id = crate::arcfraud::demand(node, &svc.net(), &seg, first, count)?;
+            Ok(serde_json::json!({"demand": hex::encode(id), "segment": hex::encode(seg), "first": first, "count": count}))
+        }
         "arc.open" => crate::arcsvc::open(node, req),
+        "arc.sealing" => crate::arcsvc::sealing(node, req),
+        "arc.earn" => crate::arcsvc::earn(node, req),
         "chains.add" => {
             let with: Vec<String> = req["with"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
             crate::chains::add(&node.self_arc(), &s("key").ok_or("key required")?, &s("mode").unwrap_or_else(|| "full".into()), with)

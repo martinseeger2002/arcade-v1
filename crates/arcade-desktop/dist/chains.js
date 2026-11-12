@@ -256,6 +256,50 @@
     box.hidden = parts.length === 0;
   }
 
+  // Earn ARCADE (docs/ARCADECHAIN.md §14.17): one switch per coin. On, the coin's whole
+  // database is sealed from block 0 to the tip, then each new block as it settles; the sealed
+  // copy is the only copy and earns ARCADE. One line says where it stands.
+  const fmtN = (n) => Number(n || 0).toLocaleString();
+  const mib = (b) => `${(Number(b || 0) / 1048576).toFixed(b >= 1073741824 ? 0 : 1)} MiB`;
+  async function earnBox(st) {
+    let box = document.getElementById("c-earn");
+    if (!box) { box = document.createElement("div"); box.id = "c-earn"; box.className = "earn"; $("c-stages").after(box); }
+    if (st.arcade) { box.hidden = true; return; }
+    box.hidden = false;
+    let e;
+    try { e = await api("arc.earn", { chain: st.key }); } catch (err) { box.hidden = true; return; }
+    const full = st.mode === "full";
+    const sw = document.createElement("label"); sw.className = "switch";
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = !!e.on; cb.disabled = !full;
+    sw.append(cb, Object.assign(document.createElement("span"), { className: "knob" }));
+    cb.onchange = async () => {
+      cb.disabled = true;
+      try { await api("arc.earn", { chain: st.key, on: cb.checked }); msg(cb.checked ? `Earn ARCADE is on for ${st.name}: sealing starts at block 0.` : `Earn ARCADE is off for ${st.name}.`); }
+      catch (err) { cb.checked = !cb.checked; msg(err.message, true); }
+      cb.disabled = !full; earnBox(st);
+    };
+    const title = document.createElement("div"); title.className = "earn-h";
+    title.append(Object.assign(document.createElement("img"), { src: "coins/arctest.png", alt: "" }), Object.assign(document.createElement("b"), { textContent: "Earn ARCADE" }), sw);
+    const line = document.createElement("div"); line.className = "earn-line";
+    const bar = document.createElement("div"); bar.className = "bar"; const fill = document.createElement("i"); bar.append(fill);
+    let pct = 0;
+    if (!full) line.textContent = `Needs ${st.name} kept in full: its whole database is sealed.`;
+    else if (!e.on) line.textContent = `Seal ${st.name}'s whole database (one sealed copy, read by unsealing) and earn ARCADE for holding it.`;
+    else {
+      // The blocks and every index together: one percent, one bar.
+      const ix = e.indexes || [];
+      const done = e.sealed_to + ix.reduce((a, i) => a + i.sealed_to, 0), all = e.of + ix.reduce((a, i) => a + i.of, 0);
+      pct = all ? Math.min(100, (done * 100) / all) : 0;
+      const share = e.total_weight ? ((e.weight * 100) / e.total_weight).toFixed(2) : "0";
+      const sealing = e.sealing ? ` · sealing a segment: ${Math.floor((e.sealing.done * 100) / Math.max(1, e.sealing.of))}%` : "";
+      const ixText = ix.map((i) => ` · ${i.name} to ${fmtN(i.sealed_to)}`).join("");
+      line.textContent = e.note ? e.note
+        : `Sealed to block ${fmtN(e.sealed_to)} of ${fmtN(e.of)}${ixText} · ${pct.toFixed(1)}%${sealing} · earning with ${mib(e.weight)} (${share}% of all weight)`;
+    }
+    fill.style.width = pct + "%";
+    box.replaceChildren(title, line, ...(e.on && full ? [bar] : []));
+  }
+
   function showProgress(st) {
     $("c-progress").hidden = false;
     $("c-title").textContent = st.arcade ? `${st.name} · ${st.state}` : `${st.name} · ${st.mode} · ${st.state}`;
@@ -280,6 +324,7 @@
       return li;
     }));
     copyBox(st);
+    earnBox(st);
     // Indexes the chain doesn't have yet: a clear list at the top of the panel (opt-in, one at a time).
     let add = document.getElementById("c-addix");
     if (!add) { add = document.createElement("div"); add.id = "c-addix"; add.className = "addix"; $("c-stages").before(add); }

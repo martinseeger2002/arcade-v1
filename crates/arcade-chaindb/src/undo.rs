@@ -57,6 +57,24 @@ impl<'a, 'db> Logged<'a, 'db> {
         Ok(())
     }
 
+    /// Changes recorded so far.
+    pub fn len(&self) -> usize {
+        self.ops.borrow().len()
+    }
+
+    /// The (table, key) pairs of the changes recorded since `from` (a [`Logged::len`]).
+    pub fn touched_since(&self, from: usize) -> Vec<(String, Vec<u8>)> {
+        self.ops
+            .borrow()
+            .get(from..)
+            .unwrap_or(&[])
+            .iter()
+            .map(|op| match op {
+                UndoOp::Restore { table, key, .. } | UndoOp::DupAdded { table, key, .. } => (table.clone(), key.clone()),
+            })
+            .collect()
+    }
+
     pub fn into_ops(self) -> Vec<UndoOp> {
         self.ops.into_inner()
     }
