@@ -1093,6 +1093,10 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
             continue;
         };
         run.peer_tip.fetch_max(peer.version.start_height.max(0) as u32, Ordering::Relaxed);
+        // Far behind the peer's height, address rows are put off and built afterwards, as they
+        // are from the mesh. Without this, only the headers fetched so far (a few thousand
+        // ahead) count, so every address row is written in place, block by block.
+        syncer.known_top.set(syncer.known_top.get().max(peer.version.start_height.max(0) as u32));
         *run.source.lock().unwrap() = format!("{} P2P peer {} ({})", p.name, peer.addr, peer.version.user_agent.trim_matches('/'));
         node.note_coin_peer(p.net, &peer.addr.to_string());
         if let Err(e) = syncer.ensure_genesis(&mut peer) {
