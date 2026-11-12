@@ -806,6 +806,33 @@ pub fn take(node: &Node, maker: &str, order: &str, shown: Option<&Value>) -> Res
     Ok(public(&s))
 }
 
+/// A taker outside this arcade (the website's visitor, whose browser holds the keys and signs every lock, claim and
+/// refund; docs/MARKETPLACE-PLAN.md in arcade-site): this arcade only carries the questions to the maker's arcade,
+/// under a taker name of its own plus the visitor's reference, so one website's visitors are held for one at a time
+/// like any taker. `op`: quote (the order held for this taker: its terms, the maker's keys and time, sized), told
+/// (the taker's lock is on the chain: the maker checks it and locks), status (the maker's side of the swap).
+pub fn outside(node: &Node, op: &str, req: &Value) -> Result<Value, String> {
+    let maker = req["node"].as_str().filter(|s| !s.is_empty()).ok_or("node required (the maker's arcade)")?;
+    let r = req["taker"].as_str().unwrap_or("");
+    if r.is_empty() || r.len() > 64 || !r.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("taker required: the visitor's reference (letters, digits, - and _, up to 64)".into());
+    }
+    let taker = format!("{}:{r}", node.id_hex());
+    match op {
+        "quote" => ask(node, maker, json!({"op": "squote", "chain": "dgbtest", "order": req["order"], "taker": taker})),
+        "told" => {
+            let mut q = json!({"op": "slocked", "chain": "dgbtest", "order": req["order"], "hash": req["hash"], "taker": taker,
+                               "taker_keys": req["taker_keys"], "taker_time": req["taker_time"], "taker_lock": req["taker_lock"]});
+            if !req["taker_height"].is_null() {
+                q["taker_height"] = req["taker_height"].clone();
+            }
+            ask(node, maker, q)
+        }
+        "status" => ask(node, maker, json!({"op": "sstatus", "chain": "dgbtest", "hash": req["hash"]})),
+        _ => Err("unknown outside-taker question".into()),
+    }
+}
+
 /// Whether an order's legs are exactly the ones shown (chain, kind, asset and amount of each).
 pub fn same_terms(o: &Value, shown: &Value) -> bool {
     let leg = |v: &Value| ["chain", "kind", "asset", "amount"].map(|k| v[k].clone());

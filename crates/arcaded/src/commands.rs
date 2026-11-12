@@ -69,6 +69,10 @@ cmds! {
     "tx.coins" Public "addresses, chain?" "Spendable coins of up to 500 addresses (confirmed, not spent by a waiting transaction, and unconfirmed outputs), to build a transaction for a browser to sign; mining rewards not mature yet listed apart (immature, spendable_after). Home or installed chain, Addresses index on.";
     "tx.activity" Public "addresses, since?, chain?" "What changed for up to 500 addresses: history rows above height since, and waiting transactions paying or spending them; height to pass as since next time.";
     "tx.fee" Public "chain?" "The fee rate (per 1000 bytes) and dust limit this arcade builds transactions with.";
+    "swap.book" Public "" "Every open swap order of this arcade and the arcades linked to it (any leg for any leg, across chains).";
+    "swap.quote" Admin "node, order, taker" "For a taker outside this arcade (a website visitor whose browser signs): ask the maker's arcade to hold its order for this taker (this arcade's name plus the visitor's reference) and give its terms, keys, lock time and whether its lock is sized.";
+    "swap.told" Admin "node, order, hash, taker, taker_keys, taker_time, taker_height?, taker_lock" "For a taker outside this arcade: tell the maker's arcade the taker's lock is on the chain; it checks it on its own copy and locks its side.";
+    "swap.status" Admin "node, hash" "For a taker outside this arcade: the maker's side of a swap (its step and its lock).";
     "tx.broadcast" Post "hex, chain?" "Send a transaction signed elsewhere (a website user's browser): every input must spend a coin this arcade knows, outputs no more than inputs; pooled here and sent to the coin's network.";
     // Wallet
     "wallet.create" Local "phrase?" "Create a wallet (or restore one from 12 words). Returns the new words once.";

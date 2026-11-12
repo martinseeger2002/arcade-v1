@@ -358,6 +358,19 @@ impl AppDb {
         Ok(SigningKey::from_bytes(&k))
     }
 
+    /// Take an existing mesh identity (an original arcade's `mesh.key` seed, moving to V1.0 with the same node id).
+    /// Only while this arcade has none yet, or the same one: a node id other arcades already know is never replaced.
+    pub fn import_node_identity(&self, seed: &[u8; 32]) -> Result<SigningKey> {
+        if let Some(s) = self.secret("node_key")? {
+            if s.as_slice() != seed.as_slice() {
+                return Err(AppError::Other("this arcade already has another node identity; import into a new home".into()));
+            }
+            return Ok(SigningKey::from_bytes(seed));
+        }
+        self.put_secret("node_key", seed)?;
+        Ok(SigningKey::from_bytes(seed))
+    }
+
     pub fn has_wallet(&self) -> Result<bool> {
         let k = self.sname("phrase");
         Ok(self.store.read(|r| r.get(SECRETS, k.as_bytes()))?.is_some())
@@ -667,6 +680,25 @@ mod tests {
 
     use super::*;
     use arcade_wallet::PEPECOIN_TEST;
+
+    #[test]
+    fn an_imported_node_identity_is_kept_and_never_replaced() {
+        let d = tempfile::tempdir().unwrap();
+        let seed = [7u8; 32];
+        {
+            let db = AppDb::open(d.path()).unwrap();
+            assert_eq!(db.import_node_identity(&seed).unwrap().to_bytes(), seed);
+            assert_eq!(db.import_node_identity(&seed).unwrap().to_bytes(), seed, "the same key again is fine");
+            assert!(db.import_node_identity(&[8u8; 32]).is_err(), "another key is refused");
+        }
+        let db = AppDb::open(d.path()).unwrap();
+        assert_eq!(db.node_identity().unwrap().to_bytes(), seed);
+        // A home that made its own identity first refuses another.
+        let e = tempfile::tempdir().unwrap();
+        let fresh = AppDb::open(e.path()).unwrap();
+        fresh.node_identity().unwrap();
+        assert!(fresh.import_node_identity(&seed).is_err());
+    }
 
     #[test]
     fn wallet_identity_and_secrets_survive_reopen() {

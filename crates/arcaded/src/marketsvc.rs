@@ -239,6 +239,51 @@ pub fn candles(node: &Node, base: u32, quote: u32, span: u64, count: usize) -> V
         .collect()
 }
 
+/// The market list kept in memory: built by one background thread at most every MARKETS_FRESH, and answered at once
+/// from the newest copy (a first ask waits up to MARKETS_WAIT). 2026-11-12: on an arcade writing a big chain's sync
+/// (the JB20B, Litecoin from scratch) building it waited minutes behind the writes, every request built it again, and
+/// Swap drew no markets at all, in the Apps tab and on the website.
+static MARKETS: std::sync::LazyLock<std::sync::Mutex<(Option<(std::time::Instant, Vec<Value>)>, bool)>> =
+    std::sync::LazyLock::new(Default::default);
+const MARKETS_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
+const MARKETS_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+fn markets_kept(node: &Node) -> Vec<Value> {
+    let start = {
+        let mut g = MARKETS.lock().unwrap();
+        let stale = g.0.as_ref().is_none_or(|(at, _)| at.elapsed() > MARKETS_FRESH);
+        if stale && !g.1 {
+            g.1 = true;
+            true
+        } else {
+            false
+        }
+    };
+    if start {
+        let n = node.self_arc();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let first = MARKETS.lock().unwrap().0.is_none();
+        std::thread::Builder::new()
+            .name("markets".into())
+            .spawn(move || {
+                let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| markets(&n)));
+                let mut g = MARKETS.lock().unwrap();
+                if let Ok(v) = built {
+                    g.0 = Some((std::time::Instant::now(), v));
+                }
+                g.1 = false;
+                drop(g);
+                let _ = tx.send(());
+            })
+            .map_err(|_| MARKETS.lock().unwrap().1 = false)
+            .ok();
+        if first {
+            let _ = rx.recv_timeout(MARKETS_WAIT);
+        }
+    }
+    MARKETS.lock().unwrap().0.as_ref().map(|x| x.1.clone()).unwrap_or_default()
+}
+
 /// Every market: each token against the coin with an order on it or a take of it, and each two-token
 /// pair with an order or a trade. {base, quote, venue, last, change_24h, volume_24h, asks, bids}.
 pub fn markets(node: &Node) -> Vec<Value> {
@@ -453,7 +498,7 @@ fn holdings(node: &Node) -> Value {
 pub fn read(node: &Node, name: &str, q: &Map<String, Value>) -> Result<Value, String> {
     match name {
         "markets" | "pairs" => {
-            let mut all = markets(node);
+            let mut all = markets_kept(node);
             for chain in ["dgbtest", "dgb"] {
                 let installed = node.extra.lock().unwrap().contains_key(chain);
                 if !installed {

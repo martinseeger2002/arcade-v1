@@ -513,6 +513,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         // With the legs shown ({give, get}), only on exactly those terms.
         "swap.take" => crate::swaps::take(node, &s("node").ok_or("node required")?, &s("order").ok_or("order required")?, req["give"].is_object().then_some(req)),
         "swap.list" => Ok(json!(crate::swaps::swaps(node))),
+        c @ ("swap.quote" | "swap.told" | "swap.status") => crate::swaps::outside(node, &c[5..], &req),
         "chains.offers" => Ok(json!(node.offers.lock().unwrap().iter().map(|(id, o)| json!({"node": id, "addr": o.addr, "at": o.at, "bk": o.bk, "cr": o.cr})).collect::<Vec<_>>())),
         "chains.peers" => {
             let p = arcade_chain::params::by_key(&s("key").ok_or("key required")?).ok_or("unknown chain")?;

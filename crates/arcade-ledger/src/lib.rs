@@ -17,6 +17,7 @@ pub mod messages;
 pub mod names;
 pub mod ord;
 pub mod ordtypes;
+pub mod ordwit;
 pub mod tokens;
 pub mod payload;
 pub mod script;

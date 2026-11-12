@@ -50,6 +50,8 @@ pub const GROUPS: u64 = 64;
 pub enum Dialect {
     Pepecoin,
     Dogecoin,
+    /// Bitcoin-kind ord (Litecoin, ord-litecoin): envelopes in Taproot witnesses (ordwit.rs).
+    Ord,
 }
 
 /// First block the ord index reads on a chain, or None where scriptSig ord does not apply.
@@ -61,12 +63,37 @@ pub fn ord_start(p: &ChainParams) -> Option<u32> {
         "dgb" => 0,
         "flop" => 18_295,
         "wjk" => 1,
+        // ord-litecoin's first inscription heights (src/chain.rs).
+        "ltc" => 2_424_429,
+        "ltctest" => 2_669_127,
+        // Tests (ord-litecoin's regtest).
+        "ltcreg" => 0,
         _ => return None,
     })
 }
 
+/// Where ord-litecoin stops cursing inscriptions (src/chain.rs `jubilee_height`).
+pub fn jubilee(p: &ChainParams) -> u32 {
+    match p.net {
+        "ltc" => 2_608_704,
+        "ltctest" => 3_096_576,
+        "ltcreg" => 110,
+        _ => u32::MAX,
+    }
+}
+
+/// Litecoin's block subsidy: 50 LTC, halved every 840,000 blocks (what a block's coinbase may claim before fees).
+fn ltc_subsidy(height: u32) -> u64 {
+    let halvings = height / 840_000;
+    if halvings >= 64 { 0 } else { (50 * 100_000_000u64) >> halvings }
+}
+
 pub fn dialect(p: &ChainParams) -> Dialect {
-    if p.net == "main" || p.net == "test" { Dialect::Pepecoin } else { Dialect::Dogecoin }
+    match p.net {
+        "main" | "test" => Dialect::Pepecoin,
+        "ltc" | "ltctest" | "ltcreg" => Dialect::Ord,
+        _ => Dialect::Dogecoin,
+    }
 }
 
 // ---------------- envelope ----------------
@@ -97,7 +124,7 @@ pub fn push_datas(s: &[u8], d: Dialect) -> Option<Vec<Vec<u8>>> {
                 let b = s.get(i..i + 2)?;
                 i += 2;
                 match d {
-                    Dialect::Pepecoin => u16::from_le_bytes([b[0], b[1]]) as usize,
+                    Dialect::Pepecoin | Dialect::Ord => u16::from_le_bytes([b[0], b[1]]) as usize,
                     Dialect::Dogecoin => b[1] as usize * 256 + 0x4d, // the wonky-ord quirk, kept
                 }
             }
@@ -105,7 +132,7 @@ pub fn push_datas(s: &[u8], d: Dialect) -> Option<Vec<Vec<u8>>> {
                 let b = s.get(i..i + 4)?;
                 i += 4;
                 match d {
-                    Dialect::Pepecoin => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize,
+                    Dialect::Pepecoin | Dialect::Ord => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize,
                     Dialect::Dogecoin => (b[3] as usize) << 24 | (b[2] as usize) << 16 | (b[1] as usize) << 8 | b[0] as usize,
                 }
             }
@@ -159,7 +186,7 @@ fn countdown(p: &[Vec<u8>], mut i: usize, mut expected: u64, d: Dialect) -> Read
 fn trailer(t: &[Vec<u8>], d: Dialect) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut out = Vec::new();
     match d {
-        Dialect::Pepecoin => {
+        Dialect::Pepecoin | Dialect::Ord => {
             let mut j = 0;
             while j + 1 < t.len() {
                 if std::str::from_utf8(&t[j]).is_ok() {
@@ -471,6 +498,336 @@ struct Complete {
     single: bool,
 }
 
+/// An inscription moving in one transaction (ord-litecoin's `Flotsam`): where it is in the transaction's input value,
+/// and whether it is new.
+struct Flot {
+    offset: u64,
+    iid: [u8; 36],
+    new: Option<NewIns>,
+    /// Where an old one came from (for the riders).
+    from: Option<Hash256>,
+    /// It went to the fee (and lands in the coinbase): for the riders it went nowhere, as ord20-indexer has it (an
+    /// LTC-20 transfer sent as fee goes back to its sender).
+    fee: bool,
+}
+
+struct NewIns {
+    env: crate::ordwit::Envelope,
+    /// Its envelope number in the transaction.
+    e: u32,
+    txid: Hash256,
+    pos: usize,
+    cursed: bool,
+    vindicated: bool,
+    reinscription: bool,
+    unbound: bool,
+    parents: Vec<[u8; 36]>,
+}
+
+impl OrdIndexer {
+    /// A block of a Bitcoin-kind ord chain (Litecoin), as ord-litecoin's inscription updater reads it
+    /// (src/index/updater/inscription_updater.rs): every envelope of every input is an inscription, `<txid>i<n>`; it
+    /// sits at the first unit of its input's value, or at its pointer when that is inside the outputs; inscriptions
+    /// that go to the fee go to the block's coinbase, which ord reads last, so they are numbered last. Before the
+    /// jubilee a cursed one is numbered -1, -2, ...; after, it is "vindicated" and numbered as any other.
+    fn connect_ord(&self, ctx: &BlockCtx) -> Result<()> {
+        let p = ctx.params;
+        let c = p.chain_no;
+        let l = ctx.l;
+        let jubilant = ctx.height >= jubilee(p);
+        let mut blessed = l.get(STATE, &k(c, b"next"))?.map(|v| be_u64(&v, 0)).unwrap_or(0);
+        let mut cursed_n = l.get(STATE, &k(c, b"cursed"))?.map(|v| be_u64(&v, 0)).unwrap_or(0);
+        let start = (blessed, cursed_n);
+        let mut types = crate::ordtypes::trim(l, c, blessed)?;
+        let mut typed = false;
+        let mut lines = String::new();
+        let mut moves = String::new();
+        // The coinbase's own value space: the subsidy first, then each transaction's fee in turn; inscriptions that
+        // go to a fee wait here (ord's `self.flotsam`) for the coinbase, read after every other transaction.
+        let mut reward = ltc_subsidy(ctx.height);
+        let mut to_coinbase: Vec<Flot> = Vec::new();
+        for (pos, tx) in ctx.block.txs.iter().enumerate() {
+            if tx.is_coinbase() {
+                continue;
+            }
+            let txid = tx.txid;
+            let envs = crate::ordwit::envelopes(tx);
+            for (n, e) in envs.iter().enumerate() {
+                let ct = e.content_type.clone().unwrap_or_default();
+                lines.push_str(&format!("{}i{n}:{}:{}\n", txid.to_hex(), e.input, hex::encode(ct)));
+            }
+            let total_out: u64 = tx.outputs.iter().map(|o| o.value).sum();
+            let mut floating: Vec<Flot> = Vec::new();
+            let mut inscribed: std::collections::BTreeMap<u64, ([u8; 36], u32)> = std::collections::BTreeMap::new();
+            let mut total_in = 0u64;
+            let mut counter = 0u32;
+            let mut envs_iter = envs.into_iter().peekable();
+            for (j, input) in tx.inputs.iter().enumerate() {
+                // Inscriptions the input carries.
+                let mut carried: Vec<(u64, [u8; 36])> = Vec::new();
+                for (key, _) in l.scan(LOC, &loc_prefix(c, &input.prevout.txid, input.prevout.vout))? {
+                    let kn = key.len();
+                    let off = u64::from_be_bytes(key[kn - 44..kn - 36].try_into().unwrap());
+                    let mut iid = [0u8; 36];
+                    iid.copy_from_slice(&key[kn - 36..]);
+                    l.del(LOC, &key)?;
+                    carried.push((off, iid));
+                }
+                for (off, iid) in carried {
+                    let offset = total_in + off;
+                    floating.push(Flot { offset, iid, new: None, from: Some(input.prevout.txid), fee: false });
+                    inscribed.entry(offset).or_insert((iid, 0)).1 += 1;
+                }
+                let offset = total_in;
+                let in_value = ctx.prevouts[pos].get(j).map(|x| x.value).unwrap_or(0);
+                total_in += in_value;
+                // The envelopes in this input.
+                while envs_iter.peek().is_some_and(|e| e.input == j as u32) {
+                    let env = envs_iter.next().unwrap();
+                    let iid = iid_bytes(&txid, counter);
+                    let curse = env.unrecognized_even_field
+                        || env.duplicate_field
+                        || env.incomplete_field
+                        || env.input != 0
+                        || env.offset != 0
+                        || env.pointer.is_some()
+                        || env.pushnum
+                        || env.stutter
+                        || match inscribed.get(&offset) {
+                            Some((_, count)) if *count > 1 => true,
+                            Some((first, _)) => {
+                                // A reinscription is cursed unless the first inscription there was cursed or vindicated.
+                                let row = l.get(INSC, &k(c, first))?.and_then(|v| serde_json::from_slice::<Value>(&v).ok());
+                                !row.is_some_and(|r| r["n"].as_i64().is_some_and(|n| n < 0) || r["vindicated"] == true)
+                            }
+                            None => false,
+                        };
+                    let to = env.pointer().filter(|&ptr| ptr < total_out).unwrap_or(offset);
+                    let parents = env
+                        .parents
+                        .iter()
+                        .filter_map(|v| crate::ordwit::id_value(v))
+                        .map(|(t, i)| iid_bytes(&t, i))
+                        .collect();
+                    floating.push(Flot {
+                        offset: to,
+                        iid,
+                        from: None,
+                        fee: false,
+                        new: Some(NewIns {
+                            reinscription: inscribed.contains_key(&to),
+                            unbound: in_value == 0 || env.unrecognized_even_field,
+                            cursed: curse && !jubilant,
+                            vindicated: curse && jubilant,
+                            env,
+                            e: counter,
+                            txid,
+                            pos,
+                            parents,
+                        }),
+                    });
+                    inscribed.entry(to).or_insert((iid, 0)).1 += 1;
+                    counter += 1;
+                }
+            }
+            // A parent counts only once, and only when it is in this transaction.
+            let here: Vec<[u8; 36]> = floating.iter().map(|f| f.iid).collect();
+            for f in floating.iter_mut() {
+                if let Some(n) = f.new.as_mut() {
+                    let mut seen = Vec::new();
+                    n.parents.retain(|pid| here.contains(pid) && !seen.contains(pid) && { seen.push(*pid); true });
+                }
+            }
+            floating.sort_by_key(|f| f.offset);
+            let mut out_start = 0u64;
+            let mut rest = floating.into_iter().peekable();
+            for (vout, o) in tx.outputs.iter().enumerate() {
+                let end = out_start + o.value;
+                while rest.peek().is_some_and(|f| f.offset < end) {
+                    let f = rest.next().unwrap();
+                    let off = f.offset - out_start;
+                    let burned = o.script_pubkey.first() == Some(&0x6a);
+                    self.land(l, ctx, f, Some((&txid, vout as u32, off, &o.script_pubkey)), burned, &mut blessed, &mut cursed_n, &mut moves, &mut types, &mut typed)?;
+                }
+                out_start = end;
+            }
+            // To the fee: into the coinbase's value space, after what came before.
+            for f in rest {
+                to_coinbase.push(Flot { offset: reward + f.offset - out_start, fee: true, ..f });
+            }
+            reward += total_in.saturating_sub(out_start);
+        }
+        // The coinbase, last: what went to fees lands in its outputs, or is lost past them.
+        if let Some(cb) = ctx.block.txs.first().filter(|t| t.is_coinbase()) {
+            let cbid = cb.txid;
+            let mut out_start = 0u64;
+            let mut rest = to_coinbase.into_iter().peekable();
+            for (vout, o) in cb.outputs.iter().enumerate() {
+                let end = out_start + o.value;
+                while rest.peek().is_some_and(|f| f.offset < end) {
+                    let f = rest.next().unwrap();
+                    let off = f.offset - out_start;
+                    let burned = o.script_pubkey.first() == Some(&0x6a);
+                    self.land(l, ctx, f, Some((&cbid, vout as u32, off, &o.script_pubkey)), burned, &mut blessed, &mut cursed_n, &mut moves, &mut types, &mut typed)?;
+                }
+                out_start = end;
+            }
+            for f in rest {
+                self.land(l, ctx, f, None, false, &mut blessed, &mut cursed_n, &mut moves, &mut types, &mut typed)?;
+            }
+        }
+        if (blessed, cursed_n) != start {
+            l.put(STATE, &k(c, b"next"), &blessed.to_be_bytes())?;
+            l.put(STATE, &k(c, b"cursed"), &cursed_n.to_be_bytes())?;
+        }
+        if let (true, Some(m)) = (typed, &types) {
+            crate::ordtypes::save(l, c, m)?;
+        }
+        let line: [u8; 32] = Sha256::digest(format!("{}\n{lines}", ctx.block.header.hash().to_hex()).as_bytes()).into();
+        let mv: [u8; 32] = Sha256::digest(moves.as_bytes()).into();
+        let mut v = line.to_vec();
+        v.extend_from_slice(&mv);
+        v.extend_from_slice(&(lines.lines().count() as u32).to_be_bytes());
+        l.put(BLOCK, &KeyBuf::new().u16(c).u32(ctx.height).done(), &v)?;
+        Ok(())
+    }
+
+    /// One inscription lands (or is lost: `at` None): an old one moves, a new one gets its number and row.
+    #[allow(clippy::too_many_arguments)]
+    fn land(
+        &self,
+        l: &Logged,
+        ctx: &BlockCtx,
+        f: Flot,
+        at: Option<(&Hash256, u32, u64, &[u8])>,
+        burned: bool,
+        blessed: &mut u64,
+        cursed_n: &mut u64,
+        moves: &mut String,
+        types: &mut Option<crate::ordtypes::Meta>,
+        typed: &mut bool,
+    ) -> Result<()> {
+        let p = ctx.params;
+        let c = p.chain_no;
+        let iid = f.iid;
+        let s = iid_str(&iid);
+        let Some(n) = f.new else {
+            // An old one moves.
+            match at {
+                Some((txid, vout, off, script)) => {
+                    l.put(LOC, &loc_key(c, txid, vout, off, &iid), &[])?;
+                    l.put(AT, &k(c, &iid), &at_val(txid, vout, off))?;
+                    moves.push_str(&format!("M {s} {}:{vout}:{off}\n", txid.to_hex()));
+                    if burned {
+                        if let Some(mut row) = l.get(INSC, &k(c, &iid))?.and_then(|v| serde_json::from_slice::<Value>(&v).ok()) {
+                            row["burned"] = json!(ctx.height);
+                            l.put(INSC, &k(c, &iid), row.to_string().as_bytes())?;
+                        }
+                    }
+                    if let (false, Some(ft)) = (self.hooks.is_empty(), f.from) {
+                        let who = (!f.fee).then(|| holder(p, script));
+                        for h in &self.hooks {
+                            h.moved(l, c, &Moved { params: p, iid: &iid, from_txid: &ft, txid, to: who.clone() })?;
+                        }
+                    }
+                }
+                None => {
+                    l.del(AT, &k(c, &iid))?;
+                    moves.push_str(&format!("X {s}\n"));
+                    if let Some(mut row) = l.get(INSC, &k(c, &iid))?.and_then(|v| serde_json::from_slice::<Value>(&v).ok()) {
+                        row["lost"] = json!(ctx.height);
+                        l.put(INSC, &k(c, &iid), row.to_string().as_bytes())?;
+                    }
+                    if let Some(ft) = f.from {
+                        for h in &self.hooks {
+                            h.moved(l, c, &Moved { params: p, iid: &iid, from_txid: &ft, txid: &ft, to: None })?;
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        };
+        // A new one: its number (cursed: -1, -2, ...), its place unless unbound, its row.
+        let number: i64 = if n.cursed {
+            *cursed_n += 1;
+            -(*cursed_n as i64)
+        } else {
+            *blessed += 1;
+            *blessed as i64 - 1
+        };
+        let ct = String::from_utf8_lossy(n.env.content_type.as_deref().unwrap_or_default()).into_owned();
+        let body = n.env.body.clone().unwrap_or_default();
+        let mut row = json!({"n": number, "h": ctx.height, "p": n.pos, "ct": ct, "size": body.len(), "pieces": 1,
+                             "txs": [n.txid.to_hex()], "e": n.e});
+        if let Some(pr) = protocol_of(&body) {
+            row["proto"] = json!(pr);
+        }
+        if let Some(mp) = n.env.metaprotocol.as_ref() {
+            row["metaprotocol"] = json!(String::from_utf8_lossy(mp));
+        }
+        if let Some(ce) = n.env.content_encoding.as_ref() {
+            row["encoding"] = json!(String::from_utf8_lossy(ce));
+        }
+        if let Some((t, i)) = n.env.delegate.as_deref().and_then(crate::ordwit::id_value) {
+            row["delegate"] = json!(iid_str(&iid_bytes(&t, i)));
+        }
+        if let Some(pid) = n.parents.first() {
+            row["parent"] = json!(iid_str(pid));
+        }
+        if n.reinscription {
+            row["re"] = json!(1);
+        }
+        if n.cursed {
+            row["cursed"] = json!(true);
+        }
+        if n.vindicated {
+            row["vindicated"] = json!(true);
+        }
+        let mut landed = None;
+        if n.unbound {
+            row["unbound"] = json!(true);
+            moves.push_str(&format!("U {s}\n"));
+        } else {
+            match at {
+                Some((txid, vout, off, script)) => {
+                    l.put(LOC, &loc_key(c, txid, vout, off, &iid), &[])?;
+                    l.put(AT, &k(c, &iid), &at_val(txid, vout, off))?;
+                    moves.push_str(&format!("B {s} {}:{vout}:{off}\n", txid.to_hex()));
+                    landed = Some(holder(p, script));
+                    if burned {
+                        row["burned"] = json!(ctx.height);
+                    }
+                }
+                None => {
+                    row["lost"] = json!(ctx.height);
+                    moves.push_str(&format!("X {s}\n"));
+                }
+            }
+        }
+        // IDS holds the number (a cursed one as its two's complement); NUM lists the blessed by number.
+        l.put(IDS, &k(c, &iid), &(number as u64).to_be_bytes())?;
+        let kept = self.keeps(number.unsigned_abs());
+        if kept {
+            l.put(INSC, &k(c, &iid), row.to_string().as_bytes())?;
+            if number >= 0 {
+                l.put(NUM, &KeyBuf::new().u16(c).u64(number as u64).done(), &iid)?;
+                if let Some(m) = types.as_mut() {
+                    crate::ordtypes::add(l, c, m, number as u64, &ct)?;
+                    *typed = true;
+                }
+            }
+        }
+        // The riders (tokens, names) count blessed inscriptions after #0 only, as ord20-indexer does (`number > 0`).
+        if number > 0 {
+            for h in &self.hooks {
+                h.born(l, c, &Born { params: p, iid: &iid, number: number as u64, height: ctx.height, ctype: &ct, body: &body,
+                                     pieces: 1, txid: &n.txid, landed: landed.clone(), reinscription: n.reinscription })?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Indexer for OrdIndexer {
     fn name(&self) -> &'static str {
         "ord.v1"
@@ -486,6 +843,9 @@ impl Indexer for OrdIndexer {
         ord_start(p).unwrap_or(u32::MAX)
     }
     fn connect(&self, ctx: &BlockCtx) -> Result<()> {
+        if dialect(ctx.params) == Dialect::Ord {
+            return self.connect_ord(ctx);
+        }
         let p = ctx.params;
         let c = p.chain_no;
         let d = dialect(p);
@@ -761,6 +1121,13 @@ fn content_depth(db: &ChainDb, p: &ChainParams, id: &str, depth: u32) -> std::re
 /// (local, or fetched from another arcade on Shared storage).
 pub fn body_of(p: &ChainParams, meta: &Value, get_tx: &dyn Fn(&Hash256) -> Option<Tx>) -> std::result::Result<Vec<u8>, String> {
     let d = dialect(p);
+    if d == Dialect::Ord {
+        // One transaction; the inscription is its envelope number `e`.
+        let t = meta["txs"].get(0).and_then(|t| t.as_str()).ok_or("no transaction")?;
+        let tx = get_tx(&Hash256::from_hex(t).map_err(|e| e.to_string())?).ok_or("the inscription's transaction is not available")?;
+        let e = meta["e"].as_u64().unwrap_or(0) as usize;
+        return crate::ordwit::envelopes(&tx).get(e).map(|x| x.body.clone().unwrap_or_default()).ok_or_else(|| "no such envelope".into());
+    }
     let mut body = Vec::new();
     let mut left = 0u64;
     let txs = meta["txs"].as_array().cloned().unwrap_or_default();

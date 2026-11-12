@@ -32,6 +32,8 @@ pub fn protocol(p: &ChainParams) -> Option<(&'static str, bool)> {
         "main" | "test" => Some(("prc-20", false)),
         "doge" => Some(("drc-20", false)),
         "wjk" => Some(("wjk-20", false)),
+        // LTC-20: Litecoin's fork of BRC-20 (ord20-indexer, github.com/ynohtna92/ord20-indexer): read as BRC-20 is.
+        "ltc" | "ltctest" | "ltcreg" => Some(("ltc-20", true)),
         _ => None,
     }
 }
