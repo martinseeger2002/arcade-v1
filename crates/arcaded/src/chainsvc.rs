@@ -122,8 +122,8 @@ pub fn run(node: Arc<Node>) {
             }
             let blocks: Vec<Vec<u8>> = std::mem::take(&mut *node.block_outbox.lock().unwrap());
             for raw in blocks {
-                if !crate::miner::extends_tip(&node, &raw) {
-                    let _ = node.app.event("mine", "a found block no longer extends the tip: dropped, not sent");
+                if let Err(why) = crate::miner::sent_once(&node, &raw) {
+                    let _ = node.app.event("mine", why);
                     continue;
                 }
                 match peer.send("block", &raw) {

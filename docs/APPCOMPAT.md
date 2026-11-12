@@ -388,6 +388,14 @@ arcade began syncing mainnet in a private network and was stopped at block 753,0
 is about 17 GB, more than this computer had free. The arcade ledger on mainnet starts at block
 1,208,000, so an arcade that already keeps mainnet needs little more for the ledger index.
 
+### The explorer for apps
+
+`GET /r/explorer/<name>?args=<json>` (`explorer::page_read`, docs/API.md "The explorer for apps"): the
+public reads of V1.0's Explorer, for an app that shows the same explorer (the Arcade Explorer app is
+V1.0's `explorer.js` unchanged, reading through it). No pass needed; mesh-internal explorer questions
+are not answered. `explorer.inscription_types` is now a listed public command, so `/api/v1` answers it
+too. Test: `http::tests::apps_read_the_explorer`.
+
 ## Test that decides "done"
 
 Every card above opened in a V1.0 app window beside the same card on an original arcade, two seats where

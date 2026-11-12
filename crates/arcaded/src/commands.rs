@@ -155,7 +155,7 @@ cmds! {
     "explorer.address" Public "chain?, address, history?, inscriptions?, content?" "An address: balance, history, inscriptions (the first 60; all with explorer.held), tokens. history: false or inscriptions: false leaves that part out; content: false lists inscriptions without previews.";
     "explorer.inscriptions" Public "chain?, offset?, limit?" "Inscriptions, newest first.";
     "explorer.inscription" Public "chain?, id" "One inscription.";
-    "explorer.tokens" Public "chain?, offset?, limit?" "Tokens.";
+    "explorer.tokens" Public "chain?, q?, open?, offset?, limit?" "Tokens, in tick order: q, those starting with it; open: true, only those still being minted (minted under supply).";
     "explorer.token" Public "chain?, tick, offset?, n?" "One token and a page of its holders, biggest first (n: 25, at most 100; total: how many hold it).";
     "explorer.collections" Public "chain?, q?, sort?, status?, source?, offset?, n?" "A page of a chain's collections, on-chain (kind registry) and Nintondo's known ones (kind known; id = slug): sort newest, oldest, name, size or holders; status active or all; source all, registry or known; n at most 60. Sub 1K first.";
     "explorer.collection" Public "chain?, id | slug, offset?, n?" "One collection (a root inscription id, sub1k, or a known collection's slug) and a page of its items by number (n: 48, at most 96). A known one not held yet is asked for and answers loading {state, have, of}.";
@@ -173,6 +173,7 @@ cmds! {
     "explorer.ledger_inscription" Public "chain?, id" "One arcade ledger inscription.";
     "explorer.tag" Public "chain?, tag" "A @tag's page: addresses (with linked and imported wallets) and balances.";
     "explorer.search" Public "chain?, q" "Search: block, tx, address, @tag, inscription, token, name.";
+    "explorer.inscription_types" Public "chain?" "How many ord inscriptions of each kind (images, text, HTML, ...) a chain holds.";
     // Chains
     "chains.peers" Read "key" "A chain's P2P address book: nodes known, working in the last day, resting after failures; the working ones and the next to try.";
     "mesh.overview" Public "" "The arcade mesh at a glance: every arcade linked or heard lately, its operator, and per chain what it lends, the chain copies it can make (and why not), the index copies it offers, how far it walks ord, and whether its ledger fingerprint matches ours.";

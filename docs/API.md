@@ -238,6 +238,7 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 | `explorer.ledger_inscription` | `/api/v1/explorer/ledger_inscription` | public | chain?, id | One arcade ledger inscription. |
 | `explorer.tag` | `/api/v1/explorer/tag` | public | chain?, tag | A @tag's page: addresses (with linked and imported wallets) and balances. |
 | `explorer.search` | `/api/v1/explorer/search` | public | chain?, q | Search: block, tx, address, @tag, inscription, token, name. |
+| `explorer.inscription_types` | `/api/v1/explorer/inscription_types` | public | chain? | How many ord inscriptions of each kind (images, text, HTML, ...) a chain holds. |
 
 ### Chains
 
@@ -356,3 +357,19 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 |---|---|---|---|---|
 | `rpc.help` | `/api/v1/rpc/help` | public | — | Every command, its parameters and what it needs. |
 | `rpc.info` | `/api/v1/rpc/info` | local | — | Where the RPC and the web API are, and the cookie file. |
+
+## The explorer for apps
+
+An app page reads the same public explorer data as V1.0's own Explorer through the page API:
+
+    GET /r/explorer/<name>?args=<JSON object, URL-encoded>
+
+answers the public command `explorer.<name>` (`/r/explorer/chains` answers `chains.list`) with
+`{"ok": true, "result": ...}` or `{"ok": false, "error": ...}`, as `/api/v1` does. The arguments are one JSON
+object, exactly as the Explorer sends them (`{"chain": "peptest", "id": "1567902"}`: a height stays text).
+No page pass is needed (public data); like the rest of `/r/`, it answers this computer only and app frames
+(origin `null`) or this arcade's own pages, never other websites. Only the Explorer's own reads are
+answered: `summary`, `blocks`, `block`, `tx`, `address`, `inscriptions`, `inscription`, `inscription_types`,
+`tokens`, `token`, `collections`, `collection`, `collection_of`, `held`, `names`, `name`, `maps`, `map`,
+`mempool`, `ledger`, `ledger_tokens`, `ledger_token`, `ledger_inscriptions`, `ledger_inscription`, `tag`,
+`search`, and `chains`; any other name is 404.

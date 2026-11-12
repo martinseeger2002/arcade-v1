@@ -26,7 +26,14 @@ pub struct MinerState {
     pub started: std::sync::Mutex<Option<Instant>>,
     /// Why the miner is waiting instead of mining (None: mining, or stopped).
     pub waiting: std::sync::Mutex<Option<String>>,
+    /// The parent our last sent block built on: one block per height ever goes out (sent_once).
+    pub sent_on: std::sync::Mutex<Option<[u8; 32]>>,
 }
+
+/// How long a found block may take to come back to us on the chain before the miner gives up (2026-11-12: the
+/// Pepecoin testnet nodes banned the GX10's address after an hour of its mining; a block a peer refuses is what
+/// costs an address its peers).
+pub const LAND_WAIT: Duration = Duration::from_secs(120);
 
 /// Why this arcade may not mine now; None when it is at the tip. Mining needs a coin peer this arcade
 /// is synced with ("synced at N"), and no height anyone tells us of (headers, arcades on the mesh,
@@ -49,6 +56,39 @@ pub fn not_at_tip(node: &Node) -> Option<String> {
 pub fn extends_tip(node: &Node, raw: &[u8]) -> bool {
     let tip = node.chain.tip(node.params.chain_no).ok().flatten().map(|t| t.hash);
     raw.len() >= 80 && tip.map(|h| h.0[..] == raw[4..36]).unwrap_or(false)
+}
+
+/// Whether a found block may be sent: it extends our tip, and no block of ours on that parent went out before (one
+/// block per height; 2026-11-12 the GX10 sent two or three siblings for some heights before its ban). Marks it sent.
+pub fn sent_once(node: &Node, raw: &[u8]) -> Result<(), &'static str> {
+    if !extends_tip(node, raw) {
+        return Err("a found block no longer extends the tip: dropped, not sent");
+    }
+    let mut parent = [0u8; 32];
+    parent.copy_from_slice(&raw[4..36]);
+    let mut on = node.miner.sent_on.lock().unwrap();
+    if *on == Some(parent) {
+        return Err("a second block of ours at the same height: dropped, not sent");
+    }
+    *on = Some(parent);
+    Ok(())
+}
+
+/// After a find: wait until the chain moves past `parent` (our block came back, or somebody else's won the height)
+/// before building again, so the miner never makes a second block on the same parent. False when nothing moved in
+/// LAND_WAIT: our block was not taken, and mining stops rather than keep sending what peers refuse.
+fn landed(node: &Node, parent: &Hash256) -> bool {
+    let until = Instant::now() + LAND_WAIT;
+    *node.miner.waiting.lock().unwrap() = Some("waiting for our block to reach the chain".into());
+    while Instant::now() < until && node.miner.running.load(Ordering::Relaxed) {
+        if node.chain.tip(node.params.chain_no).ok().flatten().map(|t| t.hash) != Some(*parent) {
+            *node.miner.waiting.lock().unwrap() = None;
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    *node.miner.waiting.lock().unwrap() = None;
+    !node.miner.running.load(Ordering::Relaxed)
 }
 
 use arcade_wallet::tx::push;
@@ -274,6 +314,10 @@ pub fn run(node: Arc<Node>) {
                 node.miner.found.fetch_add(1, Ordering::Relaxed);
                 node.block_outbox.lock().unwrap().push(raw);
                 let _ = node.app.event("mine", &format!("found block {} at height {} with {} waiting transaction(s) ({} PEP to {})", b.hash(), t.height, t.txs.len(), subsidy(t.height) / 100_000_000, key.address));
+                if !landed(&node, &t.tip) {
+                    let _ = node.app.event("mine", &format!("block {} did not reach the chain in {} s (a peer may have refused it): mining stopped; find out why before mining again", b.hash(), LAND_WAIT.as_secs()));
+                    node.miner.running.store(false, Ordering::Relaxed);
+                }
             }
             Err(e) => {
                 let _ = node.app.event("mine", &format!("built an invalid block ({e}); stopping"));
@@ -310,6 +354,20 @@ mod tip_tests {
         assert!(not_at_tip(&t.node).unwrap().contains("behind"));
         t.node.bk_peers.lock().unwrap().insert("peer:8421".into(), 2);
         assert_eq!(not_at_tip(&t.node), None);
+    }
+
+    #[test]
+    fn one_block_per_height_goes_out() {
+        let t = setup();
+        let tip = t.node.chain.tip(t.p.chain_no).unwrap().unwrap().hash;
+        let mut a = vec![0u8; 81];
+        a[4..36].copy_from_slice(&tip.0);
+        let mut b = a.clone();
+        b[80] = 1; // another block on the same parent (a sibling)
+        assert_eq!(super::sent_once(&t.node, &a), Ok(()));
+        assert!(super::sent_once(&t.node, &b).unwrap_err().contains("same height"));
+        a[4] ^= 1;
+        assert!(super::sent_once(&t.node, &a).unwrap_err().contains("no longer extends"));
     }
 
     #[test]

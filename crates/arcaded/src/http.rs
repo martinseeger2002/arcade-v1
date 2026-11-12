@@ -549,6 +549,13 @@ fn handle(node: &Node, mut s: TcpStream, conf: &Conf) {
                 return respond(&mut s, status_line(a.code), a.ctype, &cors, &a.body);
             }
         }
+        // The explorer's public reads (/r/explorer/<name>, explorer::page_read): what Arcade V1.0's own
+        // Explorer shows, for an app that shows it too. Public data, with or without a pass.
+        if matches!(r.method.as_str(), "GET" | "HEAD") {
+            if let Some((code, v)) = crate::explorer::page_read(node, &path, &query_fields(&r.query)) {
+                return respond(&mut s, status_line(code), "application/json", &cors, v.to_string().as_bytes());
+            }
+        }
         if page.is_none() && !program && !matches!(path.as_str(), "/r/blockheight" | "/r/blocktime") {
             return respond(&mut s, "403 Forbidden", "application/json", &cors, br#"{"error":"open this page in the arcade: the request has no page pass"}"#);
         }
@@ -1115,6 +1122,33 @@ pub(crate) mod tests {
         // From elsewhere (a proxy's request): no body at all.
         let small = "POST /r/send HTTP/1.1\r\nHost: 127.0.0.1:8420\r\nX-Forwarded-For: 1.2.3.4\r\nContent-Length: 10\r\n\r\n";
         assert_eq!(status(&ask(&t.node, &conf(), small.as_bytes())), "413");
+    }
+
+    #[test]
+    fn apps_read_the_explorer() {
+        let (_one, t) = node();
+        let body = |a: &str| -> Value { serde_json::from_str(a.split("\r\n\r\n").nth(1).unwrap_or("")).unwrap_or(Value::Null) };
+        // Public reads, with no pass (and with an app frame's origin).
+        let a = ask(&t.node, &conf(), &get("/r/explorer/chains", "Origin: null\r\n"));
+        assert_eq!(status(&a), "200", "{a}");
+        assert!(a.contains("Access-Control-Allow-Origin: null"), "{a}");
+        assert!(body(&a)["result"].as_array().is_some_and(|l| l.iter().any(|c| c["key"] == t.p.key)), "{a}");
+        // A height arrives as text, as explorer.block takes it.
+        let args = "%7B%22chain%22%3A%22".to_string() + t.p.key + "%22%2C%22id%22%3A%220%22%7D";
+        let a = ask(&t.node, &conf(), &get(&format!("/r/explorer/block?args={args}"), ""));
+        assert_eq!(status(&a), "200", "{a}");
+        assert_eq!(body(&a)["result"]["height"], 0, "{a}");
+        // Nothing but the listed public reads; arguments only as a JSON object.
+        for p in ["/r/explorer/page", "/r/explorer/ledger_bytes", "/r/explorer/app_cards", "/r/explorer/../wallet", "/r/explorer/"] {
+            assert_eq!(status(&ask(&t.node, &conf(), &get(p, ""))), "404", "{p}");
+        }
+        assert_eq!(status(&ask(&t.node, &conf(), &get("/r/explorer/summary?args=5", ""))), "400");
+        assert_eq!(status(&ask(&t.node, &conf(), &get("/r/explorer/summary?args=%5B%5D", ""))), "400");
+        // Not to other websites.
+        assert_eq!(status(&ask(&t.node, &conf(), &get("/r/explorer/chains", "Origin: https://evil.example\r\n"))), "403");
+        for c in crate::explorer::PAGE_READS {
+            assert_eq!(crate::commands::find(c).map(|c| c.perm), Some(crate::commands::Perm::Public), "{c}");
+        }
     }
 
     #[test]

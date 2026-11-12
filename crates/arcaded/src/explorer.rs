@@ -122,6 +122,44 @@ pub const FORWARDABLE: &[&str] = &[
     "explorer.ord_outpoints", "explorer.collections", "explorer.collection", "explorer.collection_of", "explorer.held",
 ];
 
+/// What apps may read through the page API (GET /r/explorer/<name>?args=<json>, `page_read`): the public
+/// explorer reads Arcade V1.0's own Explorer makes, so an app can show the same explorer. Mesh-internal
+/// questions (sites, ledger bytes, pages, app cards, outpoints) are not among them.
+pub const PAGE_READS: &[&str] = &[
+    "chains.list", "explorer.summary", "explorer.blocks", "explorer.block", "explorer.tx", "explorer.address",
+    "explorer.inscriptions", "explorer.inscription", "explorer.inscription_types", "explorer.tokens", "explorer.token",
+    "explorer.collections", "explorer.collection", "explorer.collection_of", "explorer.held", "explorer.names",
+    "explorer.name", "explorer.maps", "explorer.map", "explorer.mempool", "explorer.ledger", "explorer.ledger_tokens",
+    "explorer.ledger_token", "explorer.ledger_inscriptions", "explorer.ledger_inscription", "explorer.tag",
+    "explorer.search",
+];
+
+/// GET /r/explorer/<name>?args=<json>: the public read explorer.<name> (/r/explorer/chains: chains.list),
+/// its arguments one JSON object as the desktop's Explorer sends them (a height stays text, as
+/// explorer.block needs). Answers {"ok": true, "result": ...} or {"ok": false, "error": ...}, as /api/v1
+/// does. None for any other path.
+pub fn page_read(node: &Node, path: &str, q: &serde_json::Map<String, Value>) -> Option<(u16, Value)> {
+    let name = path.strip_prefix("/r/explorer/")?;
+    let cmd = if name == "chains" { "chains.list".to_string() } else { format!("explorer.{name}") };
+    let public = crate::commands::find(&cmd).is_some_and(|c| c.perm == crate::commands::Perm::Public);
+    if !PAGE_READS.contains(&cmd.as_str()) || !public {
+        return Some((404, json!({"ok": false, "error": format!("the explorer has no read called {name}")})));
+    }
+    let mut req = match q.get("args") {
+        None => serde_json::Map::new(),
+        Some(Value::String(a)) => match serde_json::from_str::<Value>(a) {
+            Ok(Value::Object(o)) => o,
+            _ => return Some((400, json!({"ok": false, "error": "args must be a JSON object"}))),
+        },
+        Some(_) => return Some((400, json!({"ok": false, "error": "args must be a JSON object"}))),
+    };
+    req.insert("cmd".into(), json!(cmd));
+    Some(match crate::api::dispatch(node, &Value::Object(req)) {
+        Ok(v) => (200, json!({"ok": true, "result": v})),
+        Err(e) => (400, json!({"ok": false, "error": e})),
+    })
+}
+
 /// Page routes another arcade may answer for an app on a chain it keeps: every public read
 /// under /r/ but the asking arcade's own (its wallet, its send requests). The path must be in
 /// its one plain form: no empty, "." or ".." part, no query in it (the query comes apart), so
@@ -539,11 +577,28 @@ fn handle_here(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
         }
         "explorer.tokens" => {
             x.need("tokens")?;
-            // Offset paging (ticks in alphabetical order), with the total for the pager.
+            // Offset paging (ticks in alphabetical order), with the total for the pager. `q`: ticks starting with it;
+            // `open`: only ticks still being minted (minted under supply; the Token Minter's suggestions, 2026-11-12).
             let off = req["offset"].as_u64().unwrap_or(0) as usize;
             let want = n(50, 200) as usize;
-            let pre = KeyBuf::new().u16(x.c()).done();
-            let rows = x.node.chain.store(x.c()).read(|r| r.scan_prefix_limit(tokens::TICK, &pre, off + want)).map_err(e)?;
+            let q = s("q").map(|t| t.trim().to_lowercase()).unwrap_or_default();
+            if q.len() > 32 {
+                return Err("a tick is at most 32 characters".into());
+            }
+            let open = req["open"] == true;
+            let pre = KeyBuf::new().u16(x.c()).bytes(q.as_bytes()).done();
+            // With `open` the closed ones are skipped, so read further (bounded) to fill the page.
+            let scan = if open { (off + want).saturating_mul(20).min(20_000) } else { off + want };
+            let rows = x.node.chain.store(x.c()).read(|r| r.scan_prefix_limit(tokens::TICK, &pre, scan)).map_err(e)?;
+            let rows: Vec<_> = if open {
+                rows.into_iter().filter(|(_, v)| {
+                    let v: Value = serde_json::from_slice(v).unwrap_or(Value::Null);
+                    let big = |k: &str| v[k].as_str().and_then(|x| x.parse::<u128>().ok()).unwrap_or(0);
+                    big("minted") < big("supply")
+                }).collect()
+            } else {
+                rows
+            };
             Ok(json!({"protocol": tokens::protocol(x.p).map(|t| t.0).unwrap_or("tokens"), "total": tokens::tick_count(&x.node.chain, x.c()),
                 "offset": off, "items": rows.into_iter().skip(off).filter_map(|(k, v)| {
                 let mut v: Value = serde_json::from_slice(&v).ok()?;
