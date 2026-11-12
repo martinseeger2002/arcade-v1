@@ -19,10 +19,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: LLVM (libclang for libmdbx)
+      - name: LLVM (libclang for libmdbx and chiavdf: the MSVC headers want Clang 20 or newer)
         uses: KyleMayes/install-llvm-action@v2
         with:
-          version: "18.1.8"
+          version: "20.1.8"
 
       - name: MSVC headers for bindgen
         shell: pwsh
