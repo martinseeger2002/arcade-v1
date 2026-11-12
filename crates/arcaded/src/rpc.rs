@@ -157,10 +157,14 @@ pub fn call_on(node: &Node, p: &'static arcade_chain::params::ChainParams, metho
                 Ok(t) => tx_json(p, &t),
                 Err(_) => json!({"hex": hex::encode(&raw), "txid": txid.to_hex(), "size": raw.len()}),
             };
+            // Where the answer comes from (crate::borrow::core_call says the same for a borrowed chain).
+            v["checked"] = json!(b.is_some());
+            v["from"] = json!("own copy");
             if let Some(bn) = b {
                 // Find the block hash for this block number via its header record.
                 if let Some((hash, height)) = block_of(node, p, bn) {
                     v["blockhash"] = json!(hash.to_hex());
+                    v["height"] = json!(height);
                     v["confirmations"] = json!(tip.height - height + 1);
                     if let Some(t) = db.header(c, &hash).ok().flatten().map(|r| r.header.time) {
                         v["time"] = json!(t);
@@ -187,6 +191,9 @@ pub fn call_on(node: &Node, p: &'static arcade_chain::params::ChainParams, metho
                     "value": coins(coin.value),
                     "scriptPubKey": {"hex": hex::encode(&coin.script)},
                     "coinbase": coin.coinbase,
+                    "height": coin.height,
+                    "checked": true,
+                    "from": "own copy",
                 })),
             }
         }
@@ -304,13 +311,15 @@ pub fn call_on(node: &Node, p: &'static arcade_chain::params::ChainParams, metho
                         continue;
                     }
                     out.push(json!({"txid": op.txid.to_hex(), "vout": op.vout, "address": a, "scriptPubKey": hex::encode(&sc),
-                                    "amount": coins(value), "confirmations": conf, "spendable": false, "solvable": false, "safe": true}));
+                                    "amount": coins(value), "confirmations": conf, "spendable": false, "solvable": false, "safe": true,
+                                    "height": height, "checked": true, "from": "own copy"}));
                 }
                 // Waiting outputs to it (minconf 0), not spent by another waiting transaction.
                 if minconf == 0 && p.chain_no == node.params.chain_no {
                     for u in crate::claims::unconfirmed_coins(node, &sc) {
                         out.push(json!({"txid": u.outpoint.txid.to_hex(), "vout": u.outpoint.vout, "address": a, "scriptPubKey": hex::encode(&sc),
-                                        "amount": coins(u.value), "confirmations": 0, "spendable": false, "solvable": false, "safe": false}));
+                                        "amount": coins(u.value), "confirmations": 0, "spendable": false, "solvable": false, "safe": false,
+                                        "checked": false, "from": "own copy"}));
                     }
                 }
             }

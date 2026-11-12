@@ -785,17 +785,30 @@ fn core_rpc(node: &Node, s: &mut TcpStream, r: &Req) {
     if !cookie_ok(node, r) {
         return respond(s, "401 Unauthorized", "application/json", &[("WWW-Authenticate", "Basic realm=\"arcade\"".into())], br#"{"error":"use the cookie from <home>/.cookie as Basic auth (__cookie__:secret)"}"#);
     }
-    let p = match r.path.strip_prefix("/chain/").map(|k| k.trim_end_matches('/')) {
+    // A chain kept here and caught up answers from what is kept here. One borrowed (not kept, or
+    // kept but still syncing or indexing, the home chain included) answers from its lenders;
+    // what the borrowed side doesn't answer, a kept copy still does.
+    let (p, kept) = match r.path.strip_prefix("/chain/").map(|k| k.trim_end_matches('/')) {
         Some(k) => match node.chain_params(k) {
-            Some(p) => p,
-            None => return json_out(s, 404, &json!({"result": null, "error": {"code": -1, "message": format!("{k} is not kept here")}, "id": null})),
+            Some(p) => (p, true),
+            None => match crate::chains::find(k).filter(|p| crate::borrow::is_borrowed(p.key)) {
+                Some(p) => (p, false),
+                None => return json_out(s, 404, &json!({"result": null, "error": {"code": -1, "message": format!("{k} is not kept or borrowed here")}, "id": null})),
+            },
         },
-        None => node.params,
+        None => (node.params, true),
     };
+    let borrowed = crate::borrow::is_borrowed(p.key);
     let one = |c: &Value| -> (bool, Value) {
         let id = c.get("id").cloned().unwrap_or(Value::Null);
         let params: Vec<Value> = c["params"].as_array().cloned().unwrap_or_default();
-        match crate::rpc::call_on(node, p, c["method"].as_str().unwrap_or(""), &params) {
+        let method = c["method"].as_str().unwrap_or("");
+        let answer = match borrowed.then(|| crate::borrow::core_call(node, p, method, &params)) {
+            Some(Err((-32601, _))) | None if kept => crate::rpc::call_on(node, p, method, &params),
+            Some(a) => a,
+            None => Err((-1, format!("{} is not kept or borrowed here", p.name))),
+        };
+        match answer {
             Ok(v) => (true, json!({"result": v, "error": null, "id": id})),
             Err((code, msg)) => (false, json!({"result": null, "error": {"code": code, "message": msg}, "id": id})),
         }

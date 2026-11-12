@@ -31,6 +31,39 @@ of a Core node, from this computer only.
 - Coins for an address come from `listunspent` (V1.0's address index); no wallet import or
   rescan is needed (`validateaddress` reports every address as watched).
 
+## Borrowed chains
+
+A chain this arcade borrows (not installed, or installed but still syncing or indexing, the home
+chain included) answers the Core JSON-RPC at the same address (`POST /` for the home chain,
+`POST /chain/<key>`), from its lenders:
+
+| Call | On a borrowed chain |
+|---|---|
+| `getblockcount`, `getbestblockhash`, `getblockchaininfo` | the borrowed copy's tip (every block from the floor on checked by proof of work) |
+| `listunspent` (addresses named) | a lender's address index (`arcade_coinscan`, which an arcade with the chain installed answers for any address at once); each coin checked against its block, then asked of the lender whether it is unspent. At most 500 new coins are checked per call (the largest first); a lender names at most 5,000 per address |
+| `getrawtransaction` | the lender's copy, checked against its txid; its block found among the headers kept here and the transaction found in it |
+| `gettxout` | the lender's word |
+| `sendrawtransaction` | to every lender's node and the coin's P2P peers; refused by all, an error |
+| `decoderawtransaction`, `validateaddress`, `importaddress` | answered here (nothing needs watching) |
+| `listtransactions` | `[]` (nothing is watched for a program) |
+
+A call the borrowed side doesn't answer falls back to the copy kept here, when there is one.
+`tx.fee`, `tx.coins`, `tx.broadcast` and the explorer's addresses work the same way on a borrowed
+chain; `tx.activity` (history) still needs the chain kept here.
+
+**Where an answer comes from.** `getrawtransaction` (verbose), `gettxout` and each `listunspent` row
+carry `checked` and `from`, on a kept chain and a borrowed one, for a program that must not act on a
+lender's word (a swap checking a lock):
+
+- `from`: `"own copy"` (the chain kept here), `"borrowed (checked blocks)"` (a borrowed chain, in a
+  block this arcade checked by proof of work on its own header chain), `"lender"` (the lender's word
+  only), `"sent from here"` (a waiting output of a transaction this arcade broadcast).
+- `checked`: `true` only when the answer rests on a block this arcade checked itself, on its header
+  chain, with the transaction found in it (`getrawtransaction`) or the coin found in it (`listunspent`).
+  A transaction only in a mempool is `checked: false`, 0 confirmations. `gettxout` on a borrowed chain
+  is always `"lender"` (whether a coin is still unspent is the lender's word).
+- `height` (and `blockhash` for a transaction): the block it is in.
+
 ## Checked (2026-11-10, a copy of a live testnet chain, with the original's own client code)
 
 - `listunspent` for an address with 270 coins: the same coins and total as a Core node.

@@ -38,6 +38,19 @@ fn chain(node: &Node, req: &Value) -> Result<&'static ChainParams, String> {
     Ok(p)
 }
 
+/// The chain a request names, and whether it is borrowed now: not kept here, or kept but still
+/// syncing or indexing (the home chain included). Borrowed, its coins and broadcasts go through
+/// its lenders (crate::borrow), so a website works while the chain catches up.
+fn chain_or_borrowed(node: &Node, req: &Value) -> Result<(&'static ChainParams, bool), String> {
+    match chain(node, req) {
+        Ok(p) => Ok((p, crate::borrow::is_borrowed(p.key))),
+        Err(why) => match req["chain"].as_str().and_then(by_key).filter(|p| crate::borrow::is_borrowed(p.key)) {
+            Some(p) => Ok((p, true)),
+            None => Err(why),
+        },
+    }
+}
+
 fn need_addresses(node: &Node, p: &ChainParams) -> Result<(), String> {
     if node.chain.addresses_on(p.chain_no).map_err(|e| e.to_string())? {
         Ok(())
@@ -89,7 +102,10 @@ fn pool(node: &Node, p: &ChainParams) -> Vec<(u64, Tx)> {
 }
 
 pub fn coins(node: &Node, req: &Value) -> R {
-    let p = chain(node, req)?;
+    let (p, borrowed) = chain_or_borrowed(node, req)?;
+    if borrowed {
+        return borrowed_coins(node, p, req);
+    }
     need_addresses(node, p)?;
     let want = addresses(p, req)?;
     let pooled = pool(node, p);
@@ -142,6 +158,47 @@ pub fn coins(node: &Node, req: &Value) -> R {
         out.insert(a.clone(), json!({"script": hex::encode(script), "confirmed": confirmed, "unconfirmed": unconfirmed, "total": total, "held_back": held_back, "immature": immature}));
     }
     Ok(json!({"chain": p.key, "height": tip, "addresses": out}))
+}
+
+/// tx.coins on a borrowed chain: the coins a lender's address index names (each checked against
+/// its block and unspent at the lender), and outputs of transactions sent from here still waiting.
+fn borrowed_coins(node: &Node, p: &'static ChainParams, req: &Value) -> R {
+    let want = addresses(p, req)?;
+    let tip = crate::borrow::tip(node, p.key).unwrap_or(0);
+    let names: Vec<String> = want.iter().map(|(a, _)| a.clone()).collect();
+    let lent = crate::borrow::lender_coins(node, p, &names)?;
+    let mut out = serde_json::Map::new();
+    for (a, script) in &want {
+        let mut total = 0u64;
+        let mut confirmed = Vec::new();
+        for c in lent.iter().filter(|c| &c.address == a) {
+            total += c.value;
+            confirmed.push(json!({"txid": c.op.txid.to_hex(), "vout": c.op.vout, "value": c.value, "height": c.height, "confirmations": tip.max(c.height) - c.height + 1}));
+        }
+        let mut unconfirmed = Vec::new();
+        for (op, value, rbf) in crate::borrow::waiting_to(p, script) {
+            total += value;
+            unconfirmed.push(json!({"txid": op.txid.to_hex(), "vout": op.vout, "value": value, "rbf": rbf}));
+        }
+        // Coins carrying an inscription stay out of a payment, as on a chain kept here.
+        let op_of = |c: &Value| OutPoint { txid: arcade_chain::Hash256::from_hex(c["txid"].as_str().unwrap_or("")).unwrap_or_default(), vout: c["vout"].as_u64().unwrap_or(0) as u32 };
+        let listed: Vec<Utxo> = confirmed.iter().chain(&unconfirmed).map(|c| Utxo { outpoint: op_of(c), value: c["value"].as_u64().unwrap_or(0), script: script.clone() }).collect();
+        let free: HashSet<OutPoint> = crate::ordsafe::keep_free(node, p, listed).into_iter().map(|u| u.outpoint).collect();
+        let mut held_back = Vec::new();
+        for list in [&mut confirmed, &mut unconfirmed] {
+            list.retain(|c| {
+                let keep = free.contains(&op_of(c));
+                if !keep {
+                    total -= c["value"].as_u64().unwrap_or(0);
+                    held_back.push(c.clone());
+                }
+                keep
+            });
+        }
+        out.insert(a.clone(), json!({"script": hex::encode(script), "confirmed": confirmed, "unconfirmed": unconfirmed, "total": total,
+                                     "held_back": held_back, "immature": []}));
+    }
+    Ok(json!({"chain": p.key, "height": tip, "addresses": out, "borrowed": true}))
 }
 
 pub fn activity(node: &Node, req: &Value) -> R {
@@ -200,9 +257,12 @@ pub fn activity(node: &Node, req: &Value) -> R {
     Ok(json!({"chain": p.key, "height": tip, "since": since, "addresses": out}))
 }
 
+/// tx.fee: what this arcade's own wallet builds with on that chain (coinsend::fee_policy), on an
+/// installed chain or a borrowed one.
 pub fn fee(node: &Node, req: &Value) -> R {
-    let p = chain(node, req)?;
-    Ok(json!({"chain": p.key, "fee_per_kb": crate::claims::FEE_PER_KB, "dust": crate::claims::DUST}))
+    let (p, _) = chain_or_borrowed(node, req)?;
+    let fp = crate::coinsend::fee_policy(p);
+    Ok(json!({"chain": p.key, "fee_per_kb": fp.fallback_per_kb, "dust": fp.dust}))
 }
 
 pub fn broadcast(node: &Node, req: &Value) -> R {
@@ -221,7 +281,7 @@ pub fn broadcast_own(node: &Node, req: &Value) -> R {
 /// an input of a kind this arcade can't check (an inscription reveal, say) goes on to the
 /// coin's own peers, whose nodes check every script, without being pooled here.
 fn send_raw(node: &Node, req: &Value, checked: bool) -> R {
-    let p = chain(node, req)?;
+    let (p, borrowed) = chain_or_borrowed(node, req)?;
     let hex_tx = req["hex"].as_str().ok_or("hex required (the signed transaction)")?;
     let raw = hex::decode(hex_tx.trim()).map_err(|_| "hex is not hex".to_string())?;
     if raw.len() > MAX_TX {
@@ -230,6 +290,20 @@ fn send_raw(node: &Node, req: &Value, checked: bool) -> R {
     let tx = Tx::parse_with(&raw, &p.format).map_err(|e| format!("not a {} transaction: {e}", p.name))?;
     if tx.is_coinbase() || tx.inputs.is_empty() {
         return Err("a coinbase or input-less transaction can't be broadcast".into());
+    }
+    if borrowed {
+        // Borrowed (or still catching up): the coin set here is not whole, so the lenders' nodes
+        // check it (every input, every script) and pool it; refused, it is not sent.
+        if crate::borrow::waiting_spent(p.key).iter().any(|op| tx.inputs.iter().any(|i| i.prevout == *op)) {
+            return Err("refused: a waiting transaction already spends one of these coins".into());
+        }
+        return match crate::borrow::broadcast_tx(node, p, &tx) {
+            Ok(answers) => {
+                let _ = node.app.event("wallet", &format!("broadcast {} through the lenders of {} for a website user", tx.txid.to_hex(), p.name));
+                Ok(json!({"txid": tx.txid.to_hex(), "size": tx.raw.len(), "pooled": false, "borrowed": true, "lenders": answers}))
+            }
+            Err((why, _)) => Err(format!("refused: {why}")),
+        };
     }
     if node.chain.tx_raw(p, &tx.txid).map_err(|e| e.to_string())?.is_some() {
         return Err("that transaction is already in a block".into());

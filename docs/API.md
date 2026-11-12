@@ -92,10 +92,10 @@ Files are `{"name": "...", "type": "image/png", "data": "<base64>"}`. Amounts ar
 
 | method | route | needs | params | what |
 |---|---|---|---|---|
-| `tx.coins` | `/api/v1/tx/coins` | public | addresses, chain? | Spendable coins of up to 500 addresses (confirmed, not spent by a waiting transaction, and unconfirmed outputs), to build a transaction for a browser to sign. Coins carrying an ord inscription, and coins of at most 0.01 that no ord index can vouch for, are listed under `held_back` instead (not in `total`), so a payment built from the list never spends an inscription. Home or installed chain, Addresses index on. |
+| `tx.coins` | `/api/v1/tx/coins` | public | addresses, chain? | Spendable coins of up to 500 addresses (confirmed, not spent by a waiting transaction, and unconfirmed outputs), to build a transaction for a browser to sign. Coins carrying an ord inscription, and coins of at most 0.01 that no ord index can vouch for, are listed under `held_back` instead (not in `total`), so a payment built from the list never spends an inscription. Home or installed chain, Addresses index on. On a borrowed chain (not kept here, or kept but still syncing or indexing, the home chain included) the coins come from a lender's address index, each checked against its block and unspent at the lender (`"borrowed": true`). |
 | `tx.activity` | `/api/v1/tx/activity` | public | addresses, since?, chain? | What changed for up to 500 addresses: history rows above height since, and waiting transactions paying or spending them; height to pass as since next time. |
-| `tx.fee` | `/api/v1/tx/fee` | public | chain? | The fee rate (per 1000 bytes) and dust limit this arcade builds transactions with. |
-| `tx.broadcast` | `/api/v1/tx/broadcast` | post | hex, chain? | Send a transaction signed elsewhere (a website user's browser): every input must spend a coin this arcade knows, outputs no more than inputs; pooled here and sent to the coin's network. |
+| `tx.fee` | `/api/v1/tx/fee` | public | chain? | The fee rate (per 1000 bytes) and dust limit this arcade's wallet builds transactions with on that chain (kept or borrowed). |
+| `tx.broadcast` | `/api/v1/tx/broadcast` | post | hex, chain? | Send a transaction signed elsewhere (a website user's browser): every input must spend a coin this arcade knows, outputs no more than inputs; pooled here and sent to the coin's network. On a borrowed chain it goes to the lenders' nodes, which check it; refused by all, it is not sent. |
 
 ### Wallet
 

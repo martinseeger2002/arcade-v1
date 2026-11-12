@@ -1617,8 +1617,22 @@ fn x_addr(node: &Node, p: &'static ChainParams, a: &str) -> R {
     let script = script_for_address(p, a).ok_or_else(|| format!("{a} is not a {} address", p.name))?;
     let mut v = json!({"address": a, "tag": null, "unit": crate::explorer::unit(p)});
     if !watched(node, p).iter().any(|w| w.script == script) {
-        v["note"] = json!(format!("{} is borrowed: balances are kept for this wallet's own addresses only. Install it in Chains & Coins for every address.", p.name));
-        return Ok(v);
+        // Any other address: its unspent coins from a lender's address index, each checked.
+        return match lender_coins(node, p, &[a.to_string()]) {
+            Ok(coins) => {
+                let mut hist: Vec<Value> = coins.iter().map(|c| json!({"height": c.height, "txid": c.op.txid.to_hex(), "received": c.value, "sent": 0})).collect();
+                hist.sort_by_key(|h| std::cmp::Reverse(h["height"].as_u64().unwrap_or(0)));
+                v["balance"] = json!(coins.iter().map(|c| c.value).sum::<u64>());
+                v["tx_count"] = json!(hist.len());
+                v["history"] = json!(hist.into_iter().take(50).collect::<Vec<_>>());
+                v["note"] = json!(format!("{} is borrowed here: this address's unspent coins from a lender's address index, each checked against its block (spent coins are not listed).", p.name));
+                Ok(v)
+            }
+            Err(why) => {
+                v["note"] = json!(format!("{} is borrowed here and no lender's address index answered for this address ({why}).", p.name));
+                Ok(v)
+            }
+        };
     }
     let hs = hex::encode(&script);
     let rows: Vec<(OutPoint, Value)> = coin_rows(node, p.key).into_iter().filter(|(_, c)| c["s"] == hs.as_str()).collect();
@@ -1662,6 +1676,344 @@ fn x_mempool(node: &Node, p: &'static ChainParams) -> R {
 /// The borrow state line of a chain being borrowed ("Borrowed · at block …").
 pub fn state_text(key: &str) -> Option<String> {
     ST.runs.lock().unwrap().get(key).map(|r| r.state.lock().unwrap().clone())
+}
+
+// ---------------- Core RPC for programs on this computer ----------------
+//
+// A program written for a coin node (a publisher, a bank) asks V1.0 at POST /chain/<key>. On an
+// installed chain crate::rpc::call_on answers from the chain kept here; on a borrowed one these
+// answers come from the lenders, checked where they can be. Nothing is watched for the program:
+// an address's coins come from a lender's address index (arcade_coinscan, which arcades with the
+// chain installed answer for any address at once), each coin checked against its block (that
+// output, that script, that value) and its unspent status asked of the lender (gettxout, its
+// mempool included), as borrowing does for this wallet's own older coins.
+
+/// Coins already checked against their blocks: (chain, coin) -> (value, script, height).
+static CHECKED: LazyLock<Mutex<HashMap<(String, OutPoint), (u64, Vec<u8>, u32)>>> = LazyLock::new(Default::default);
+const CHECKED_MAX: usize = 20_000;
+/// New coins one listunspent answer checks at most (each block height fetched and checked once).
+const RPC_MAX_COINS: usize = 500;
+
+fn rpc_err(code: i64, m: impl Into<String>) -> (i64, String) {
+    (code, m.into())
+}
+
+/// Core's JSON-RPC on a borrowed chain (http.rs core_rpc, for this computer only).
+pub fn core_call(node: &Node, p: &'static ChainParams, method: &str, params: &[Value]) -> crate::rpc::RpcResult {
+    let param = |i: usize| params.get(i).cloned().unwrap_or(Value::Null);
+    let txid_param = |v: &Value| v.as_str().and_then(|s| Hash256::from_hex(s).ok()).ok_or_else(|| rpc_err(-8, "txid must be 64 hex characters"));
+    // Answered here, with nothing from a lender.
+    match method {
+        "validateaddress" => {
+            let a = param(0).as_str().unwrap_or("").to_string();
+            return Ok(match script_for_address(p, &a) {
+                // Watch-only for every address, as on an installed chain: a lender's address index
+                // answers for any of them, so importaddress is never needed (but is accepted).
+                Some(sc) => json!({"isvalid": true, "address": a, "scriptPubKey": hex::encode(&sc), "ismine": false,
+                                   "iswatchonly": true, "isscript": sc.first() == Some(&0xa9)}),
+                None => json!({"isvalid": false}),
+            });
+        }
+        "importaddress" => {
+            script_for_address(p, param(0).as_str().unwrap_or("")).ok_or_else(|| rpc_err(-5, "Invalid address"))?;
+            return Ok(Value::Null);
+        }
+        "decoderawtransaction" => {
+            let raw = param(0).as_str().and_then(|s| hex::decode(s).ok()).ok_or_else(|| rpc_err(-22, "TX decode failed"))?;
+            let t = Tx::parse_with(&raw, &p.format).map_err(|_| rpc_err(-22, "TX decode failed"))?;
+            return Ok(crate::rpc::tx_json(p, &t));
+        }
+        // Nothing is watched for a program on a borrowed chain: no wallet history to list.
+        "listtransactions" => return Ok(json!([])),
+        _ => {}
+    }
+    let st = state(node, p.key).ok_or_else(|| rpc_err(-28, format!("{} is borrowed and has not started yet", p.name)))?;
+    let tip = st["tip"].as_u64().unwrap_or(0) as u32;
+    match method {
+        "getblockcount" => Ok(json!(tip)),
+        "getbestblockhash" => Ok(st["tip_hash"].clone()),
+        "getblockchaininfo" => Ok(json!({"chain": if p.net.ends_with("test") { "test" } else { "main" }, "blocks": tip, "headers": tip,
+                                          "bestblockhash": st["tip_hash"], "initialblockdownload": false, "pruned": true, "borrowed": true})),
+        "sendrawtransaction" => {
+            let raw = param(0).as_str().and_then(|s| hex::decode(s).ok()).ok_or_else(|| rpc_err(-22, "TX decode failed"))?;
+            let tx = Tx::parse_with(&raw, &p.format).map_err(|_| rpc_err(-22, "TX decode failed"))?;
+            broadcast_tx(node, p, &tx).map(|_| json!(tx.txid.to_hex())).map_err(|(why, _)| rpc_err(-26, why))
+        }
+        "gettxout" => {
+            let txid = txid_param(&param(0))?;
+            let n = param(1).as_u64().ok_or_else(|| rpc_err(-8, "n must be a number"))?;
+            let mempool = param(2) != Value::Bool(false);
+            if mempool && pool_spent(p.key).contains(&OutPoint { txid, vout: n as u32 }) {
+                return Ok(Value::Null);
+            }
+            // Unspent status is the lender's word, as borrowing takes it (said so: checked false).
+            let (_, a) = call_any(node, p, json!([["gettxout", [txid.to_hex(), n, mempool]]])).map_err(|x| rpc_err(-1, x))?;
+            let mut v = r(&a[0]).cloned().map_err(|x| rpc_err(-1, x))?;
+            if v.is_object() {
+                v["checked"] = json!(false);
+                v["from"] = json!("lender");
+            }
+            Ok(v)
+        }
+        "getrawtransaction" => {
+            let txid = txid_param(&param(0))?;
+            let verbose = match param(1) {
+                Value::Bool(b) => b,
+                v => v.as_i64().unwrap_or(0) != 0,
+            };
+            raw_tx_json(node, p, &txid, verbose, tip)
+        }
+        "listunspent" => unspent(node, p, tip, &param(0), &param(1), &param(2)),
+        _ => Err(rpc_err(-32601, format!("Method not found: {method} ({} is borrowed here: getblockcount, getbestblockhash, getblockchaininfo, getrawtransaction, gettxout, listunspent, sendrawtransaction, decoderawtransaction, validateaddress, importaddress)", p.name))),
+    }
+}
+
+/// getrawtransaction on a borrowed chain: the lender's copy, checked against its txid; where it
+/// was mined checked against the headers kept here when its block is one of them. A transaction
+/// sent from here that no lender returns yet is answered from the waiting ones (0 confirmations).
+fn raw_tx_json(node: &Node, p: &'static ChainParams, txid: &Hash256, verbose: bool, tip: u32) -> crate::rpc::RpcResult {
+    let pooled = || ST.pool.lock().unwrap().get(p.key).and_then(|m| m.get(txid).map(|v| v.0.clone()));
+    let asked = call_any(node, p, json!([["getrawtransaction", [txid.to_hex(), if verbose { 1 } else { 0 }]]]))
+        .and_then(|(_, a)| r(&a[0]).cloned());
+    let (raw, lender) = match asked {
+        Ok(v) => {
+            let hx = if verbose { v["hex"].as_str() } else { v.as_str() };
+            (hex::decode(hx.unwrap_or("")).map_err(|_| rpc_err(-1, "the lender's transaction is not hex"))?, Some(v))
+        }
+        Err(why) => (pooled().ok_or_else(|| rpc_err(-5, format!("No such mempool or blockchain transaction ({why})")))?, None),
+    };
+    let tx = Tx::parse_with(&raw, &p.format).map_err(|x| rpc_err(-22, x.to_string()))?;
+    if tx.txid != *txid {
+        return Err(rpc_err(-1, "the lender's transaction has another txid"));
+    }
+    if !verbose {
+        return Ok(json!(hex::encode(&tx.raw)));
+    }
+    let mut v = crate::rpc::tx_json(p, &tx);
+    let said = lender.as_ref().map(|l| (l["confirmations"].as_u64().unwrap_or(0), l["blockhash"].as_str().unwrap_or("").to_string()));
+    // Where the answer comes from (for a program that must not act on a lender's word alone, a
+    // swap checking a lock): checked = in a block this arcade checked by proof of work itself, on
+    // its own header chain, with the transaction found in that block.
+    v["confirmations"] = json!(0);
+    v["checked"] = json!(false);
+    v["from"] = json!("lender");
+    if let Some((conf, bh)) = said.filter(|(c, _)| *c > 0) {
+        v["blockhash"] = json!(bh);
+        v["confirmations"] = json!(conf);
+        // The lender's tip may be a block or two from ours: look for its block among our headers near there.
+        let near = (tip + 1).saturating_sub(conf as u32);
+        for h in near.saturating_sub(3)..=near + 3 {
+            let Some((hash, hdr)) = stored_header(node, p, h) else { continue };
+            if hash.to_hex() != bh {
+                continue;
+            }
+            v["height"] = json!(h);
+            v["confirmations"] = json!(tip.saturating_sub(h) + 1);
+            v["time"] = json!(hdr.time);
+            v["blocktime"] = json!(hdr.time);
+            // The block itself, checked against our header for it (merkle root, work): is the transaction in it?
+            if let Ok((b, bh_height, _)) = fetch_checked(node, p, &hash) {
+                if bh_height == h && b.txs.iter().any(|t| t.txid == *txid) {
+                    v["checked"] = json!(true);
+                    v["from"] = json!("borrowed (checked blocks)");
+                }
+            }
+            break;
+        }
+    }
+    Ok(v)
+}
+
+/// A coin a lender's address index named, checked against its block and unspent at the lender
+/// (its mempool included) when asked.
+pub struct LentCoin {
+    pub op: OutPoint,
+    pub value: u64,
+    pub height: u32,
+    pub address: String,
+    pub script: Vec<u8>,
+}
+
+/// The unspent coins of these addresses on a borrowed chain (or one still catching up), from a
+/// lender's address index: each coin checked against its block once (that output, that script,
+/// that value), then asked of the lender whether it is still unspent. Coins spent by a
+/// transaction sent from here are left out. At most RPC_MAX_COINS new coins are checked per
+/// call (the largest first); a lender names at most 5,000 per address (the oldest).
+pub fn lender_coins(node: &Node, p: &'static ChainParams, addrs: &[String]) -> Result<Vec<LentCoin>, String> {
+    if addrs.len() > SCAN_ADDRESSES * SCAN_PARTS {
+        return Err(format!("at most {} addresses on a borrowed chain", SCAN_ADDRESSES * SCAN_PARTS));
+    }
+    let mut scripts: HashMap<String, Vec<u8>> = HashMap::new();
+    for a in addrs {
+        let sc = script_for_address(p, a).ok_or_else(|| format!("Invalid address: {a}"))?;
+        scripts.insert(a.clone(), sc);
+    }
+    if addrs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (lender, found) = scan_any(node, p, addrs)?;
+    // Check the coins not checked before against their blocks (the largest first, when there are many).
+    let known = |c: &Found| CHECKED.lock().unwrap().contains_key(&(p.key.to_string(), c.op));
+    let mut fresh: Vec<&Found> = found.iter().filter(|c| c.height > 0 && !known(c)).collect();
+    fresh.sort_by_key(|c| std::cmp::Reverse(c.value));
+    fresh.truncate(RPC_MAX_COINS);
+    let mut blocks: HashMap<u32, Block> = HashMap::new();
+    for c in fresh {
+        if !blocks.contains_key(&c.height) {
+            if blocks.len() >= 50 {
+                blocks.clear();
+            }
+            let bh = hash_at(node, p, Some(&lender), c.height)?;
+            let (b, h, _) = fetch_checked(node, p, &bh)?;
+            if h != c.height {
+                continue;
+            }
+            blocks.insert(c.height, b);
+        }
+        let b = &blocks[&c.height];
+        let Some(o) = b.txs.iter().find(|t| t.txid == c.op.txid).and_then(|t| t.outputs.get(c.op.vout as usize)) else { continue };
+        if Some(&o.script_pubkey) != scripts.get(&c.address) || o.value != c.value {
+            let _ = node.app.event("borrow", &format!("{}: a coin a lender named does not match its block {}", p.name, c.height));
+            continue;
+        }
+        let mut m = CHECKED.lock().unwrap();
+        if m.len() >= CHECKED_MAX {
+            m.clear();
+        }
+        m.insert((p.key.to_string(), c.op), (o.value, o.script_pubkey.clone(), c.height));
+    }
+    let spent = pool_spent(p.key);
+    let checked: Vec<(&Found, u32)> = found
+        .iter()
+        .filter(|c| !spent.contains(&c.op))
+        .filter_map(|c| CHECKED.lock().unwrap().get(&(p.key.to_string(), c.op)).map(|x| (c, x.2)))
+        .collect();
+    let mut out = Vec::new();
+    // Unspent now (the lender's mempool included), in batches.
+    for part in checked.chunks(200) {
+        let calls: Vec<Value> = part.iter().map(|(c, _)| json!(["gettxout", [c.op.txid.to_hex(), c.op.vout, true]])).collect();
+        let answers = call(node, &lender, p, json!(calls))?;
+        for ((c, h), o) in part.iter().zip(answers.iter()) {
+            if r(o).map(|v| v.is_null()).unwrap_or(true) {
+                continue;
+            }
+            out.push(LentCoin { op: c.op, value: c.value, height: *h, address: c.address.clone(), script: scripts[&c.address].clone() });
+        }
+    }
+    Ok(out)
+}
+
+/// Outputs of transactions sent from here (still waiting) that pay `script` and that no other
+/// waiting transaction spends: (coin, value, replaceable).
+pub fn waiting_to(p: &ChainParams, script: &[u8]) -> Vec<(OutPoint, u64, bool)> {
+    let spent = pool_spent(p.key);
+    let pool: Vec<Vec<u8>> = ST.pool.lock().unwrap().get(p.key).map(|m| m.values().map(|v| v.0.clone()).collect()).unwrap_or_default();
+    let mut out = Vec::new();
+    for raw in pool {
+        let Ok(t) = Tx::parse_with(&raw, &p.format) else { continue };
+        let rbf = t.inputs.iter().any(|i| i.sequence < 0xffff_fffe);
+        for (vout, o) in t.outputs.iter().enumerate() {
+            let op = OutPoint { txid: t.txid, vout: vout as u32 };
+            if o.script_pubkey == script && !spent.contains(&op) {
+                out.push((op, o.value, rbf));
+            }
+        }
+    }
+    out
+}
+
+/// Coins spent by transactions sent from here that are still waiting.
+pub fn waiting_spent(key: &str) -> HashSet<OutPoint> {
+    pool_spent(key)
+}
+
+/// The height a borrowed chain is followed to (None before it starts).
+pub fn tip(node: &Node, key: &str) -> Option<u32> {
+    state(node, key).and_then(|s| s["tip"].as_u64()).map(|h| h as u32)
+}
+
+/// listunspent on a borrowed chain, for the addresses named (a lender's address index answers
+/// for any; nothing is watched, so no addresses means none).
+fn unspent(node: &Node, p: &'static ChainParams, tip: u32, minconf: &Value, maxconf: &Value, addrs: &Value) -> crate::rpc::RpcResult {
+    let minconf = minconf.as_u64().unwrap_or(1);
+    let maxconf = maxconf.as_u64().unwrap_or(9_999_999);
+    let addrs: Vec<String> = addrs.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    for a in &addrs {
+        script_for_address(p, a).ok_or_else(|| rpc_err(-5, format!("Invalid address: {a}")))?;
+    }
+    let mut out: Vec<Value> = Vec::new();
+    let row = |op: &OutPoint, a: &str, sc: &[u8], value: u64, conf: u64, safe: bool| {
+        json!({"txid": op.txid.to_hex(), "vout": op.vout, "address": a, "scriptPubKey": hex::encode(sc),
+               "amount": value as f64 / 1e8, "confirmations": conf, "spendable": false, "solvable": false, "safe": safe})
+    };
+    if maxconf >= 1 && !addrs.is_empty() {
+        let floor = state(node, p.key).and_then(|s| s["floor"].as_u64()).unwrap_or(u64::MAX) as u32;
+        for c in lender_coins(node, p, &addrs).map_err(|x| rpc_err(-1, x))? {
+            let conf = (tip.max(c.height) - c.height + 1) as u64;
+            if conf >= minconf && conf <= maxconf {
+                // Every coin was found in its block; a block from the floor on is also on our own
+                // checked header chain (below it, that the block is in the best chain is the lender's word).
+                // Unspent status is the lender's word either way.
+                let mut v = row(&c.op, &c.address, &c.script, c.value, conf, true);
+                let on_ours = c.height >= floor && c.height <= tip;
+                v["height"] = json!(c.height);
+                v["checked"] = json!(on_ours);
+                v["from"] = json!(if on_ours { "borrowed (checked blocks)" } else { "lender" });
+                out.push(v);
+            }
+        }
+    }
+    // Waiting outputs to them (minconf 0): of transactions sent from here, not spent by another.
+    if minconf == 0 {
+        for a in &addrs {
+            let sc = script_for_address(p, a).unwrap_or_default();
+            for (op, value, _) in waiting_to(p, &sc) {
+                let mut v = row(&op, a, &sc, value, 0, false);
+                v["checked"] = json!(false);
+                v["from"] = json!("sent from here");
+                out.push(v);
+            }
+        }
+    }
+    Ok(json!(out))
+}
+
+/// Every coin of these addresses from the first lender whose address index answers at once;
+/// a lender still reading them (an older arcade's background scan) is passed over.
+fn scan_any(node: &Node, p: &'static ChainParams, addrs: &[String]) -> Result<(String, Vec<Found>), String> {
+    let refs: Vec<&str> = addrs.iter().map(String::as_str).collect();
+    let parts: Vec<Value> = refs.chunks(SCAN_ADDRESSES).map(|c| json!(["arcade_coinscan", [{"addresses": c}]])).collect();
+    // Every lender's answer, for the error when none could: "a shared Core does not answer" is an
+    // arcade lending a coin node with no address index.
+    let mut why: Vec<String> = Vec::new();
+    'lenders: for l in lenders(node, p) {
+        let a = match call(node, &l, p, json!(parts)) {
+            Ok(a) => a,
+            Err(x) => {
+                why.push(format!("{l}: {x}"));
+                continue;
+            }
+        };
+        let mut found = Vec::new();
+        for x in &a {
+            match r(x).and_then(|v| parse_scan(v, &refs)) {
+                Ok(ScanAnswer::Coins(f)) => found.extend(f),
+                Ok(ScanAnswer::Waiting(n)) => {
+                    why.push(format!("{l}: still reading these addresses (ask again in about {n} s)"));
+                    continue 'lenders;
+                }
+                Err(x) => {
+                    why.push(format!("{l}: {x}"));
+                    continue 'lenders;
+                }
+            }
+        }
+        return Ok((l, found));
+    }
+    if why.is_empty() {
+        return Err(format!("no arcade lends {} now", p.name));
+    }
+    Err(format!("no lender of {} with an address index answered: {}", p.name, why.join("; ")))
 }
 
 #[cfg(test)]
