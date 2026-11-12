@@ -84,6 +84,11 @@ fn load(node: &Node, p: &'static ChainParams) -> Result<Wallet, String> {
     }
     let (k, _) = node.app.tag_key(p, 0).map_err(|e| e.to_string())?;
     let pk = PublicKey::from_slice(&hex::decode(&k.pubkey).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    load_key(node, p, pk, k.index)
+}
+
+/// The DigiDollar coins of any key's DigiDollar address (the key's wallet need not be here).
+fn load_key(node: &Node, p: &'static ChainParams, pk: PublicKey, key_index: u32) -> Result<Wallet, String> {
     let (address, _q, script) = dd_address(p, &pk).ok_or("no DigiDollar address for this key")?;
     let borrowed = crate::borrow::is_borrowed(p.key);
     let installed = !borrowed && (p.chain_no == node.params.chain_no || node.extra.lock().unwrap().contains_key(p.key));
@@ -135,14 +140,26 @@ fn load(node: &Node, p: &'static ChainParams) -> Result<Wallet, String> {
         return Err(format!("{} is neither installed nor borrowed here", p.name));
     }
     held.sort_by(|a, b| b.1.cmp(&a.1));
-    Ok(Wallet { p, borrowed, address, key_index: k.index, pk, held })
+    Ok(Wallet { p, borrowed, address, key_index, pk, held })
 }
 
 /// dd.wallet: this wallet's DigiDollar address and coins on a DigiByte chain (the old
 /// GET /account/digidollar fields).
 pub fn wallet(node: &Node, chain: Option<&str>) -> R {
     let p = chain_of(node, chain)?;
-    let w = load(node, p)?;
+    shown(load(node, p)?)
+}
+
+/// dd.coins: the DigiDollar address and coins of any DigiByte key (33-byte hex), for a website
+/// whose accounts keep their keys in their browsers: it builds their sends from these and the
+/// browser signs (the old site's GET /account/digidollar). Read only: chain data, no key here.
+pub fn coins_of(node: &Node, chain: Option<&str>, pubkey: &str) -> R {
+    let p = chain_of(node, chain)?;
+    let pk = PublicKey::from_slice(&hex::decode(pubkey.trim()).map_err(|_| "pubkey: 33 bytes of hex")?).map_err(|_| "pubkey: not a key on the curve")?;
+    shown(load_key(node, p, pk, 0)?)
+}
+
+fn shown(w: Wallet) -> R {
     let cents: i64 = w.held.iter().map(|h| h.1).sum();
     Ok(json!({
         "chain": w.p.key, "address": w.address, "cents": cents,

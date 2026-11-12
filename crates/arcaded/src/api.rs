@@ -123,6 +123,7 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             }).collect::<Vec<_>>()))
         }
         "dd.wallet" => crate::ddsvc::wallet(node, s("chain").as_deref()),
+        "dd.coins" => crate::ddsvc::coins_of(node, s("chain").as_deref(), &s("pubkey").ok_or("pubkey required (a DigiByte key, 33 bytes of hex)")?),
         "dd.send" => {
             let cents = req["cents"].as_i64().ok_or("cents required (DigiDollar cents: $12.50 is 1250)")?;
             crate::ddsvc::send(node, s("chain").as_deref(), &s("to").ok_or("to required (a DD... or TD... address)")?, cents, req["send"] == true)
