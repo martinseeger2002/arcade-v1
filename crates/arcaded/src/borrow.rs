@@ -1353,6 +1353,8 @@ pub fn send(node: &Node, key: &str, to: &str, amount: u64, from: Option<&str>, b
     if !mine.iter().any(|(_, sc)| *sc == pick.script) {
         coins.extend(spendable(node, p, &pick.script));
     }
+    // Coins carrying an inscription stay out (crate::ordsafe), as on a chain kept here.
+    let coins = crate::ordsafe::keep_free(node, p, coins);
     let change = if mine.iter().any(|(_, sc)| *sc == pick.script) { mine[0].1.clone() } else { pick.script.clone() };
     let fp = crate::coinsend::fee_policy(p);
     let tx = arcade_wallet::tx::build_send_keyhash(p, &to_script, amount, &sk, &coins, &change, fee_rate(node, p), fp.dust, arcade_app::now() as u32)?;

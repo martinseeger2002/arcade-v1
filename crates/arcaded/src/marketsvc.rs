@@ -520,7 +520,7 @@ pub fn read(node: &Node, name: &str, q: &Map<String, Value>) -> Result<Value, St
 
 /// A GET under /r/ this module answers: Some((status, JSON text)), or None for another module's path.
 pub fn route(node: &Node, path: &str, q: &Map<String, Value>) -> Option<(u16, String)> {
-    let seg: Vec<&str> = path.trim_start_matches("/r/").split('/').collect();
+    let seg: Vec<&str> = path.strip_prefix("/r/").unwrap_or("").split('/').collect();
     match seg.as_slice() {
         ["book", id] => Some(match id.parse::<u32>().ok().and_then(|pid| r_book(node, pid, q.get("address").and_then(|v| v.as_str()))) {
             Some(v) => (200, v.to_string()),
@@ -622,6 +622,10 @@ fn swap_terms(node: &Node, m: &Value) -> Result<(String, Option<String>), String
         "swap_place" => Ok((format!("a swap order: give {} for {}, locked by script on both chains when somebody takes it", leg_words(&m["give"]), leg_words(&m["get"])), None)),
         "swap_take" => {
             let o = crate::swaps::book(node).into_iter().find(|o| o["id"] == m["order"] && (m["node"].is_null() || o["node"] == m["node"])).ok_or("that swap order is not on the book now")?;
+            // Filed: the legs shown are pinned into the request. At the Approve: still the same on the book.
+            if m["give"].is_object() && !crate::swaps::same_terms(&o, m) {
+                return Err("that swap order's terms changed since the card was drawn".into());
+            }
             Ok((format!("a swap: give {} for {}. Your side is locked first, for longer; each side gets its own back if the other stops", leg_words(&o["get"]), leg_words(&o["give"])), o["node"].as_str().map(String::from)))
         }
         "swap_cancel" => Ok(("a cancel of your swap order".into(), None)),
@@ -787,7 +791,8 @@ pub fn build_request(node: &Node, m: &Value, send: bool) -> Result<(String, u64,
         }
         let r = match m["op"].as_str().unwrap_or("") {
             "swap_place" => crate::swaps::place(node, &m["give"], &m["get"])?,
-            "swap_take" => crate::swaps::take(node, m["node"].as_str().unwrap_or(""), m["order"].as_str().unwrap_or(""))?,
+            // The legs the card showed (pinned when it was filed): the maker's terms must still be those.
+            "swap_take" => crate::swaps::take(node, m["node"].as_str().unwrap_or(""), m["order"].as_str().unwrap_or(""), Some(m))?,
             _ => crate::swaps::cancel(node, m["order"].as_str().unwrap_or(""))?,
         };
         return Ok((format!("swap:{}", r["id"].as_str().unwrap_or("")), 0, vec![]));
@@ -854,6 +859,19 @@ pub fn build_request(node: &Node, m: &Value, send: bool) -> Result<(String, u64,
 pub fn file(node: &Node, page: &str, op: &str, body: &Value) -> (u16, Value) {
     let mut m = body.clone();
     m["op"] = json!(op);
+    if op == "swap_take" {
+        // Pin the legs as the book shows them now (whatever the page said): the card shows these, and the take
+        // at the Approve goes ahead only on exactly these terms.
+        m["give"] = Value::Null;
+        m["get"] = Value::Null;
+        if let Some(o) = crate::swaps::book(node).into_iter().find(|o| o["id"] == m["order"] && (m["node"].is_null() || o["node"] == m["node"])) {
+            m["give"] = o["give"].clone();
+            m["get"] = o["get"].clone();
+            if m["node"].is_null() {
+                m["node"] = o["node"].clone();
+            }
+        }
+    }
     let (what, to) = match terms(node, &m) {
         Ok(t) => t,
         Err(e) => return (400, json!({"ok": false, "error": e})),

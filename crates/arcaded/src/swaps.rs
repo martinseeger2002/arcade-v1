@@ -234,7 +234,7 @@ fn send_raw(node: &Node, p: &ChainParams, raw: &[u8]) -> Result<String, String> 
 
 /// This wallet's spendable coins on a chain: its key's P2PKH (and P2WPKH where it receives SegWit), none spent in
 /// the pool and none carrying an inscription (a fee must never spend an inscribed coin).
-fn coins(node: &Node, p: &ChainParams, pk: &PublicKey) -> Vec<Utxo> {
+fn coins(node: &Node, p: &'static ChainParams, pk: &PublicKey) -> Vec<Utxo> {
     let mut out = Vec::new();
     for (_, script) in crate::coinsend::key_scripts(p, pk) {
         let list: Vec<Utxo> = if p.chain_no == node.params.chain_no && script == p2pkh_of(pk) {
@@ -249,9 +249,11 @@ fn coins(node: &Node, p: &ChainParams, pk: &PublicKey) -> Vec<Utxo> {
                 .map(|(op, value, _)| Utxo { outpoint: op, value, script: script.clone() })
                 .collect()
         };
-        out.extend(list.into_iter().filter(|u| arcade_ledger::ord::on_coin(&node.chain, p, &u.outpoint).is_empty()));
+        out.extend(list);
     }
-    out
+    // Coins carrying an inscription stay out (crate::ordsafe: this arcade's ord index, else the mesh's, else
+    // small coins nobody can read), as in every other send.
+    crate::ordsafe::keep_free(node, p, out)
 }
 
 fn fee_kb(node: &Node, p: &ChainParams) -> (u64, u64) {
@@ -314,15 +316,17 @@ struct Spec {
     claimer: Vec<u8>,
     refunder: Vec<u8>,
     time: u32,
+    /// The claim takes only a 32-byte secret (htlc::Htlc::sized): the maker's lock, when the maker said so.
+    sized: bool,
 }
 
 impl Spec {
     fn htlc(&self) -> Htlc {
-        Htlc { hash: self.hash, claimer: self.claimer.clone(), refunder: self.refunder.clone(), time: self.time }
+        Htlc { hash: self.hash, claimer: self.claimer.clone(), refunder: self.refunder.clone(), time: self.time, sized: self.sized }
     }
     fn dd(&self) -> Result<Lock, String> {
         let x = |k: &[u8]| XOnlyPublicKey::from_slice(k.get(1..33).ok_or("bad key")?).map_err(|_| "bad key".to_string());
-        Ok(Lock { hash: self.hash, claimer: x(&self.claimer)?, refunder: x(&self.refunder)?, time: self.time })
+        Ok(Lock { hash: self.hash, claimer: x(&self.claimer)?, refunder: x(&self.refunder)?, time: self.time, sized: self.sized })
     }
     fn script(&self, kind: &str) -> Result<Vec<u8>, String> {
         Ok(if kind == "dd" { self.dd()?.script() } else { self.htlc().script() })
@@ -566,10 +570,26 @@ fn spent_secret(node: &Node, leg: &Value, spec: &Spec, st: &Value) -> Result<Opt
 
 // ---------------- orders, the maker's answers ----------------
 
+/// Whether the maker's lock of `give` takes only a 32-byte secret: everywhere but the ARCADE chain, whose script
+/// has no OP_SIZE.
+fn sized_on(node: &Node, give: &Value) -> bool {
+    leg_ok(node, give).is_ok_and(|p| !by_height(p))
+}
+
+/// A pair the maker can't be stranded in: the taker makes the secret, and a lock of the maker's that takes any
+/// length (the ARCADE chain's) can't be paired with one of the taker's that takes 32 bytes only (DigiDollars).
+fn pair_ok(node: &Node, give: &Value, get_leg: &Value) -> Result<(), String> {
+    if !sized_on(node, give) && get_leg["kind"] == "dd" {
+        return Err("an ARCADE coin leg can't be swapped for DigiDollars yet".into());
+    }
+    Ok(())
+}
+
 /// Place an order: give `give`, get `get` (whole, one fill).
 pub fn place(node: &Node, give: &Value, get_leg: &Value) -> Result<Value, String> {
     leg_ok(node, give)?;
     leg_ok(node, get_leg)?;
+    pair_ok(node, give, get_leg)?;
     let id = arcade_mesh::random::hex(8);
     let o = json!({"id": id, "give": give, "get": get_leg, "status": "open", "created": arcade_app::now(), "node": node.id_hex()});
     put(node, "sorder", &o);
@@ -629,7 +649,10 @@ pub fn answer(node: &Node, q: &Value) -> Result<Value, String> {
             o["held_by"] = json!(who);
             o["held_until"] = json!(now() + HOLD_SECS);
             put(node, "sorder", &o);
-            Ok(json!({"order": o, "maker_keys": keys_for(node, &[&o["give"], &o["get"]])?, "maker_secs": maker_secs()}))
+            pair_ok(node, &o["give"], &o["get"])?;
+            // "sized": this maker's lock takes only a 32-byte secret (an older taker doesn't know to look for it:
+            // it never finds this side's lock, and both sides refund).
+            Ok(json!({"order": o, "maker_keys": keys_for(node, &[&o["give"], &o["get"]])?, "maker_secs": maker_secs(), "sized": sized_on(node, &o["give"])}))
         }
         "slocked" => maker_begin(node, q),
         "sstatus" => {
@@ -653,8 +676,8 @@ fn specs(s: &Value) -> Result<(Spec, Spec), String> {
         let h = crate::chains::find(s["order"][leg]["chain"].as_str().unwrap_or("")).is_some_and(by_height);
         s[if h { height } else { clock }].as_u64().unwrap_or(0) as u32
     };
-    let taker = Spec { hash, claimer: k("maker_keys", "get")?, refunder: k("taker_keys", "get")?, time: end("get", "taker_time", "taker_height") };
-    let maker = Spec { hash, claimer: k("taker_keys", "give")?, refunder: k("maker_keys", "give")?, time: end("give", "maker_time", "maker_height") };
+    let taker = Spec { hash, claimer: k("maker_keys", "get")?, refunder: k("taker_keys", "get")?, time: end("get", "taker_time", "taker_height"), sized: false };
+    let maker = Spec { hash, claimer: k("taker_keys", "give")?, refunder: k("maker_keys", "give")?, time: end("give", "maker_time", "maker_height"), sized: s["sized"] == true };
     Ok((taker, maker))
 }
 
@@ -670,13 +693,15 @@ fn maker_begin(node: &Node, q: &Value) -> Result<Value, String> {
     if held != q["taker"].as_str().unwrap_or("") && (!held.is_empty() && o["held_until"].as_u64().unwrap_or(0) as u32 > now()) {
         return Err("that order is held for somebody else".into());
     }
+    pair_ok(node, &o["give"], &o["get"])?;
     let taker_time = q["taker_time"].as_u64().ok_or("give the lock time")? as u32;
     if taker_time < now() + maker_secs() * 3 / 2 {
         return Err("that lock ends too soon".into());
     }
     let mut s = json!({"id": id, "role": "maker", "order": o, "peer": q["taker"], "maker_keys": keys_for(node, &[&o["give"], &o["get"]])?,
                        "taker_keys": q["taker_keys"], "taker_time": taker_time, "maker_time": now() + maker_secs(),
-                       "taker_lock": q["taker_lock"], "maker_lock": {"step": "start"}, "step": "locking", "at": arcade_app::now()});
+                       "taker_lock": q["taker_lock"], "maker_lock": {"step": "start"}, "step": "locking", "at": arcade_app::now(),
+                       "sized": sized_on(node, &o["give"])});
     // On the ARCADE chain: the taker's height must last 3 times the order's time even with blocks twice as fast as
     // lately; this side's own lock ends at the height of 1 time (see by_height).
     let gp = leg_ok(node, &o["get"])?;
@@ -714,9 +739,16 @@ fn ask(node: &Node, peer: &str, q: Value) -> Result<Value, String> {
 }
 
 /// Take an order whole: make the secret, start locking the order's `get` leg; the rest runs by itself.
-pub fn take(node: &Node, maker: &str, order: &str) -> Result<Value, String> {
+/// `shown`: the order's legs as the person saw them ({give, get}); the maker's terms now must be exactly those, or
+/// nothing is locked (a maker can't swap in other terms between the card and the Approve).
+pub fn take(node: &Node, maker: &str, order: &str, shown: Option<&Value>) -> Result<Value, String> {
     let quote = ask(node, maker, json!({"op": "squote", "chain": "dgbtest", "order": order, "taker": node.id_hex()}))?;
     let o = quote["order"].clone();
+    if let Some(sh) = shown {
+        if !same_terms(&o, sh) {
+            return Err("that order's terms changed since you saw them: nothing was locked".into());
+        }
+    }
     leg_ok(node, &o["give"])?;
     leg_ok(node, &o["get"])?;
     let secret: [u8; 32] = arcade_mesh::random::bytes();
@@ -725,13 +757,19 @@ pub fn take(node: &Node, maker: &str, order: &str) -> Result<Value, String> {
     let f = taker_factor(&o);
     let mut s = json!({"id": id, "role": "taker", "order": o, "peer": maker, "secret": hex::encode(secret), "maker_keys": quote["maker_keys"],
                    "taker_keys": keys_for(node, &[&o["give"], &o["get"]])?, "taker_time": now() + f * secs,
-                   "taker_lock": {"step": "start"}, "step": "locking", "at": arcade_app::now()});
+                   "taker_lock": {"step": "start"}, "step": "locking", "at": arcade_app::now(), "sized": quote["sized"] == true});
     let gp = leg_ok(node, &o["get"])?;
     if by_height(gp) {
         s["taker_height"] = json!(height_for(node, gp, f * secs));
     }
     put(node, "swap", &s);
     Ok(public(&s))
+}
+
+/// Whether an order's legs are exactly the ones shown (chain, kind, asset and amount of each).
+pub fn same_terms(o: &Value, shown: &Value) -> bool {
+    let leg = |v: &Value| ["chain", "kind", "asset", "amount"].map(|k| v[k].clone());
+    shown["give"].is_object() && shown["get"].is_object() && leg(&o["give"]) == leg(&shown["give"]) && leg(&o["get"]) == leg(&shown["get"])
 }
 
 pub fn public(s: &Value) -> Value {
@@ -876,7 +914,7 @@ mod arcade_lock_tests {
         let (a, b) = (SecretKey::from_slice(&[3u8; 32]).unwrap(), SecretKey::from_slice(&[4u8; 32]).unwrap());
         let pk = |k: &SecretKey| PublicKey::from_secret_key(SECP256K1, k).serialize().to_vec();
         let secret = [9u8; 32];
-        let lock = Htlc { hash: Sha256::digest(secret).into(), claimer: pk(&a), refunder: pk(&b), time: 1_000 };
+        let lock = Htlc { hash: Sha256::digest(secret).into(), claimer: pk(&a), refunder: pk(&b), time: 1_000, sized: false };
         let coin = [(OutPoint { txid: Hash256([7; 32]), vout: 0 }, 50_000_000u64)];
         let to = arcade_ledger::address::p2pkh_script(&arcade_ledger::address::hash160(&pk(&a)));
         let outs = htlc::pay_out(&coin, &to, htlc::SPEND_FEE).unwrap();
@@ -894,4 +932,20 @@ mod arcade_lock_tests {
         let (ok, _) = check(&htlc::refund(p, &early, &coin, outs, &b).unwrap());
         assert!(ok.is_err(), "a refund signed for an earlier height must not spend this lock");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn a_take_goes_ahead_only_on_the_terms_shown() {
+    let shown = json!({"give": {"chain": "dgbtest", "kind": "coin", "asset": null, "amount": "100"}, "get": {"chain": "peptest", "kind": "coin", "asset": null, "amount": "5"}});
+    let mut o = shown.clone();
+    o["id"] = json!("x");
+    o["status"] = json!("open");
+    assert!(same_terms(&o, &shown));
+    o["get"]["amount"] = json!("5000");
+    assert!(!same_terms(&o, &shown), "a bigger price");
+    let mut o2 = shown.clone();
+    o2["give"]["chain"] = json!("dgb");
+    assert!(!same_terms(&o2, &shown), "another chain");
+    assert!(!same_terms(&shown, &json!({"order": "x"})), "nothing shown matches nothing");
 }

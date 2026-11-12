@@ -534,3 +534,12 @@ On test chains only, between two test arcades in a private network, from test ac
 
 Not yet: partial fills of lock swaps, mesh-wide order rooms (step 6), the operator fee, fee coins,
 history for swaps and DigiDollar trades, original-arcade interop for lock swaps.
+
+Asked by Martin, 2026-11-11: an operator who runs a website portal to the arcade marketplace needs a
+way to enforce a maker fee on orders placed through it (beside the taker-side trade fee above).
+
+Security fixes (re-audit at ba0e09a, 2026-11-11): a swap maker's lock takes only a 32-byte secret
+(`OP_SIZE 32 OP_EQUALVERIFY`; its quote says `"sized": true`, and an older taker never finds the lock,
+so both sides refund); an ARCADE coin leg can't be swapped for DigiDollars until the ARCADE chain has
+OP_SIZE; a take goes ahead only on the terms its card showed; swap funding and borrowed-chain sends keep
+inscribed coins out.

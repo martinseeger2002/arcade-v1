@@ -34,6 +34,8 @@ pub struct Lock {
     pub refunder: XOnlyPublicKey,
     /// A Unix time (never a height): CLTV compares it with the spending transaction's nLockTime.
     pub time: u32,
+    /// The claim takes only a 32-byte secret (htlc::Htlc::sized).
+    pub sized: bool,
 }
 
 fn num_push(s: &mut Vec<u8>, n: i64) {
@@ -43,7 +45,8 @@ fn num_push(s: &mut Vec<u8>, n: i64) {
 
 impl Lock {
     pub fn claim_leaf(&self) -> Vec<u8> {
-        let mut s = vec![0xa8]; // OP_SHA256
+        let mut s = if self.sized { crate::htlc::SIZE_32.to_vec() } else { Vec::new() };
+        s.push(0xa8); // OP_SHA256
         push(&mut s, &self.hash);
         s.push(0x88); // OP_EQUALVERIFY
         push(&mut s, &self.claimer.serialize());
@@ -326,7 +329,7 @@ mod tests {
     fn a_claim_and_a_refund_sign_by_their_leaves() {
         let (ck, rk) = (SecretKey::from_slice(&[7; 32]).unwrap(), SecretKey::from_slice(&[9; 32]).unwrap());
         let secret = [5u8; 32];
-        let lock = Lock { hash: Sha256::digest(secret).into(), claimer: ck.x_only_public_key(SECP256K1).0, refunder: rk.x_only_public_key(SECP256K1).0, time: 1_794_000_000 };
+        let lock = Lock { hash: Sha256::digest(secret).into(), claimer: ck.x_only_public_key(SECP256K1).0, refunder: rk.x_only_public_key(SECP256K1).0, time: 1_794_000_000, sized: false };
         let p = &arcade_chain::params::DIGIBYTE_TEST;
         let d = Utxo { outpoint: OutPoint { txid: arcade_chain::Hash256([1; 32]), vout: 0 }, value: 0, script: lock.script() };
         let r = Utxo { outpoint: OutPoint { txid: arcade_chain::Hash256([1; 32]), vout: 1 }, value: RESERVE, script: lock.script() };

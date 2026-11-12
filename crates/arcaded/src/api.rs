@@ -504,7 +504,8 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         c @ ("ledger.book" | "ledger.trades" | "ledger.pairs") => crate::marketsvc::handle(node, c, &req),
         "swap.place" => crate::swaps::place(node, &req["give"], &req["get"]),
         "swap.book" => Ok(json!(crate::swaps::book(node))),
-        "swap.take" => crate::swaps::take(node, &s("node").ok_or("node required")?, &s("order").ok_or("order required")?),
+        // With the legs shown ({give, get}), only on exactly those terms.
+        "swap.take" => crate::swaps::take(node, &s("node").ok_or("node required")?, &s("order").ok_or("order required")?, req["give"].is_object().then_some(req)),
         "swap.list" => Ok(json!(crate::swaps::swaps(node))),
         "chains.offers" => Ok(json!(node.offers.lock().unwrap().iter().map(|(id, o)| json!({"node": id, "addr": o.addr, "at": o.at, "bk": o.bk, "cr": o.cr})).collect::<Vec<_>>())),
         "chains.peers" => {

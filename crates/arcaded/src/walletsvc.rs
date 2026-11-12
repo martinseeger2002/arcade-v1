@@ -236,7 +236,7 @@ pub fn route(node: &Node, path: &str, q: &serde_json::Map<String, Value>) -> (u1
     let qs = |k: &str| q.get(k).and_then(|v| v.as_str().map(String::from).or_else(|| v.as_u64().map(|n| n.to_string())));
     let qn = |k: &str, d: u64| q.get(k).and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(d);
     let missing = |e: &str| (404, json!({"error": e}).to_string());
-    let seg: Vec<&str> = path.trim_start_matches("/r/").split('/').collect();
+    let seg: Vec<&str> = path.strip_prefix("/r/").unwrap_or("").split('/').collect();
     let cc = c(node);
     match seg.as_slice() {
         ["wallet"] => (200, wallet(node).to_string()),

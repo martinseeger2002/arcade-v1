@@ -23,7 +23,7 @@ fn main() {
     let items: Vec<Vec<u8>> = claim.inputs.iter().flat_map(|i| i.witness.clone()).collect();
     for it in &items {
         let hash: [u8; 32] = Sha256::digest(it).into();
-        let lock = Htlc { hash, claimer: me.clone(), refunder: hex::decode(&a[9]).unwrap(), time: a[8].parse().unwrap() };
+        let lock = Htlc { hash, claimer: me.clone(), refunder: hex::decode(&a[9]).unwrap(), time: a[8].parse().unwrap(), sized: false };
         let outs_tx = db.tx_raw(pay, &op.txid).unwrap().map(|(r, _)| Tx::parse_with(&r, &pay.format).unwrap()).unwrap();
         if outs_tx.outputs[op.vout as usize].script_pubkey != lock.script() {
             continue;

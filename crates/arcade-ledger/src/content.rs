@@ -47,6 +47,26 @@ fn payload_of(db: &ChainDb, p: &ChainParams, txid: &str) -> Result<Vec<u8>, Stri
     }
 }
 
+/// What an inscription's first piece says of it, from that transaction's arcade payload (the head of its
+/// manifest, engine::manifest): (content length, SHA-256, content type). Enough to check bytes another arcade
+/// sends for it against the chain, the first piece being the transaction whose txid names the inscription.
+pub fn first_piece_head(payload: &[u8]) -> Result<(u64, [u8; 32], String), String> {
+    let d = payload.get(4..).ok_or("short payload")?;
+    let clen = u16::from_be_bytes([*d.get(16).ok_or("short chunk")?, d[17]]) as usize;
+    let body = d.get(18..18 + clen).ok_or("short chunk body")?;
+    let head = body.get(..37).ok_or("the inscription's first piece is too short to check")?;
+    let total = u32::from_be_bytes(head[..4].try_into().unwrap()) as u64;
+    let digest: [u8; 32] = head[4..36].try_into().unwrap();
+    let cl = head[36] as usize;
+    let ctype = String::from_utf8_lossy(body.get(37..37 + cl).ok_or("the inscription's content type is not in its first piece")?).into_owned();
+    Ok((total, digest, ctype))
+}
+
+/// The arcade payload of a stored transaction (for first_piece_head).
+pub fn payload_by_txid(db: &ChainDb, p: &ChainParams, txid: &str) -> Result<Vec<u8>, String> {
+    payload_of(db, p, txid)
+}
+
 pub fn content(db: &ChainDb, p: &ChainParams, id: &str) -> Result<Content, String> {
     let c = p.chain_no;
     let meta = inscription(db, c, id).ok_or("no such inscription")?;

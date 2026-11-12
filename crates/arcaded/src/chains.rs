@@ -419,11 +419,37 @@ fn apply_set(node: &Arc<Node>, key: &str, home: bool, run: Option<Arc<ChainRun>>
     Ok(())
 }
 
+/// Index sets waiting to be applied by an ord rebuild running in the background, by chain key: an index
+/// added while it runs joins the same rebuild (read from here, not from the set still in force, which
+/// would drop the first rider when the second is saved).
+static REBUILDING: Mutex<Vec<(String, Vec<String>)>> = Mutex::new(Vec::new());
+
+fn rebuilding(key: &str) -> Option<Vec<String>> {
+    REBUILDING.lock().unwrap().iter().find(|x| x.0 == key).map(|x| x.1.clone())
+}
+
 pub fn add_index(node: &Arc<Node>, key: &str, index: &str) -> Result<Value, String> {
     // Any capitalisation (DOGE, PEPtest) and the old mesh names map to the chain's key.
     let key = by_key(key).map(|p| p.key).unwrap_or(key);
     let p = by_key(key).ok_or_else(|| format!("unknown chain {key}"))?;
     let (home, cur, run) = current(node, key)?;
+    if let Some(pending) = rebuilding(key) {
+        // The ord index is being rebuilt for a rider just added: another rider joins that rebuild; anything
+        // else waits for it.
+        if !is_rider(index) {
+            return Err(format!("the ord index on {} is being rebuilt; add {index} when it's done", p.name));
+        }
+        if pending.iter().any(|i| i == index) {
+            return Err(format!("{index} is already on {key}"));
+        }
+        let mut want = pending;
+        want.push(index.into());
+        let set = normalize(p, &want, home)?;
+        if let Some(x) = REBUILDING.lock().unwrap().iter_mut().find(|x| x.0 == key) {
+            x.1 = set;
+        }
+        return Ok(json!({"adding": index, "chain": key, "rebuilding": "ord"}));
+    }
     if index != "addresses" && run.as_ref().is_some_and(|r| r.mode == "chain") {
         return Err("Blockchain-only storage keeps no protocol indexes".into());
     }
@@ -477,16 +503,36 @@ pub fn add_index(node: &Arc<Node>, key: &str, index: &str) -> Result<Value, Stri
     let n = node.clone();
     let key = key.to_string();
     let reply = json!({"adding": index, "chain": key, "rebuilding": "ord"});
+    REBUILDING.lock().unwrap().push((key.clone(), set));
     let label = format!("{index} index on {}", p.name);
     let mut tables = tables_of("ord");
     for rd in RIDERS {
         tables.extend(tables_of(rd));
     }
     std::thread::spawn(move || {
-        while n.chain.remove_index_batch(p.chain_no, "ord.v1", &tables, 20_000).map(|x| x > 0).unwrap_or(false) {}
-        match apply_set(&n, &key, home, run, set) {
-            Ok(()) => { let _ = n.app.event("chains", &format!("adding the {label}: rebuilding the ord index from block {}", ord_start(p).unwrap_or(0))); }
-            Err(e) => { let _ = n.app.event("chains", &format!("could not add the {label}: {e}")); }
+        // Riders added while this runs join the set in REBUILDING; it stays marked until the set put in force is
+        // the latest (a rider added during the apply is applied again, from empty rows), so no add reads a set
+        // that is about to change.
+        let mut first = true;
+        loop {
+            if !first {
+                n.chain.remove_indexer(p.chain_no, "ord.v1");
+            }
+            first = false;
+            while n.chain.remove_index_batch(p.chain_no, "ord.v1", &tables, 20_000).map(|x| x > 0).unwrap_or(false) {}
+            let set = REBUILDING.lock().unwrap().iter().find(|x| x.0 == key).map(|x| x.1.clone()).expect("this rebuild's set");
+            let r = apply_set(&n, &key, home, run.clone(), set.clone());
+            let mut g = REBUILDING.lock().unwrap();
+            let i = g.iter().position(|x| x.0 == key).expect("this rebuild's set");
+            if r.is_err() || g[i].1 == set {
+                g.remove(i);
+                drop(g);
+                match r {
+                    Ok(()) => { let _ = n.app.event("chains", &format!("adding the {label}: rebuilding the ord index from block {}", ord_start(p).unwrap_or(0))); }
+                    Err(e) => { let _ = n.app.event("chains", &format!("could not add the {label}: {e}")); }
+                }
+                return;
+            }
         }
     });
     Ok(reply)
@@ -499,6 +545,9 @@ pub fn remove_index(node: &Arc<Node>, key: &str, index: &str) -> Result<Value, S
     let key = by_key(key).map(|p| p.key).unwrap_or(key);
     let p = by_key(key).ok_or_else(|| format!("unknown chain {key}"))?;
     let (home, cur, run) = current(node, key)?;
+    if rebuilding(key).is_some() {
+        return Err(format!("the ord index on {} is being rebuilt; remove {index} when it's done", p.name));
+    }
     if home && index == "messages" {
         return Err("messaging lives on the home chain, so its Messages index stays".into());
     }

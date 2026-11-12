@@ -21,6 +21,8 @@ pub const SPEND_FEE: u64 = 1_000_000;
 /// The least a payout out of a lock may be (htlc.DUST).
 pub const DUST: u64 = 1_000_000;
 pub const NOT_FINAL: u32 = 0xffff_fffe;
+/// OP_SIZE 32 OP_EQUALVERIFY: the item on top is 32 bytes long.
+pub const SIZE_32: [u8; 4] = [0x82, 0x01, 0x20, 0x88];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Htlc {
@@ -28,6 +30,10 @@ pub struct Htlc {
     /// Compressed public keys (33 bytes).
     pub claimer: Vec<u8>,
     pub refunder: Vec<u8>,
+    /// The claim takes only a 32-byte secret (`OP_SIZE 32 OP_EQUALVERIFY` first in its branch). A swap's maker
+    /// locks this way: the taker makes the secret, and one of another length could open the maker's lock yet not
+    /// a lock that takes 32 bytes only (a DigiDollar lock's claim), stranding the maker's side.
+    pub sized: bool,
     pub time: u32,
 }
 
@@ -37,7 +43,11 @@ pub fn hash_of(secret: &[u8]) -> [u8; 32] {
 
 impl Htlc {
     pub fn redeem(&self) -> Vec<u8> {
-        let mut s = vec![0x63, 0xa8];
+        let mut s = vec![0x63];
+        if self.sized {
+            s.extend_from_slice(&SIZE_32);
+        }
+        s.push(0xa8);
         push(&mut s, &self.hash);
         s.push(0x88);
         push(&mut s, &self.claimer);
@@ -51,13 +61,20 @@ impl Htlc {
 
     /// Read a redeem script back (htlc.parse): None unless it is exactly this lock's form.
     pub fn parse(r: &[u8]) -> Option<Htlc> {
+        let sized = r.get(1..5) == Some(&SIZE_32[..]);
         let mut at = 0usize;
         let mut take = |n: usize| -> Option<&[u8]> {
             let b = r.get(at..at + n)?;
             at += n;
             Some(b)
         };
-        if take(2)? != [0x63, 0xa8] || take(1)? != [32] {
+        if take(1)? != [0x63] {
+            return None;
+        }
+        if sized {
+            take(4)?;
+        }
+        if take(1)? != [0xa8] || take(1)? != [32] {
             return None;
         }
         let hash: [u8; 32] = take(32)?.try_into().ok()?;
@@ -81,7 +98,7 @@ impl Htlc {
         if take(2)? != [0xac, 0x68] || at != r.len() {
             return None;
         }
-        Some(Htlc { hash, claimer, refunder, time: u32::try_from(time).ok()? })
+        Some(Htlc { hash, claimer, refunder, sized, time: u32::try_from(time).ok()? })
     }
 
     pub fn script(&self) -> Vec<u8> {
@@ -222,6 +239,7 @@ mod tests {
                 claimer: hex::decode(t["claimer"].as_str().unwrap()).unwrap(),
                 refunder: hex::decode(t["refunder"].as_str().unwrap()).unwrap(),
                 time: t["locktime"].as_u64().unwrap() as u32,
+                sized: false,
             };
             assert_eq!(hex::encode(lock.redeem()), t["redeem"].as_str().unwrap());
             assert_eq!(Htlc::parse(&lock.redeem()).as_ref(), Some(&lock));
@@ -241,5 +259,29 @@ mod tests {
             let tx = arcade_chain::Tx::parse_with(&claim, &p.format).unwrap();
             assert_eq!(secret_from_script_sig(&tx.inputs[0].script_sig, &lock.redeem()), Some(secret));
         }
+    }
+
+    /// A maker's lock takes a 32-byte secret only: OP_SIZE 32 OP_EQUALVERIFY opens its claim branch, it reads back
+    /// as itself, has its own address, and a claim of it still gives the secret up.
+    #[test]
+    fn a_sized_lock_checks_the_secret_is_32_bytes() {
+        let k = |b: u8| secp256k1::PublicKey::from_secret_key(secp256k1::SECP256K1, &SecretKey::from_slice(&[b; 32]).unwrap()).serialize().to_vec();
+        let plain = Htlc { hash: hash_of(&[5; 32]), claimer: k(1), refunder: k(2), time: 1_794_000_000, sized: false };
+        let sized = Htlc { sized: true, ..plain.clone() };
+        let (a, b) = (plain.redeem(), sized.redeem());
+        assert_eq!(&b[..6], &[0x63, 0x82, 0x01, 0x20, 0x88, 0xa8]);
+        assert_eq!(b.len(), a.len() + 4);
+        assert_eq!(&b[5..], &a[1..]);
+        assert_eq!(Htlc::parse(&a), Some(plain.clone()));
+        assert_eq!(Htlc::parse(&b), Some(sized.clone()));
+        assert_ne!(plain.script(), sized.script());
+        let mut sig = vec![9u8; 71];
+        sig.push(1);
+        let mut ss = Vec::new();
+        push_item(&mut ss, &sig);
+        push_item(&mut ss, &[5; 32]);
+        push_item(&mut ss, &[1]);
+        push_item(&mut ss, &b);
+        assert_eq!(secret_from_script_sig(&ss, &b), Some(vec![5; 32]));
     }
 }

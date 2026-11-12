@@ -123,11 +123,14 @@ pub const FORWARDABLE: &[&str] = &[
 ];
 
 /// Page routes another arcade may answer for an app on a chain it keeps: every public read
-/// under /r/ but the asking arcade's own (its wallet, its send requests).
+/// under /r/ but the asking arcade's own (its wallet, its send requests). The path must be in
+/// its one plain form: no empty, "." or ".." part, no query in it (the query comes apart), so
+/// a path like /r//r/wallet can't reach the wallet past this check.
 fn page_route_ok(path: &str) -> bool {
-    let rest = path.strip_prefix("/r/").unwrap_or("");
-    let first = rest.split(['/', '?']).next().unwrap_or("");
-    !rest.is_empty() && !matches!(first, "wallet" | "send") && !rest.contains("..")
+    let Some(rest) = path.strip_prefix("/r/") else { return false };
+    let parts: Vec<&str> = rest.split('/').collect();
+    let plain = parts.iter().all(|p| !p.is_empty() && *p != "." && *p != ".." && !p.contains(['?', '#', '\\', '%']));
+    plain && !matches!(parts[0], "wallet" | "send" | "r")
 }
 
 /// Mesh answers kept a short while: the Explorer asks the same things again and again
@@ -1354,6 +1357,12 @@ fn only_public_page_reads_are_answered_for_another_arcade() {
     assert!(!page_route_ok("/r/"));
     assert!(!page_route_ok("/content/abc"));
     assert!(!page_route_ok("/r/../x"));
+    assert!(!page_route_ok("/r//r/wallet"), "a doubled prefix");
+    assert!(!page_route_ok("/r//r/send/abc"));
+    assert!(!page_route_ok("/r/r/wallet"));
+    assert!(!page_route_ok("/r/inscription//7063"));
+    assert!(!page_route_ok("/r/%77allet"));
+    assert!(!page_route_ok("/r/wallet?x=1"));
 }
 
 #[cfg(test)]

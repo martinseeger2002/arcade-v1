@@ -94,7 +94,18 @@ pub fn content(node: &Node, p: &'static ChainParams, id: &str) -> Result<std::sy
             return Err("the bytes another arcade sent do not match their hash".into());
         }
     }
-    let item = std::sync::Arc::new((got["content_type"].as_str().unwrap_or("").to_string(), sha, bytes));
+    // The hash above is the sending arcade's own word. The inscription's first transaction (its id: a txid can't be
+    // forged) holds the real hash, length and type: the bytes must be those, or another arcade could serve its own
+    // page under an app's id.
+    let itx = got["txid"].as_str().unwrap_or("").to_lowercase();
+    if id.len() == 64 && itx != id {
+        return Err("the arcade that keeps it answered with another inscription".into());
+    }
+    let (total, digest, ctype) = first_chunk(node, p, &itx)?;
+    if bytes.len() as u64 != total || hex::encode(digest) != sha {
+        return Err("the bytes another arcade sent are not this inscription's".into());
+    }
+    let item = std::sync::Arc::new((ctype, sha, bytes));
     let mut k = KEPT.lock().unwrap();
     // Kept under both names a page may use (its txid and what it asked by).
     let txid = got["txid"].as_str().unwrap_or("").to_lowercase();
@@ -105,6 +116,35 @@ pub fn content(node: &Node, p: &'static ChainParams, id: &str) -> Result<std::sy
         k.remove(0);
     }
     Ok(item)
+}
+
+/// A transaction by txid: this arcade's copy, else a lender's (borrow::raw_tx checks it has that txid).
+fn tx_by_id(node: &Node, p: &'static ChainParams, txid: &arcade_chain::Hash256) -> Result<arcade_chain::Tx, String> {
+    if let Ok(Some((raw, _))) = node.chain.tx_raw(p, txid) {
+        let t = arcade_chain::Tx::parse_with(&raw, &p.format).map_err(|e| e.to_string())?;
+        if t.txid == *txid {
+            return Ok(t);
+        }
+    }
+    crate::borrow::raw_tx(node, p, txid)
+}
+
+/// What an inscription's first transaction says of it (the head of its manifest, engine::manifest):
+/// (content length, SHA-256, content type). Read from transactions checked against their txids.
+pub fn first_chunk(node: &Node, p: &'static ChainParams, itx: &str) -> Result<(u64, [u8; 32], String), String> {
+    let h = arcade_chain::Hash256::from_hex(itx).map_err(|_| "no inscription txid to check the bytes against".to_string())?;
+    let tx = tx_by_id(node, p, &h)?;
+    let mut prev = Vec::new();
+    for i in &tx.inputs {
+        let pt = tx_by_id(node, p, &i.prevout.txid)?;
+        let o = pt.outputs.get(i.prevout.vout as usize).ok_or("bad prevout")?;
+        prev.push(arcade_ledger::extract::Prevout { value: o.value, script: o.script_pubkey.clone() });
+    }
+    let payload = match arcade_ledger::extract::extract(&tx, &prev, p) {
+        Some(Ok(a)) => a.payload,
+        _ => return Err("the inscription's transaction is not a readable arcade transaction".into()),
+    };
+    arcade_ledger::content::first_piece_head(&payload)
 }
 
 /// A page read (GET /r/...) on chain `p`: this arcade's own when it keeps the chain's ledger,

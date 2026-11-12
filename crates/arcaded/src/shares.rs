@@ -859,9 +859,22 @@ mod clash_tests {
     #[test]
     fn a_holder_still_syncing_is_asked_only_when_nobody_is_caught_up() {
         let v = vec![("a".to_string(), 1_565_654), ("b".to_string(), 1_565_000), ("c".to_string(), 134_000)];
-        assert_eq!(caught_up(v).iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(caught_up(v, None).iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["a", "b"]);
         let alone = vec![("c".to_string(), 134_000)];
-        assert_eq!(caught_up(alone).len(), 1);
+        assert_eq!(caught_up(alone, None).len(), 1);
+    }
+    #[test]
+    fn one_holder_claiming_a_far_height_cant_push_the_others_out() {
+        let names = |v: Vec<(String, u64)>| v.into_iter().map(|x| x.0).collect::<Vec<_>>();
+        let v = || vec![("liar".to_string(), 99_000_000), ("a".to_string(), 1_565_654), ("b".to_string(), 1_565_000)];
+        // Nothing of our own to go by: the highest a second holder backs is the bar.
+        assert_eq!(names(caught_up(v(), None)), ["liar", "a", "b"]);
+        // Our own tip: claims are capped there, so the liar ranks with the honest ones, not above.
+        let got = caught_up(v(), Some(1_565_650));
+        assert_eq!(got.len(), 3);
+        assert!(got.iter().all(|x| x.1 <= 1_565_660));
+        // Two holders only, one lying: both still asked.
+        assert_eq!(caught_up(vec![("liar".to_string(), 99_000_000), ("a".to_string(), 1_565_654)], None).len(), 2);
     }
     #[test]
     fn simultaneous_joiners_spread_out() {
@@ -902,15 +915,32 @@ pub fn index_holders(node: &Node, net: &str, ix: &str) -> Vec<(String, u64)> {
         })
         .collect();
     v.sort_by(|a, b| b.1.cmp(&a.1));
-    caught_up(v)
+    let own = arcade_chain::params::by_net(net).and_then(|p| node.chain.tip(p.chain_no).ok().flatten()).map(|t| t.height as u64);
+    caught_up(v, own)
 }
 
 /// How far behind the highest holder an arcade may be and still answer for a chain.
 pub const HOLDER_LAG: u64 = 2_000;
 
+/// How far past this arcade's own tip of a chain a holder's claimed height is believed.
+const TIP_SLACK: u64 = 10;
+
 /// Holders still syncing (far behind the highest) answer from a part of the chain: an address's
 /// tokens or inscriptions from them would be wrong. They are asked only when nobody is caught up.
-fn caught_up(v: Vec<(String, u64)>) -> Vec<(String, u64)> {
+///
+/// A height is only what a holder says, so no one holder's word sets the bar: each is capped at
+/// this arcade's own tip of the chain (`own`, plus a little) when it has one, else at the highest
+/// height a second holder backs. A holder claiming a height far ahead can't push the others out
+/// and be the only one asked (and its claim doesn't put it first either).
+fn caught_up(mut v: Vec<(String, u64)>, own: Option<u64>) -> Vec<(String, u64)> {
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    let cap = match own.filter(|t| *t > 0) {
+        Some(t) => t + TIP_SLACK,
+        None => v.get(1).or(v.first()).map(|x| x.1).unwrap_or(0),
+    };
+    for x in v.iter_mut() {
+        x.1 = x.1.min(cap);
+    }
     let best = v.iter().map(|x| x.1).max().unwrap_or(0);
     let near: Vec<(String, u64)> = v.iter().filter(|x| x.1 + HOLDER_LAG >= best).cloned().collect();
     if near.is_empty() { v } else { near }

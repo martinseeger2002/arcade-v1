@@ -48,7 +48,7 @@ fn main() {
             // A refund proof needs its time already past (the chain's median time must exceed it); a claim one
             // gives the claim hours.
             let time = if refund { now - 4 * 3600 } else { now + 8 * 3600 };
-            let lock = Lock { hash: Sha256::digest(secret).into(), claimer: me, refunder: me, time };
+            let lock = Lock { hash: Sha256::digest(secret).into(), claimer: me, refunder: me, time, sized: false };
             let w = call(sock, json!({"cmd": "dd.wallet", "chain": "dgbtest"}));
             let held: Vec<Held> = w["coins"].as_array().unwrap().iter().map(|c| Held {
                 coin: Utxo { outpoint: OutPoint { txid: Hash256::from_hex(c["txid"].as_str().unwrap()).unwrap(), vout: c["vout"].as_u64().unwrap() as u32 }, value: 0, script: own_dd.clone() },
@@ -73,7 +73,7 @@ fn main() {
         "spend" => {
             let st: Value = serde_json::from_str(&std::fs::read_to_string(state_path).unwrap()).unwrap();
             let secret: [u8; 32] = hex::decode(st["secret"].as_str().unwrap()).unwrap().try_into().unwrap();
-            let lock = Lock { hash: Sha256::digest(secret).into(), claimer: me, refunder: me, time: st["time"].as_u64().unwrap() as u32 };
+            let lock = Lock { hash: Sha256::digest(secret).into(), claimer: me, refunder: me, time: st["time"].as_u64().unwrap() as u32, sized: false };
             let txid = Hash256::from_hex(st["lock_tx"].as_str().unwrap()).unwrap();
             // The lock's two outputs: the dollars (vout 0) and the reserve (the P2TR output with value).
             let raw = call(sock, json!({"cmd": "explorer.tx", "chain": "dgbtest", "txid": st["lock_tx"]}));
