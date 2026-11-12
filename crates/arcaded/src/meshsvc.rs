@@ -585,6 +585,9 @@ fn serve_loop(
                 #[cfg(feature = "oldimport")]
                 crate::lxfetch::on_ix(&link.peer_id, &f.head);
                 if let Some(t) = f.head["nets"].get(node.params.net) {
+                    if let Some(h) = t["h"].as_u64() {
+                        refresh_bk(node, addr, h);
+                    }
                     node.mesh_tips.lock().unwrap().insert(
                         addr.to_string(),
                         MeshTip {
@@ -626,6 +629,21 @@ fn serve_loop(
                 crate::coreshare::handle(node, link, cr_reqs, &f)?
             }
             _ => {} // unknown kinds are ignored, as the existing arcade does
+        }
+    }
+}
+
+/// A linked arcade's home-chain height for mesh_bootstrap, kept as fresh as its tip frames: `bk_peers` was set from
+/// the link's opening "hi" only, so an old link kept reporting an old height, mesh_bootstrap skipped it as not ahead,
+/// and an arcade with no coin peer stopped taking blocks from the mesh (GX10 + JB20B 2026-11-12, an hour behind
+/// until restarted). Keyed as "hi" keys it: the wss address itself, or the host with the port it announced.
+fn refresh_bk(node: &Node, addr: &str, height: u64) {
+    let host = addr.rsplit_once(':').map(|x| x.0).unwrap_or(addr);
+    let mut bk = node.bk_peers.lock().unwrap();
+    for (dial, h) in bk.iter_mut() {
+        let same = if addr.starts_with("wss://") { dial == addr } else { dial.rsplit_once(':').map(|x| x.0) == Some(host) };
+        if same {
+            *h = height;
         }
     }
 }
@@ -837,5 +855,25 @@ mod tests {
             }
         }
         assert_eq!(open, MAX_HANDSHAKES_PER_IP);
+    }
+}
+
+#[cfg(test)]
+mod bk_tests {
+    use super::refresh_bk;
+    use crate::sitesvc::tests::setup;
+
+    #[test]
+    fn tip_frames_keep_mesh_heights_fresh() {
+        let t = setup();
+        t.node.bk_peers.lock().unwrap().insert("203.0.113.5:8421".into(), 10);
+        t.node.bk_peers.lock().unwrap().insert("wss://relay.example/mesh".into(), 10);
+        t.node.bk_peers.lock().unwrap().insert("198.51.100.7:8421".into(), 10);
+        refresh_bk(&t.node, "203.0.113.5:40112", 25);
+        refresh_bk(&t.node, "wss://relay.example/mesh", 30);
+        let bk = t.node.bk_peers.lock().unwrap().clone();
+        assert_eq!(bk["203.0.113.5:8421"], 25, "the same host, its own announced port");
+        assert_eq!(bk["wss://relay.example/mesh"], 30);
+        assert_eq!(bk["198.51.100.7:8421"], 10, "another arcade's untouched");
     }
 }

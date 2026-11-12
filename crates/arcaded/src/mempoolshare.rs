@@ -73,15 +73,55 @@ pub fn add(node: &Node, p: &ChainParams, tx: &Tx) -> bool {
 
 /// An `mp` frame from a link.
 pub fn on_frame(node: &Node, head: &Value) {
-    let Some(p) = head["net"].as_str().and_then(by_net) else { return };
+    // The home chain as this arcade runs it (its own parameters), any other by its network name.
+    let net = head["net"].as_str().unwrap_or("");
+    let Some(p) = (if net == node.params.net { Some(node.params) } else { by_net(net) }) else { return };
     if !keeps(node, p) {
         return;
     }
     let Some(raw) = head["tx"].as_str().filter(|h| h.len() <= MAX_TX * 2).and_then(|h| hex::decode(h).ok()) else { return };
     let Ok(tx) = Tx::parse_with(&raw, &p.format) else { return };
-    if check(node, p, &tx).is_ok() {
-        add(node, p, &tx);
+    if check(node, p, &tx).is_ok() && add(node, p, &tx) {
+        to_network(node, p, raw);
     }
+}
+
+/// Home-chain transactions from the mesh waiting for the coin peer, at most (the outbox is sent and
+/// emptied each sync round; with no coin peer for a long while, the oldest go first).
+const OUTBOX_FROM_MESH: usize = 500;
+/// Installed-chain transactions from the mesh being sent to that chain's own peers at once, at most.
+const SENDING_FROM_MESH: usize = 8;
+static SENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A checked transaction new to this arcade, from the mesh, also goes to the coin's own network
+/// (Martin 2026-11-12). Pooled and passed between arcades only, it reached no miner: an arcade the
+/// coin's nodes refuse (banned, a network that drops the coin's port) or a website's visitor sent a
+/// transaction that every arcade held and none handed on. The coin's nodes drop one they have.
+fn to_network(node: &Node, p: &'static ChainParams, raw: Vec<u8>) {
+    use std::sync::atomic::Ordering;
+    if p.chain_no == node.params.chain_no {
+        let mut out = node.tx_outbox.lock().unwrap();
+        if out.len() >= OUTBOX_FROM_MESH {
+            out.remove(0);
+        }
+        out.push(raw);
+        return;
+    }
+    if SENDING.fetch_add(1, Ordering::Relaxed) >= SENDING_FROM_MESH {
+        SENDING.fetch_sub(1, Ordering::Relaxed);
+        return;
+    }
+    // As pass_on sends an installed chain's: straight to a few of its own peers.
+    let peers: Vec<String> = node.coin_candidates(p).into_iter().take(4).collect();
+    std::thread::spawn(move || {
+        for a in peers {
+            if let Ok(mut peer) = arcade_chain::p2p::Peer::connect(p, &a, std::time::Duration::from_secs(10)) {
+                let _ = peer.send_tx(&raw);
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+        SENDING.fetch_sub(1, Ordering::Relaxed);
+    });
 }
 
 /// Check every pooled transaction again, oldest first, as a new one is checked: one the
@@ -335,6 +375,21 @@ pub(crate) mod tests {
         // The other coin is unrelated: still fine.
         let other = sign_keyhash(t.p, 1, &coins[..1], &[TxOutSpec { value: 1000, script: p2pkh(6) }], &key(), 0).unwrap();
         assert_eq!(check(&t.node, t.p, &other), Ok(()));
+    }
+
+    #[test]
+    fn a_transaction_from_the_mesh_goes_to_the_coin_network_once() {
+        let (t, coins) = funded();
+        let good = sign_keyhash(t.p, 1, &coins, &[TxOutSpec { value: 2800, script: p2pkh(5) }], &key(), 0).unwrap();
+        let frame = json!({"t": "mp", "net": t.p.net, "tx": hex::encode(&good.raw)});
+        on_frame(&t.node, &frame);
+        assert_eq!(t.node.tx_outbox.lock().unwrap().clone(), vec![good.raw.clone()], "pooled and handed to the coin peer");
+        on_frame(&t.node, &frame);
+        assert_eq!(t.node.tx_outbox.lock().unwrap().len(), 1, "heard again: not sent again");
+        // One that fails the checks goes nowhere.
+        let bad = sign_keyhash(t.p, 1, &coins, &[TxOutSpec { value: 2800, script: p2pkh(6) }], &key(), 0).unwrap();
+        on_frame(&t.node, &json!({"t": "mp", "net": t.p.net, "tx": hex::encode(&bad.raw)}));
+        assert_eq!(t.node.tx_outbox.lock().unwrap().len(), 1, "a double spend of a pooled coin is not sent");
     }
 
     #[test]
