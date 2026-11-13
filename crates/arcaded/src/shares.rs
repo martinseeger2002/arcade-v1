@@ -606,6 +606,9 @@ pub fn ask_holders(node: &Node, p: &ChainParams, kind: &str, unit: u64, what: &s
 /// [`ask_holders`] with more fields in the question (a page: `offset`, `n`). An arcade from
 /// before a field was added leaves it out of its answer.
 pub fn ask_holders_with(node: &Node, p: &ChainParams, kind: &str, unit: u64, what: &str, arg: &str, more: Value) -> Result<(Value, String), String> {
+    if crate::handlegate::is_gated_question(what, arg) {
+        crate::handlegate::check_local(node)?;
+    }
     let mut last = format!("no arcade on the mesh holds that part of {} right now", p.name);
     let mut q = json!({"net": p.net, "what": what, "arg": arg});
     if let Value::Object(m) = more {
@@ -631,6 +634,10 @@ pub fn answer(node: &Node, link: &mut Link, h: &Value) -> Result<(), LinkError> 
     let res: Result<Value, String> = (|| {
         let p = arcade_chain::params::by_net(h["net"].as_str().unwrap_or("")).and_then(|q| node.chain_params(q.key)).ok_or("chain not here")?;
         let arg = h["arg"].as_str().unwrap_or("");
+        // Index data only for arcades whose operator has a proven @handle (handlegate.rs).
+        if crate::handlegate::is_gated_question(h["what"].as_str().unwrap_or(""), arg) && crate::handlegate::proven(&link.peer_id).is_none() {
+            return Err(crate::handlegate::NEED.to_string());
+        }
         match h["what"].as_str().unwrap_or("") {
             "insc" => {
                 let v = arcade_ledger::ord::inscription(&node.chain, p, arg).ok_or("not held here")?;
@@ -951,6 +958,9 @@ fn caught_up(mut v: Vec<(String, u64)>, own: Option<u64>) -> Vec<(String, u64)> 
 /// Ask an Explorer question of the arcades holding what it needs, until one answers:
 /// (answer, arcade's node id).
 pub fn ask_explorer(node: &Node, p: &ChainParams, ix: &str, cmd: &str, req: &Value) -> Result<(Value, String), String> {
+    if crate::handlegate::is_gated_read(cmd) {
+        crate::handlegate::check_local(node)?;
+    }
     let mut last = format!("no arcade on the mesh offers {}{} right now", if ix.is_empty() { String::new() } else { format!("the {ix} index of ") }, p.name);
     // None of them linked: ask for introductions to them (next round), so the next question
     // goes over a link (dialing a home arcade's public address often fails from its own network).
