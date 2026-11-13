@@ -8,6 +8,7 @@ pub mod copyout;
 pub mod db;
 pub mod indexer;
 pub mod journal;
+pub mod rules;
 pub mod schema;
 pub mod split;
 pub mod sync;

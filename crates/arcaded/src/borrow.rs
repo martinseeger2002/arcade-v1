@@ -509,7 +509,7 @@ fn check_block(p: &ChainParams, raw: &[u8], want: &Hash256, parent: &Header, hei
     if b.id != *want || p.block_id(&b.header) != *want {
         return Err(format!("block {want}: the lender sent another block"));
     }
-    b.check().map_err(|x| format!("block {want}: {x}"))?;
+    arcade_chain::params::check_block_body(p, &b).map_err(|x| format!("block {want}: {x}"))?;
     check_context(p, &b.header, height, below, arcade_app::now()).map_err(|x| format!("block {want}: {x}"))?;
     match check_header(p, &b.header, parent, height).map_err(|x| format!("block {want}: {x}"))? {
         PowCheck::AuxPow => {

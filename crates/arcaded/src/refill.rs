@@ -14,7 +14,7 @@
 
 use crate::node::Node;
 use arcade_chain::params::ChainParams;
-use arcade_chain::{Block, Format, Hash256};
+use arcade_chain::{Block, Hash256};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -92,7 +92,7 @@ pub fn independent(who: &[(String, String)]) -> Vec<String> {
 /// The blocks for `want` that at least `need` independent sources sent byte for byte, each
 /// block checked (its id is the one wanted, its merkle root its transactions', and `check`).
 /// Returns them with the node ids that agreed.
-pub fn agree(format: &Format, want: &[Hash256], answers: &[Answer], need: usize, check: &dyn Fn(usize, &Block) -> Result<(), String>) -> Result<(Vec<Block>, Vec<String>), String> {
+pub fn agree(params: &ChainParams, want: &[Hash256], answers: &[Answer], need: usize, check: &dyn Fn(usize, &Block) -> Result<(), String>) -> Result<(Vec<Block>, Vec<String>), String> {
     let mut groups: Vec<(&Vec<Vec<u8>>, Vec<Block>, Vec<(String, String)>)> = Vec::new();
     let mut refused: Vec<String> = Vec::new();
     'answers: for a in answers {
@@ -103,13 +103,13 @@ pub fn agree(format: &Format, want: &[Hash256], answers: &[Answer], need: usize,
         }
         let mut blocks = Vec::with_capacity(want.len());
         for (i, (raw, w)) in a.raws.iter().zip(want).enumerate() {
-            let why = match Block::parse_with(raw, format) {
+            let why = match Block::parse_with(raw, &params.format) {
                 Err(e) => Some(format!("a block that doesn't parse ({e})")),
                 Ok(b) if b.id != *w => Some(format!("another block for {w}")),
                 // The whole of Block::check: the merkle root, no repeated transactions, the witness
                 // commitment (txids don't cover witness data, so the stored txids alone can't tell
                 // a forged witness) and the rules every block keeps.
-                Ok(b) if b.check().is_err() => Some(format!("block {w} that fails its checks ({})", b.check().unwrap_err())),
+                Ok(b) if arcade_chain::params::check_block_body(params, &b).is_err() => Some(format!("block {w} that fails its checks ({})", b.check().unwrap_err())),
                 Ok(b) => match check(i, &b) {
                     Err(e) => Some(format!("block {w} that doesn't match what is stored here ({e})")),
                     Ok(()) => {
@@ -197,7 +197,7 @@ fn gather(node: &Node, p: &'static ChainParams, want: &[Hash256], nums: &[u32], 
                 nodes.insert(s.node.clone());
                 ips.insert(s.ip.clone());
                 answers.push(Answer { node: s.node.clone(), ip: s.ip.clone(), raws });
-                if let Ok(r) = agree(&p.format, want, &answers, need, &check) {
+                if let Ok(r) = agree(p, want, &answers, need, &check) {
                     return Ok(r);
                 }
             }
@@ -207,7 +207,7 @@ fn gather(node: &Node, p: &'static ChainParams, want: &[Hash256], nums: &[u32], 
     if answers.is_empty() {
         return Err(format!("no source answered (last: {last_err})"));
     }
-    agree(&p.format, want, &answers, need, &check)
+    agree(p, want, &answers, need, &check)
 }
 
 #[derive(Default)]
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn two_independent_sources_that_agree_are_taken() {
         let (raws, want) = batch();
-        let (blocks, who) = agree(&PEPECOIN.format, &want, &[ans("aaaa", "1.1.1.1", raws.clone()), ans("bbbb", "2.2.2.2", raws.clone())], 2, &ok).unwrap();
+        let (blocks, who) = agree(&PEPECOIN, &want, &[ans("aaaa", "1.1.1.1", raws.clone()), ans("bbbb", "2.2.2.2", raws.clone())], 2, &ok).unwrap();
         assert_eq!(blocks.iter().map(|b| b.id).collect::<Vec<_>>(), want);
         assert_eq!(blocks[1].encode(), raws[1]);
         assert_eq!(who, vec!["aaaa".to_string(), "bbbb".to_string()]);
@@ -441,22 +441,22 @@ mod tests {
     #[test]
     fn a_single_source_is_refused() {
         let (raws, want) = batch();
-        let e = agree(&PEPECOIN.format, &want, &[ans("aaaa", "1.1.1.1", raws.clone())], 2, &ok).unwrap_err();
+        let e = agree(&PEPECOIN, &want, &[ans("aaaa", "1.1.1.1", raws.clone())], 2, &ok).unwrap_err();
         assert!(e.contains("only 1 independent source agreed"), "{e}");
         // Asked for one source only, one is enough.
-        assert!(agree(&PEPECOIN.format, &want, &[ans("aaaa", "1.1.1.1", raws)], 1, &ok).is_ok());
+        assert!(agree(&PEPECOIN, &want, &[ans("aaaa", "1.1.1.1", raws)], 1, &ok).is_ok());
     }
 
     #[test]
     fn the_same_ip_or_the_same_node_counts_once() {
         let (raws, want) = batch();
         let same_ip = [ans("aaaa", "1.1.1.1", raws.clone()), ans("bbbb", "1.1.1.1", raws.clone())];
-        assert!(agree(&PEPECOIN.format, &want, &same_ip, 2, &ok).unwrap_err().contains("only 1"));
+        assert!(agree(&PEPECOIN, &want, &same_ip, 2, &ok).unwrap_err().contains("only 1"));
         let same_node = [ans("aaaa", "1.1.1.1", raws.clone()), ans("aaaa", "2.2.2.2", raws.clone())];
-        assert!(agree(&PEPECOIN.format, &want, &same_node, 2, &ok).unwrap_err().contains("only 1"));
+        assert!(agree(&PEPECOIN, &want, &same_node, 2, &ok).unwrap_err().contains("only 1"));
         // A third, independent one makes two.
         let three = [ans("aaaa", "1.1.1.1", raws.clone()), ans("bbbb", "1.1.1.1", raws.clone()), ans("cccc", "3.3.3.3", raws)];
-        assert_eq!(agree(&PEPECOIN.format, &want, &three, 2, &ok).unwrap().1, vec!["aaaa".to_string(), "cccc".to_string()]);
+        assert_eq!(agree(&PEPECOIN, &want, &three, 2, &ok).unwrap().1, vec!["aaaa".to_string(), "cccc".to_string()]);
     }
 
     #[test]
@@ -469,10 +469,10 @@ mod tests {
         assert_eq!(id(&bad), want[1], "the header, and so the id, is the wanted one");
         let mut forged = raws.clone();
         forged[1] = bad;
-        let e = agree(&PEPECOIN.format, &want, &[ans("aaaa", "1.1.1.1", raws.clone()), ans("bbbb", "2.2.2.2", forged.clone())], 2, &ok).unwrap_err();
+        let e = agree(&PEPECOIN, &want, &[ans("aaaa", "1.1.1.1", raws.clone()), ans("bbbb", "2.2.2.2", forged.clone())], 2, &ok).unwrap_err();
         assert!(e.contains("merkle root mismatch") && e.contains("only 1"), "{e}");
         // Two bad ones agreeing byte for byte still count for nothing.
-        let e = agree(&PEPECOIN.format, &want, &[ans("aaaa", "1.1.1.1", forged.clone()), ans("bbbb", "2.2.2.2", forged)], 2, &ok).unwrap_err();
+        let e = agree(&PEPECOIN, &want, &[ans("aaaa", "1.1.1.1", forged.clone()), ans("bbbb", "2.2.2.2", forged)], 2, &ok).unwrap_err();
         assert!(e.contains("no source sent blocks that check out"), "{e}");
     }
 
@@ -482,15 +482,15 @@ mod tests {
         // Another block in place of the second: a different id.
         let mut other = raws.clone();
         other[1] = good(id(&raws[0]), 99);
-        let e = agree(&PEPECOIN.format, &want, &[ans("aaaa", "1.1.1.1", raws.clone()), ans("bbbb", "2.2.2.2", other.clone())], 2, &ok).unwrap_err();
+        let e = agree(&PEPECOIN, &want, &[ans("aaaa", "1.1.1.1", raws.clone()), ans("bbbb", "2.2.2.2", other.clone())], 2, &ok).unwrap_err();
         assert!(e.contains("another block") && e.contains("only 1"), "{e}");
         // With two more that agree, the batch goes through without it.
         let four = [ans("aaaa", "1.1.1.1", raws.clone()), ans("bbbb", "2.2.2.2", other), ans("cccc", "3.3.3.3", raws.clone())];
-        assert_eq!(agree(&PEPECOIN.format, &want, &four, 2, &ok).unwrap().1.len(), 2);
+        assert_eq!(agree(&PEPECOIN, &want, &four, 2, &ok).unwrap().1.len(), 2);
         // Too few blocks, or garbage, isn't counted either.
         let short_ = ans("dddd", "4.4.4.4", vec![raws[0].clone()]);
         let junk = ans("eeee", "5.5.5.5", vec![vec![1, 2, 3], raws[1].clone()]);
-        let e = agree(&PEPECOIN.format, &want, &[ans("aaaa", "1.1.1.1", raws.clone()), short_, junk], 2, &ok).unwrap_err();
+        let e = agree(&PEPECOIN, &want, &[ans("aaaa", "1.1.1.1", raws.clone()), short_, junk], 2, &ok).unwrap_err();
         assert!(e.contains("sent 1 of 2 blocks") && e.contains("doesn't parse"), "{e}");
     }
 
@@ -499,7 +499,7 @@ mod tests {
         let (raws, want) = batch();
         // The stored txids (ChainDb::restore_check) refuse the second block.
         let stored = |i: usize, _: &Block| if i == 1 { Err("transaction does not match the stored txid".to_string()) } else { Ok(()) };
-        let e = agree(&PEPECOIN.format, &want, &[ans("aaaa", "1.1.1.1", raws.clone()), ans("bbbb", "2.2.2.2", raws)], 2, &stored).unwrap_err();
+        let e = agree(&PEPECOIN, &want, &[ans("aaaa", "1.1.1.1", raws.clone()), ans("bbbb", "2.2.2.2", raws)], 2, &stored).unwrap_err();
         assert!(e.contains("doesn't match what is stored here"), "{e}");
     }
 

@@ -964,7 +964,7 @@ fn txs_pending_cleared_when_addresses_removed() {
 fn coin_rules_refuse_what_core_refuses() {
     let f = fixture();
     let mut p = f.p.clone();
-    p.value_rules = Some(arcade_chain::params::ValueRules { max_money: 1_000_000, subsidy: |_, _| 50, maturity: |_| 2 });
+    p.value_rules = Some(arcade_chain::params::ValueRules { max_money: 1_000_000, subsidy: |_, _| 50, maturity: |_| 2, enforced: true });
     let p: &'static ChainParams = Box::leak(Box::new(p));
     let invalid = |r: arcade_store::Result<Tip>, want: &str| match r {
         Err(arcade_store::StoreError::InvalidBlock { why, .. }) => assert!(why.contains(want), "{why}"),
