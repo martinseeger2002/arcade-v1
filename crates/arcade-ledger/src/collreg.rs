@@ -33,6 +33,7 @@
 //!   coll.v1.item   C|root number|item n  -> JSON     [id, [trait value or ""]]
 //!   coll.v1.of     C|iid                 -> root number u64 | item number u64
 //!   coll.v1.state  C|"seq"               -> u64      the next json-group row of ord.v1.types to read
+//!   (read [`BATCH`] rows a pass; each pass writes its position, so a restart resumes there)
 //!   coll.v1.state  C|"last"              -> number u64 | iid   the last row read (the reorg check)
 //!
 //! A root is known by its number here and by its txid to people (`<txid>i0`).
@@ -53,6 +54,11 @@ pub const PART_P: &str = "arcade-collection-items";
 /// Confirmations an inscription needs before it is read (1: in a block).
 pub const CONFIRMATIONS: u32 = 1;
 pub const MAX_SUPPLY: u64 = 1_000_000;
+/// JSON-group rows of `ord.v1.types` read in one [`scan`]: a pass reads at most this many from the
+/// saved position, writes what it read, and says whether more are waiting. On a chain with
+/// millions of JSON inscriptions (PRC-20 mints are JSON) a pass that read them all would run for
+/// hours before writing anything, and chase the ord index's newest rows while it builds.
+pub const BATCH: usize = 2_000;
 /// Items per page of a collection.
 pub const PAGE: usize = 48;
 /// The pseudo-collection of a chain's first thousand inscriptions.
@@ -277,6 +283,21 @@ pub struct Pass {
     pub no_types: bool,
     /// A reorg changed what was read: the tables were cleared and are read again.
     pub restarted: bool,
+    /// JSON-group rows read so far (the saved reading position), after this pass.
+    pub seq: u64,
+    /// JSON-group rows the ord index has now: what there is to read.
+    pub of: u64,
+    /// Block height of the last row read (0 before the first).
+    pub height: u64,
+    /// The pass stopped at [`BATCH`] rows with more to read: call again soon.
+    pub more: bool,
+}
+
+impl Pass {
+    /// Whether the pass changed anything (new candidates, settled roots or a restart).
+    pub fn changed(&self) -> bool {
+        self.read > 0 || self.settled > 0 || self.restarted
+    }
 }
 
 /// The address a root landed at when it was inscribed: output 0 of its completing transaction.
@@ -291,11 +312,21 @@ fn publisher(db: &ChainDb, p: &ChainParams, rec: &Value) -> String {
 /// One pass on chain `p`: read the collection-type inscriptions with [`CONFIRMATIONS`], then settle
 /// new roots and the ones waiting. `tip` is the chain's height.
 pub fn scan(db: &ChainDb, p: &ChainParams, tip: u32) -> StoreResult<Pass> {
+    scan_batch(db, p, tip, BATCH)
+}
+
+/// [`scan`] reading at most `batch` JSON-group rows (tests use small ones).
+pub fn scan_batch(db: &ChainDb, p: &ChainParams, tip: u32, batch: usize) -> StoreResult<Pass> {
     let c = p.chain_no;
     let mut pass = Pass::default();
     let store = db.wstore(c)?;
+    // The tables once: registering one is a write transaction, which would queue behind the
+    // ord index's writes on every pass.
+    let have = store.addon_tables()?;
     for t in table_defs() {
-        store.add_table(t)?;
+        if !have.iter().any(|h| h == t.name) {
+            store.add_table(t)?;
+        }
     }
     // 1. Every candidate read before is still the inscription at its number.
     let cands = store.read(|r| r.scan_prefix(CAND, &k(c).done()))?;
@@ -306,10 +337,11 @@ pub fn scan(db: &ChainDb, p: &ChainParams, tip: u32) -> StoreResult<Pass> {
     }
     // 2. New ones, from the ord index's json-group rows, in number order.
     let json_g = crate::ordtypes::group_index("json").unwrap();
-    if crate::ordtypes::meta(db, c).is_none() {
+    let Some(meta) = crate::ordtypes::meta(db, c) else {
         pass.no_types = true;
         return Ok(pass);
-    }
+    };
+    pass.of = meta.next[json_g as usize];
     let seq_key = k(c).bytes(b"seq").done();
     let last_key = k(c).bytes(b"last").done();
     let mut seq = get(db, STATE, &seq_key).map(|v| be_u64(&v, 0)).unwrap_or(0);
@@ -326,30 +358,41 @@ pub fn scan(db: &ChainDb, p: &ChainParams, tip: u32) -> StoreResult<Pass> {
             return Ok(pass);
         }
     }
+    if seq > 0 {
+        pass.height = get(db, STATE, &last_key)
+            .and_then(|v| v.get(8..44).and_then(|b| <[u8; 36]>::try_from(b).ok()))
+            .and_then(|iid| record(db, c, &iid))
+            .and_then(|r| r["h"].as_u64())
+            .unwrap_or(0);
+    }
     let deep = (tip + 1).saturating_sub(CONFIRMATIONS);
     let mut last: Option<(u64, [u8; 36])> = None;
     let mut fresh: Vec<(u64, [u8; 36])> = Vec::new();
-    'rows: loop {
-        let after = (seq > 0).then(|| k(c).u8(json_g).u64(seq - 1).done());
-        let rows = db.store(c).read(|r| r.scan_after(crate::ordtypes::TYPES, &pre, after.as_deref(), 2_000))?;
-        if rows.is_empty() {
+    // One page of at most `batch` rows from the saved position: bounded however many rows there
+    // are, and however fast the ord index adds them.
+    let after = (seq > 0).then(|| k(c).u8(json_g).u64(seq - 1).done());
+    let rows = db.store(c).read(|r| r.scan_after(crate::ordtypes::TYPES, &pre, after.as_deref(), batch.max(1)))?;
+    let full = rows.len() >= batch.max(1);
+    let mut stopped = false;
+    for (_, v) in rows {
+        let n = be_u64(&v, 0);
+        let Some(iid) = iid_of_number(db, c, n) else { stopped = true; break };
+        let Some(rec) = record(db, c, &iid) else { stopped = true; break };
+        let h = rec["h"].as_u64().unwrap_or(u64::MAX);
+        if h > deep as u64 {
+            stopped = true;
             break;
         }
-        for (_, v) in rows {
-            let n = be_u64(&v, 0);
-            let Some(iid) = iid_of_number(db, c, n) else { break 'rows };
-            let Some(rec) = record(db, c, &iid) else { break 'rows };
-            if rec["h"].as_u64().unwrap_or(u64::MAX) > deep as u64 {
-                break 'rows;
-            }
-            let ct = rec["ct"].as_str().unwrap_or("");
-            if ct.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case(CONTENT_TYPE) {
-                fresh.push((n, iid));
-            }
-            last = Some((n, iid));
-            seq += 1;
+        let ct = rec["ct"].as_str().unwrap_or("");
+        if ct.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case(CONTENT_TYPE) {
+            fresh.push((n, iid));
         }
+        last = Some((n, iid));
+        pass.height = h;
+        seq += 1;
     }
+    pass.seq = seq;
+    pass.more = full && !stopped;
     if let Some((n, iid)) = last {
         store.write(|w| {
             for (n, iid) in &fresh {

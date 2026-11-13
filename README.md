@@ -2,6 +2,19 @@
 
 A from-scratch Rust rebuild of Dogecoin Arcade, wire-compatible with the existing arcades. Pepecoin testnet first; other chains are add-ons. See [docs/PLAN.md](docs/PLAN.md).
 
+![Dogecoin image inscriptions in the Explorer](docs/img/screens/inscriptions-dogecoin.png)
+
+| | |
+|---|---|
+| ![Shibacoin inscriptions](docs/img/screens/inscriptions-shibacoin.png) | ![Dogecoin Explorer](docs/img/screens/explorer-dogecoin.png) |
+| **Inscriptions** on any chain, by type: images, text, HTML, 3D and more (Shibacoin here). | **The Explorer**: blocks, the mempool, inscriptions, DRC-20 tokens, names and maps (Dogecoin here). |
+| ![Every chain in one picker](docs/img/screens/chains-picker.png) | ![The App Store](docs/img/screens/app-store.png) |
+| **One arcade, many chains**: Pepecoin, Dogecoin, DigiByte, Litecoin, Shibacoin and more, kept here or borrowed from other arcades. | **The App Store**: apps published on chain, installed in a click. |
+| ![The arcade mesh](docs/img/screens/home-mesh.png) | ![The Feed](docs/img/screens/feed.png) |
+| **The mesh**: every arcade linked, and what each one shares. | **The Feed**: public posts, replies and tips, signed with your arcade handle. |
+| ![Shibacoin Explorer](docs/img/screens/explorer-shibacoin.png) | |
+| **Borrowed chains** work like installed ones: Shibacoin here, borrowed over the mesh. | |
+
 ## Install on Linux
 
 Paste this one command into a terminal:

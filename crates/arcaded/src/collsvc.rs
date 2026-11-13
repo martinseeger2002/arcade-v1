@@ -13,6 +13,8 @@ use std::time::Duration;
 struct Note {
     detail: String,
     done: bool,
+    /// Rows read of the rows the ord index has (0..=100), shown on the Chains & Coins bar.
+    pct: f64,
 }
 
 static NOTES: Mutex<BTreeMap<u16, Note>> = Mutex::new(BTreeMap::new());
@@ -32,9 +34,36 @@ pub fn chains(node: &Node) -> Vec<&'static ChainParams> {
 }
 
 /// What the Chains & Coins row says, and whether it has read everything there is.
-pub fn note(c: u16) -> (String, bool) {
+pub fn note(c: u16) -> (String, bool, f64) {
     let n = NOTES.lock().unwrap().get(&c).cloned().unwrap_or_default();
-    (if n.detail.is_empty() { "waiting to start: read from the ord index".to_string() } else { n.detail }, n.done)
+    let pct = if n.done { 100.0 } else { n.pct };
+    (if n.detail.is_empty() { "waiting to start: read from the ord index".to_string() } else { n.detail }, n.done, pct)
+}
+
+/// The Chains & Coins row for one pass: what was read of what there is, from the first batch on.
+fn pass_note(summary: String, pass: &collreg::Pass, ord_at: u32, tip: u32) -> Note {
+    let behind = ord_at < tip;
+    let mut d = summary;
+    if pass.more {
+        d.push_str(&format!(" · reading: {} of {} JSON inscriptions (block {})", pass.seq, pass.of, pass.height));
+    } else if behind {
+        d.push_str(&format!(" · read as far as the ord index (block {ord_at} of {tip}), more as it builds"));
+    } else {
+        d.push_str(" · read to the newest block");
+    }
+    if pass.more && behind {
+        d.push_str(&format!(" · ord index at block {ord_at} of {tip}"));
+    }
+    let done = !behind && !pass.more && !pass.changed();
+    let pct = if pass.of == 0 { if done { 100.0 } else { 0.0 } } else { (pass.seq as f64 * 100.0 / pass.of as f64).min(if done { 100.0 } else { 99.9 }) };
+    Note { detail: d, done, pct }
+}
+
+/// How long to wait before the next pass: back soon while a batch left rows to read (a short
+/// pause, so the chain thread's writes get their turns), a few seconds while something changed,
+/// 30 s once caught up.
+fn pause(more: bool, busy: bool) -> Duration {
+    Duration::from_millis(if more { 250 } else if busy { 2_000 } else { 30_000 })
 }
 
 fn summary(node: &Node, p: &ChainParams) -> String {
@@ -54,7 +83,7 @@ fn summary(node: &Node, p: &ChainParams) -> String {
 
 pub fn run(node: Arc<Node>) {
     loop {
-        let mut busy = false;
+        let (mut busy, mut more) = (false, false);
         for p in chains(&node) {
             let c = p.chain_no;
             // The collections index needs ord on the same chain.
@@ -64,29 +93,23 @@ pub fn run(node: Arc<Node>) {
                 node.extra.lock().unwrap().get(p.key).is_some_and(|r| r.indexes.iter().any(|i| i == "ord"))
             };
             if !ord_on {
-                NOTES.lock().unwrap().insert(c, Note { detail: "needs the ord index on this chain".into(), done: false });
+                NOTES.lock().unwrap().insert(c, Note { detail: "needs the ord index on this chain".into(), done: false, pct: 0.0 });
                 continue;
             }
             let tip = node.chain.tip(c).ok().flatten().map(|t| t.height).unwrap_or(0);
             let ord_at = node.chain.indexed_to(c, "ord.v1").ok().flatten().unwrap_or(0);
             let note = match collreg::scan(&node.chain, p, tip) {
-                Ok(pass) if pass.no_types => Note { detail: "waiting for the ord index's type rows to be built".into(), done: false },
+                Ok(pass) if pass.no_types => Note { detail: "waiting for the ord index's type rows to be built".into(), done: false, pct: 0.0 },
                 Ok(pass) => {
-                    busy |= pass.read > 0 || pass.restarted;
-                    let behind = ord_at < tip;
-                    let mut d = summary(&node, p);
-                    if behind {
-                        d.push_str(&format!(" · reading with the ord index (block {ord_at} of {tip})"));
-                    } else {
-                        d.push_str(" · read to the newest block");
-                    }
-                    Note { detail: d, done: !behind && pass.read == 0 && !pass.restarted }
+                    busy |= pass.changed();
+                    more |= pass.more;
+                    pass_note(summary(&node, p), &pass, ord_at, tip)
                 }
-                Err(e) => Note { detail: format!("could not read: {e}"), done: false },
+                Err(e) => Note { detail: format!("could not read: {e}"), done: false, pct: 0.0 },
             };
             NOTES.lock().unwrap().insert(c, note);
         }
-        std::thread::sleep(Duration::from_secs(if busy { 2 } else { 30 }));
+        std::thread::sleep(pause(more, busy));
     }
 }
 
@@ -159,9 +182,9 @@ pub fn list(node: &Node, p: &ChainParams, req: &Value) -> Result<Value, String> 
     let off = req["offset"].as_u64().unwrap_or(0) as usize;
     let n = req["n"].as_u64().unwrap_or(24).clamp(1, 60) as usize;
     let page: Vec<Value> = rows.into_iter().skip(off).take(n).collect();
-    let (detail, done) = note(p.chain_no);
+    let (detail, done, pct) = note(p.chain_no);
     let known = crate::knowncoll::source(p).map(|_| json!({"asks_nintondo": crate::knowncoll::enabled(node), "note": crate::knowncoll::note(p.chain_no)}));
-    Ok(json!({"chain": p.key, "total": total, "offset": off, "n": n, "items": page, "reading": !done, "note": detail, "known": known}))
+    Ok(json!({"chain": p.key, "total": total, "offset": off, "n": n, "items": page, "reading": !done, "note": detail, "progress": pct, "known": known}))
 }
 
 /// `explorer.collection {chain, id, offset?, n?}`: one collection (a root's id, or "sub1k") and
@@ -267,4 +290,40 @@ pub fn of(node: &Node, p: &ChainParams, req: &Value) -> Result<Value, String> {
         ins.push(json!({"kind": "sub1k", "id": collreg::SUB1K, "name": "Sub 1K", "number": num}));
     }
     Ok(json!({"id": ord::iid_str(&iid), "collections": ins}))
+}
+
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+
+    fn pass(seq: u64, of: u64, height: u64, more: bool, read: u64) -> collreg::Pass {
+        collreg::Pass { read, seq, of, height, more, ..Default::default() }
+    }
+
+    #[test]
+    fn progress_shows_from_the_first_batch() {
+        let n = pass_note("0 collections on this chain".into(), &pass(2_000, 1_000_000, 512_345, true, 0), 1_004_428, 1_290_967);
+        assert!(!n.done);
+        assert!((n.pct - 0.2).abs() < 1e-9, "{}", n.pct);
+        assert!(n.detail.contains("2000 of 1000000") && n.detail.contains("block 512345") && n.detail.contains("1004428 of 1290967"), "{}", n.detail);
+        assert!(!n.detail.contains("waiting to start"));
+    }
+
+    #[test]
+    fn caught_up_with_a_building_ord_index_is_not_done() {
+        let n = pass_note("3 collections on this chain".into(), &pass(10, 10, 99, false, 0), 100, 200);
+        assert!(!n.done && n.pct < 100.0, "{} {}", n.done, n.pct);
+        assert!(n.detail.contains("block 100 of 200"), "{}", n.detail);
+        let n = pass_note("3 collections on this chain".into(), &pass(10, 10, 200, false, 0), 200, 200);
+        assert!(n.done && n.pct == 100.0 && n.detail.contains("newest block"), "{}", n.detail);
+        // Something changed in the pass: not done yet, whatever the heights say.
+        assert!(!pass_note(String::new(), &pass(10, 10, 200, false, 1), 200, 200).done);
+    }
+
+    #[test]
+    fn batches_with_more_to_read_come_back_soon() {
+        assert!(pause(true, false) < Duration::from_secs(1));
+        assert_eq!(pause(false, true), Duration::from_secs(2));
+        assert_eq!(pause(false, false), Duration::from_secs(30));
+    }
 }

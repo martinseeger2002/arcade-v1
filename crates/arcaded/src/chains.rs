@@ -802,8 +802,8 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
             continue;
         }
         if ix == "collections" {
-            let (detail, done) = crate::collsvc::note(c);
-            stages.push(json!({"name": label(p, ix), "index": ix, "detail": detail, "pct": if done { 100.0 } else { 0.0 }, "at": null}));
+            let (detail, _done, pct) = crate::collsvc::note(c);
+            stages.push(json!({"name": label(p, ix), "index": ix, "detail": detail, "pct": pct, "at": null}));
             continue;
         }
         let name = indexer_name(ix);

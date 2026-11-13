@@ -137,6 +137,17 @@ impl Chain {
     fn scan(&self) -> collreg::Pass {
         collreg::scan(&self.db, self.p, self.height).unwrap()
     }
+    fn scan_batch(&self, n: usize) -> collreg::Pass {
+        collreg::scan_batch(&self.db, self.p, self.height, n).unwrap()
+    }
+    /// Stop and start again: the database closed and opened anew (nothing kept in memory).
+    fn reopen(self) -> Chain {
+        let Chain { db, p, tip, height, nonce, _dir } = self;
+        drop(db);
+        let db = ChainDb::open(_dir.path().join("chain.mdbx")).unwrap();
+        db.add_indexer(p.chain_no, Arc::new(ord::OrdIndexer::new(&[]))).unwrap();
+        Chain { db, p, tip, height, nonce, _dir }
+    }
     fn status(&self, txid: &str) -> Value {
         collreg::root(&self.db, self.p.chain_no, txid).map(|x| x.1).unwrap_or(Value::Null)
     }
@@ -184,7 +195,8 @@ fn collections_settle_by_the_rules() {
     assert_eq!(collreg::of(&ch.db, c, &ord::parse_iid(B).unwrap()), Some((n, 2)));
     assert_eq!(collreg::items(&ch.db, c, n, 1, 10).len(), 1, "paged from an offset");
     // A second pass changes nothing.
-    assert_eq!(ch.scan(), collreg::Pass::default());
+    let again = ch.scan();
+    assert!(!again.changed() && !again.more, "{again:?}");
 
     // Someone else names B: claimed. Items on another chain: refused. Its part not here yet: waiting.
     let p2 = part(json!([[B, 1, [0]], [C, 2, [0]]]));
@@ -235,4 +247,85 @@ fn collections_settle_by_the_rules() {
     assert!(ch.scan().restarted, "the last row read changed: read again");
     ch.scan();
     assert_eq!(ch.status(&slipped)["status"], "claimed", "seen, though it sat behind the reading position: {}", ch.status(&slipped));
+}
+
+/// `n` plain JSON inscriptions (PRC-20-like mints), not collections.
+fn mints(ch: &mut Chain, n: usize) {
+    let bodies: Vec<Vec<u8>> = (0..n).map(|i| format!("{{\"p\":\"prc-20\",\"op\":\"mint\",\"amt\":\"{i}\"}}").into_bytes()).collect();
+    ch.inscribe_ct(9, "application/json", &bodies);
+}
+
+/// A big JSON index is read a batch at a time from the saved position, with real progress from
+/// the first batch, and every collection in it is still found.
+#[test]
+fn a_big_index_is_read_in_batches() {
+    let mut ch = Chain::new();
+    mints(&mut ch, 25);
+    let p1 = part(json!([[A, 1, [1]], [B, 2, [-1]]]));
+    let p1id = ch.inscribe(5, &[p1.clone()]).remove(0);
+    mints(&mut ch, 25);
+    let dogs = ch.inscribe(5, &[root("Dogs", "dgb", &[(p1id, p1)], None)]).remove(0);
+    let total = 25 + 1 + 25 + 1;
+    let first = ch.scan_batch(10);
+    assert!(first.more, "{first:?}");
+    assert_eq!((first.seq, first.of), (10, total), "progress from the first batch: {first:?}");
+    assert!(first.height > 0);
+    let mut passes = 1;
+    let mut last = first;
+    while last.more {
+        let p = ch.scan_batch(10);
+        assert!(p.seq - last.seq <= 10, "never more than a batch: {p:?}");
+        assert!(p.height >= last.height);
+        last = p;
+        passes += 1;
+        assert!(passes < 20);
+    }
+    assert_eq!((last.seq, last.of, passes), (total, total, 6), "{last:?}");
+    assert_eq!(ch.status(&dogs)["status"], "active", "{}", ch.status(&dogs));
+    let again = ch.scan_batch(10);
+    assert!(!again.more && !again.changed(), "{again:?}");
+}
+
+/// The ord index adds rows while collections reads: each pass stays one batch, the reader
+/// doesn't chase the newest rows within a pass, and it catches up once they stop coming.
+#[test]
+fn the_ord_index_growing_during_a_round() {
+    let mut ch = Chain::new();
+    mints(&mut ch, 12);
+    let a = ch.scan_batch(5);
+    assert_eq!((a.seq, a.of, a.more), (5, 12, true), "{a:?}");
+    mints(&mut ch, 12); // the ord index builds on
+    let b = ch.scan_batch(5);
+    assert_eq!((b.seq, b.of, b.more), (10, 24, true), "one batch, against what there is now: {b:?}");
+    let p1 = part(json!([[A, 1, [1]], [B, 2, [-1]]]));
+    let p1id = ch.inscribe(5, &[p1.clone()]).remove(0);
+    let dogs = ch.inscribe(5, &[root("Dogs", "dgb", &[(p1id, p1)], None)]).remove(0);
+    let mut p = ch.scan_batch(5);
+    let mut n = 0;
+    while p.more {
+        p = ch.scan_batch(5);
+        n += 1;
+        assert!(n < 20);
+    }
+    assert_eq!((p.seq, p.of), (26, 26), "{p:?}");
+    assert_eq!(ch.status(&dogs)["status"], "active");
+}
+
+/// A stop in the middle of a round: the next start goes on from the saved position, reads
+/// nothing twice, and settles the same collections.
+#[test]
+fn a_restart_mid_round_resumes() {
+    let mut ch = Chain::new();
+    let p1 = part(json!([[A, 1, [1]], [B, 2, [-1]]]));
+    let p1id = ch.inscribe(5, &[p1.clone()]).remove(0);
+    mints(&mut ch, 20);
+    let dogs = ch.inscribe(5, &[root("Dogs", "dgb", &[(p1id, p1)], None)]).remove(0);
+    let a = ch.scan_batch(8);
+    let b = ch.scan_batch(8);
+    assert_eq!((a.read, b.seq, b.more), (1, 16, true), "the part, then mints: {a:?} {b:?}");
+    let ch = ch.reopen();
+    let c = ch.scan_batch(8);
+    assert_eq!((c.seq, c.more, c.restarted), (22, false, false), "went on from row 16: {c:?}");
+    assert_eq!(c.read, 1, "only the root is new; the part isn't read twice: {c:?}");
+    assert_eq!(ch.status(&dogs)["status"], "active", "{}", ch.status(&dogs));
 }

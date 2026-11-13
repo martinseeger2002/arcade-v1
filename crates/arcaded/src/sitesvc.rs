@@ -91,6 +91,41 @@ fn tip_height(node: &Node, p: &ChainParams) -> u32 {
     node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height).unwrap_or(0)
 }
 
+/// Lock times at or past this are Unix times; below it, block heights (BIP-65's threshold).
+const LOCKTIME_THRESHOLD: u32 = 500_000_000;
+
+/// The median of the last 11 blocks' times up to `height` (BIP-113's "median time past").
+fn median_time_past(node: &Node, p: &ChainParams, height: u32) -> Option<u32> {
+    let mut times: Vec<u32> = (height.saturating_sub(10)..=height)
+        .filter_map(|h| node.chain.hash_at(p.chain_no, h).ok().flatten())
+        .filter_map(|hash| node.chain.header(p.chain_no, &hash).ok().flatten())
+        .map(|r| r.header.time)
+        .collect();
+    if times.is_empty() {
+        return None;
+    }
+    times.sort_unstable();
+    Some(times[times.len() / 2])
+}
+
+/// Why a transaction can't go in the next block yet, as nodes judge it (IsFinalTx with BIP-113),
+/// or None when it can.
+fn not_final(node: &Node, p: &ChainParams, tx: &Tx) -> Option<String> {
+    if tx.lock_time == 0 || tx.inputs.iter().all(|i| i.sequence == u32::MAX) {
+        return None;
+    }
+    let tip = node.chain.tip(p.chain_no).ok().flatten()?;
+    if tx.lock_time < LOCKTIME_THRESHOLD {
+        let next = tip.height + 1;
+        return (tx.lock_time >= next).then(|| format!("not final until block {} (the next block is {next})", tx.lock_time + 1));
+    }
+    let mtp = median_time_past(node, p, tip.height)?;
+    (tx.lock_time >= mtp).then(|| {
+        format!("not final yet: its lock time {} is {} s past the chain's median time {mtp}; send it again then",
+                tx.lock_time, tx.lock_time - mtp)
+    })
+}
+
 /// The pool, parsed once: (first seen, tx).
 fn pool(node: &Node, p: &ChainParams) -> Vec<(u64, Tx)> {
     node.chain
@@ -290,6 +325,13 @@ fn send_raw(node: &Node, req: &Value, checked: bool) -> R {
     let tx = Tx::parse_with(&raw, &p.format).map_err(|e| format!("not a {} transaction: {e}", p.name))?;
     if tx.is_coinbase() || tx.inputs.is_empty() {
         return Err("a coinbase or input-less transaction can't be broadcast".into());
+    }
+    if !borrowed {
+        // Not final yet (a refund before its lock time, say): every node refuses it, so it is
+        // refused here too rather than reported sent. Borrowed chains: the lenders' nodes check.
+        if let Some(why) = not_final(node, p, &tx) {
+            return Err(format!("refused: {why}"));
+        }
     }
     if borrowed {
         // Borrowed (or still catching up): the coin set here is not whole, so the lenders' nodes
@@ -556,6 +598,33 @@ pub(crate) mod tests {
         assert!(coins(&t.node, &json!({})).is_err());
         let many: Vec<String> = (0..=MAX_ADDRESSES).map(|_| a.clone()).collect();
         assert!(coins(&t.node, &json!({"addresses": many})).is_err(), "more than the limit is refused");
+    }
+
+    /// A transaction locked to a later block or time is refused, as every node refuses it; at its
+    /// time, or with every input final, it may go.
+    #[test]
+    fn a_locked_transaction_waits_for_its_time() {
+        let (t, coins) = crate::mempoolshare::tests::funded();
+        let tip = t.node.chain.tip(t.p.chain_no).unwrap().unwrap();
+        let locked = |lock: u32, seq: u32| {
+            let mut raw = tx(&[(coins[1].outpoint.txid, 1)], &[(1000, p2pkh(4))], seq).raw;
+            let n = raw.len();
+            raw[n - 4..].copy_from_slice(&lock.to_le_bytes());
+            Tx::parse_with(&raw, &t.p.format).unwrap()
+        };
+        let why = not_final(&t.node, t.p, &locked(tip.height + 5, 0)).unwrap();
+        assert!(why.contains(&format!("block {}", tip.height + 6)), "{why}");
+        assert!(not_final(&t.node, t.p, &locked(tip.height, 0)).is_none(), "a past height is final");
+        assert!(not_final(&t.node, t.p, &locked(tip.height + 5, u32::MAX)).is_none(), "final inputs ignore the lock");
+        let mtp = median_time_past(&t.node, t.p, tip.height).unwrap();
+        assert!(not_final(&t.node, t.p, &locked(mtp.max(LOCKTIME_THRESHOLD) + 600, 0)).is_some(), "a later time waits");
+        if mtp > LOCKTIME_THRESHOLD {
+            assert!(not_final(&t.node, t.p, &locked(mtp - 1, 0)).is_none(), "a time before the median is final");
+        }
+        let raw = locked(tip.height + 5, 0).raw;
+        let why = broadcast(&t.node, &json!({"hex": hex::encode(&raw)})).unwrap_err();
+        assert!(why.starts_with("refused: not final"), "{why}");
+        assert!(t.node.tx_outbox.lock().unwrap().is_empty());
     }
 
     #[test]
