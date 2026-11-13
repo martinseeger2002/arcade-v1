@@ -600,7 +600,16 @@ fn handle_here(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
             let pre = KeyBuf::new().u16(x.c()).bytes(q.as_bytes()).done();
             // With `open` the closed ones are skipped, so read further (bounded) to fill the page.
             let scan = if open { (off + want).saturating_mul(20).min(20_000) } else { off + want };
-            let rows = x.node.chain.store(x.c()).read(|r| r.scan_prefix_limit(tokens::TICK, &pre, scan)).map_err(e)?;
+            // Newest first (by deploy inscription number) when listing them all; a tick search (q), open mints and
+            // order "name" stay alphabetical.
+            let newest = q.is_empty() && !open && req["order"] != "name";
+            let rows = if newest {
+                let page = newest_page(&x, tokens::TICK, pre.clone(), num_tick, off, want);
+                // (the page below skips `off` rows: the newest page already starts there)
+                std::iter::repeat_n((Vec::new(), Vec::new()), off).chain(page).collect()
+            } else {
+                x.node.chain.store(x.c()).read(|r| r.scan_prefix_limit(tokens::TICK, &pre, scan)).map_err(e)?
+            };
             let rows: Vec<_> = if open {
                 rows.into_iter().filter(|(_, v)| {
                     let v: Value = serde_json::from_slice(v).unwrap_or(Value::Null);
@@ -657,8 +666,10 @@ fn handle_here(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
             let pre = KeyBuf::new().u16(x.c()).u8(0).done();
             let counts = tip_counts(&x, tip(&x)).0;
             let (off, want) = (req["offset"].as_u64().unwrap_or(0) as usize, n(50, 200) as usize);
+            // Newest first (by inscription number); order "name" (or an `after` cursor) pages alphabetically.
             let rows = match s("after") {
                 Some(a) => scan_after(&x, names::WIN, pre.clone(), Some(a), want),
+                None if req["order"] != "name" => newest_page(&x, names::WIN, pre.clone(), num_first8, off, want),
                 None => x.node.chain.store(x.c()).read(|r| r.scan_prefix_limit(names::WIN, &pre, off + want)).map_err(e)?.into_iter().skip(off).collect(),
             };
             Ok(json!({"counts": counts, "total": counts[0], "offset": off, "items": rows.iter().map(|(k, v)| name_row(pre.len(), k, v)).collect::<Vec<_>>()}))
@@ -680,8 +691,10 @@ fn handle_here(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
             let pre = KeyBuf::new().u16(x.c()).done();
             let total: u64 = maps::counts(&x.node.chain, x.c()).iter().map(|c| c.1).sum();
             let (off, want) = (req["offset"].as_u64().unwrap_or(0) as usize, n(50, 200) as usize);
+            // Newest first (by inscription number); order "name" (or an `after` cursor) pages by claim.
             let rows = match s("after") {
                 Some(a) => scan_after(&x, maps::MAP, pre, Some(a), want),
+                None if req["order"] != "name" => newest_page(&x, maps::MAP, pre, num_first8, off, want),
                 None => x.node.chain.store(x.c()).read(|r| r.scan_prefix_limit(maps::MAP, &pre, off + want)).map_err(e)?.into_iter().skip(off).collect(),
             };
             Ok(json!({"total": total, "offset": off, "items": rows.iter().map(|(k, v)| map_row(k, v)).collect::<Vec<_>>()}))
@@ -1028,6 +1041,49 @@ fn tip_counts(x: &Ctx, t: u32) -> ([u64; 3], u64) {
     (n, k)
 }
 
+/// A table's rows newest first (by inscription number), for the lists stored alphabetically (names, block maps,
+/// tokens): (number, key), built in one pass and kept per chain until the tip moves (at most once a minute).
+fn newest_first(x: &Ctx, table: &'static str, prefix: Vec<u8>, number: fn(&[u8]) -> u64) -> std::sync::Arc<Vec<(u64, Vec<u8>)>> {
+    type Kept = std::collections::HashMap<(u16, &'static str, Vec<u8>), (u32, std::time::Instant, std::sync::Arc<Vec<(u64, Vec<u8>)>>)>;
+    static KEPT: std::sync::OnceLock<std::sync::Mutex<Kept>> = std::sync::OnceLock::new();
+    let kept = KEPT.get_or_init(Default::default);
+    let (c, t) = (x.c(), tip(x));
+    let key = (c, table, prefix.clone());
+    if let Some((at, when, rows)) = kept.lock().unwrap().get(&key) {
+        if *at == t || when.elapsed() < std::time::Duration::from_secs(60) {
+            return rows.clone();
+        }
+    }
+    let mut rows: Vec<(u64, Vec<u8>)> = Vec::new();
+    let _ = x.node.chain.store(c).read(|r| r.for_each_prefix(table, &prefix, |k, v| {
+        rows.push((number(v), k.to_vec()));
+        Ok(true)
+    }));
+    rows.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    let rows = std::sync::Arc::new(rows);
+    kept.lock().unwrap().insert(key, (t, std::time::Instant::now(), rows.clone()));
+    rows
+}
+
+/// A page of [`newest_first`] rows with their values.
+fn newest_page(x: &Ctx, table: &'static str, prefix: Vec<u8>, number: fn(&[u8]) -> u64, off: usize, want: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let rows = newest_first(x, table, prefix, number);
+    rows.iter().skip(off).take(want).filter_map(|(_, k)| {
+        let v = x.node.chain.store(x.c()).read(|r| r.get(table, k)).ok().flatten()?;
+        Some((k.clone(), v))
+    }).collect()
+}
+
+/// A names or maps row's inscription number (its value starts with it).
+fn num_first8(v: &[u8]) -> u64 {
+    if v.len() >= 8 { be_u64(v, 0) } else { 0 }
+}
+
+/// A token tick row's deploy inscription number (`n` in its JSON).
+fn num_tick(v: &[u8]) -> u64 {
+    serde_json::from_slice::<Value>(v).ok().and_then(|j| j["n"].as_u64()).unwrap_or(0)
+}
+
 fn summary(x: &Ctx) -> R {
     let c = x.c();
     let t = tip(x);
@@ -1047,7 +1103,7 @@ fn summary(x: &Ctx) -> R {
     if x.has("tokens") {
         v["ticks"] = json!(tip_counts(x, t).1);
         v["protocol"] = json!(tokens::protocol(x.p).map(|t| t.0));
-        let rows = scan_after(x, tokens::TICK, KeyBuf::new().u16(c).done(), None, 6);
+        let rows = newest_page(x, tokens::TICK, KeyBuf::new().u16(c).done(), num_tick, 0, 6);
         v["tokens"] = json!(rows.into_iter().filter_map(|(k, b)| {
             let mut t: Value = serde_json::from_slice(&b).ok()?;
             t["tick"] = json!(String::from_utf8_lossy(&k[2..]));
@@ -1057,10 +1113,10 @@ fn summary(x: &Ctx) -> R {
     if x.has("names") {
         let pre = KeyBuf::new().u16(c).u8(0).done();
         v["names"] = json!(tip_counts(x, t).0);
-        v["name_rows"] = json!(scan_after(x, names::WIN, pre.clone(), None, 6).iter().map(|(k, b)| name_row(pre.len(), k, b)).collect::<Vec<_>>());
+        v["name_rows"] = json!(newest_page(x, names::WIN, pre.clone(), num_first8, 0, 6).iter().map(|(k, b)| name_row(pre.len(), k, b)).collect::<Vec<_>>());
     }
     if x.has("maps") {
-        let rows = scan_after(x, maps::MAP, KeyBuf::new().u16(c).done(), None, 6);
+        let rows = newest_page(x, maps::MAP, KeyBuf::new().u16(c).done(), num_first8, 0, 6);
         v["maps"] = json!(x.node.chain.store(c).count(maps::MAP).unwrap_or(0));
         v["map_rows"] = json!(rows.iter().map(|(k, b)| map_row(k, b)).collect::<Vec<_>>());
     }
@@ -1573,6 +1629,54 @@ mod tests {
         assert!(lean["inscriptions"][0].get("content").is_none());
         let bare = handle_here(&t.node, "explorer.address", &json!({"address": a, "history": false, "inscriptions": false}), false).unwrap();
         assert!(bare.get("inscriptions").is_none() && bare.get("inscription_count").is_none());
+    }
+
+    /// Names and block maps list newest first (by inscription number); order "name" keeps the alphabetical pages.
+    #[test]
+    fn names_and_maps_list_newest_first() {
+        use crate::sitesvc::tests::setup;
+        use arcade_store::KeyBuf;
+        let t = setup();
+        let c = t.p.chain_no;
+        t.node.app.store.write(|w| w.put(arcade_app::META, b"home_indexes", br#"["addresses","messages","ord","names","maps"]"#)).unwrap();
+        t.node.chain.add_indexer(c, std::sync::Arc::new(ord::OrdIndexer::new(&["names", "maps", "tokens"]))).unwrap();
+        let val = |n: u64, i: u8| [n.to_be_bytes().as_slice(), &[i; 36]].concat();
+        t.node.chain.store(c).write(|w| {
+            for (name, n) in [("apple.doge", 50u64), ("zebra.doge", 900), ("mango.doge", 7), ("kiwi.doge", 300)] {
+                w.put(names::WIN, &KeyBuf::new().u16(c).u8(0).bytes(name.as_bytes()).done(), &val(n, 1))?;
+            }
+            for (block, n) in [(5u64, 20u64), (9, 700), (1, 400)] {
+                w.put(maps::MAP, &KeyBuf::new().u16(c).u8(7).bytes(b"dogemap").u64(block).done(), &val(n, 2))?;
+            }
+            Ok(())
+        }).unwrap();
+        let names_of = |q: Value| -> Vec<String> {
+            handle_here(&t.node, "explorer.names", &q, false).unwrap()["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap().to_string()).collect()
+        };
+        assert_eq!(names_of(json!({"n": 10})), ["zebra.doge", "kiwi.doge", "apple.doge", "mango.doge"]);
+        assert_eq!(names_of(json!({"n": 2, "offset": 2})), ["apple.doge", "mango.doge"]);
+        assert_eq!(names_of(json!({"n": 10, "order": "name"})), ["apple.doge", "kiwi.doge", "mango.doge", "zebra.doge"]);
+        let maps_of: Vec<String> = handle_here(&t.node, "explorer.maps", &json!({"n": 10}), false).unwrap()["items"].as_array().unwrap()
+            .iter().map(|i| i["claim"].as_str().unwrap().to_string()).collect();
+        assert_eq!(maps_of, ["9.dogemap", "1.dogemap", "5.dogemap"]);
+        // Tokens: newest deploy first when listing them all; a tick search stays alphabetical.
+        t.node.app.store.write(|w| w.put(arcade_app::META, b"home_indexes", br#"["addresses","messages","ord","names","maps","tokens"]"#)).unwrap();
+        t.node.chain.store(c).write(|w| {
+            for (tick, n) in [("aaaa", 10u64), ("bbbb", 99), ("abcd", 55)] {
+                w.put(tokens::TICK, &KeyBuf::new().u16(c).bytes(tick.as_bytes()).done(), json!({"n": n, "supply": "1", "minted": "0"}).to_string().as_bytes())?;
+            }
+            Ok(())
+        }).unwrap();
+        let ticks = |q: Value| -> Vec<String> {
+            handle_here(&t.node, "explorer.tokens", &q, false).unwrap()["items"].as_array().unwrap().iter().map(|i| i["tick"].as_str().unwrap().to_string()).collect()
+        };
+        assert_eq!(ticks(json!({"n": 10})), ["bbbb", "abcd", "aaaa"]);
+        assert_eq!(ticks(json!({"n": 1, "offset": 1})), ["abcd"]);
+        assert_eq!(ticks(json!({"n": 10, "q": "a"})), ["aaaa", "abcd"]);
+        let sum = handle_here(&t.node, "explorer.summary", &json!({}), false).unwrap();
+        assert_eq!(sum["tokens"][0]["tick"], "bbbb", "the overview shows the newest tokens too");
+        assert_eq!(sum["name_rows"][0]["name"], "zebra.doge", "the overview shows the newest names too");
+        assert_eq!(sum["map_rows"][0]["claim"], "9.dogemap");
     }
 
     /// Every holder can be read, a page at a time, biggest first; none twice, none left out
