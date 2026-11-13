@@ -705,10 +705,12 @@ fn handle(node: &Node, mut s: TcpStream, conf: &Conf) {
         [".well-known", "dogefeed.json"] => respond(&mut s, "200 OK", "application/json",
             &[("Access-Control-Allow-Origin", "*".into()), ("Cache-Control", "public, max-age=3600".into())],
             crate::dproto::well_known(node).to_string().as_bytes()),
-        ["v1", "dproto", ..] | ["v1", "inscription", _, "dproto", ..] | ["v1", "wallet", _, "dproto", ..] => {
+        // (`seg` holds at most two parts: the rest of the path is split here.)
+        ["v1", rest] if rest.starts_with("dproto/") || rest.contains("/dproto") => {
+            let parts: Vec<&str> = std::iter::once("v1").chain(rest.split('/')).collect();
             let mut q = query_fields(&r.query);
             q.insert("chain".into(), json!("doge"));
-            let (cmd, pick): (&str, Option<&str>) = match seg.as_slice() {
+            let (cmd, pick): (&str, Option<&str>) = match parts.as_slice() {
                 ["v1", "dproto", "activity"] => ("explorer.dogefeed", None),
                 ["v1", "dproto", "keys"] => ("explorer.dogefeed_keys", None),
                 ["v1", "dproto", "tx", txid] => { q.insert("txid".into(), json!(txid)); ("explorer.dogefeed_tx", None) }
@@ -1165,6 +1167,24 @@ pub(crate) mod tests {
         // From elsewhere (a proxy's request): no body at all.
         let small = "POST /r/send HTTP/1.1\r\nHost: 127.0.0.1:8420\r\nX-Forwarded-For: 1.2.3.4\r\nContent-Length: 10\r\n\r\n";
         assert_eq!(status(&ask(&t.node, &conf(), small.as_bytes())), "413");
+    }
+
+    #[test]
+    fn the_d_protocol_routes_answer_by_their_whole_path() {
+        let (_one, t) = node();
+        let body = |a: &str| -> Value { serde_json::from_str(a.split("\r\n\r\n").nth(1).unwrap_or("")).unwrap_or(Value::Null) };
+        // DogeFeed's own .well-known shape.
+        let a = ask(&t.node, &conf(), &get("/.well-known/dogefeed.json", ""));
+        assert_eq!(status(&a), "200", "{a}");
+        assert_eq!(body(&a)["dproto"]["protocol"], "D://", "{a}"); // (a test arcade has no wallet, so no registrar key)
+        // The guide's /v1 reads reach the D:// service (no Dogecoin here: its answer, not the site's 404).
+        for p in ["/v1/dproto/keys", "/v1/dproto/activity?limit=2", "/v1/dproto/tx/00", "/v1/inscription/00i0/dproto",
+                  "/v1/inscription/00i0/dproto/activity", "/v1/wallet/DAddr/dproto", "/v1/wallet/DAddr/dproto/activity"] {
+            let a = ask(&t.node, &conf(), &get(p, ""));
+            assert!(a.contains("Access-Control-Allow-Origin: *"), "{p}: {a}");
+            assert!(!a.contains("try /content/"), "{p} fell through to the site: {a}");
+        }
+        assert_eq!(status(&ask(&t.node, &conf(), &get("/v1/dproto/nothing", ""))), "404");
     }
 
     #[test]
