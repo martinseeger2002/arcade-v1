@@ -60,7 +60,10 @@ pub fn ord_start(p: &ChainParams) -> Option<u32> {
         "main" => 186_920,
         "test" => 34_237,
         "doge" => 4_600_000,
-        "dgb" => 0,
+        // DigiByte: its first inscription (#0, 45e635bc…) is in block 20,670,958, every block before it read by this
+        // index (2026-11-13, the JB20B's ord index from block 0); starting there keeps the numbers and spares a rebuild
+        // ~20.7 million blocks.
+        "dgb" => 20_670_958,
         "flop" => 18_295,
         "wjk" => 1,
         // Shibacoin: its first inscription (Doginals style) is in block 11,839 (tx 92901dab…), every block before it
@@ -69,8 +72,8 @@ pub fn ord_start(p: &ChainParams) -> Option<u32> {
         // ord-litecoin's first inscription heights (src/chain.rs).
         "ltc" => 2_424_429,
         "ltctest" => 2_669_127,
-        // Tests (ord-litecoin's regtest).
-        "ltcreg" => 0,
+        // Tests (ord-litecoin's regtest; a DigiByte-shaped chain read from its genesis).
+        "ltcreg" | "dgbreg" => 0,
         _ => return None,
     })
 }
