@@ -33,6 +33,11 @@ pub fn dd_address(p: &ChainParams, pk: &PublicKey) -> Option<(String, XOnlyPubli
 
 /// The output key a DigiDollar address names, checked (ddtx.dd_key): 2-byte version of this
 /// chain, a key on the curve.
+/// The output script a DigiDollar address pays (its Taproot output key), or None for one that isn't.
+pub fn dd_script_of(p: &ChainParams, a: &str) -> Option<Vec<u8>> {
+    parse_address(p, a).ok().map(|k| arcade_wallet::taproot::p2tr_script(&k))
+}
+
 pub fn parse_address(p: &ChainParams, a: &str) -> Result<XOnlyPublicKey, String> {
     let body = bs58::decode(a.trim()).with_check(None).into_vec().unwrap_or_default();
     let (main, test) = (arcade_ledger::digidollar::VERSION_MAIN, arcade_ledger::digidollar::VERSION_TEST);
@@ -173,10 +178,22 @@ fn shown(w: Wallet) -> R {
 /// dd.send: send `cents` DigiDollars to a DigiDollar address; with broadcast false only built
 /// and shown (fee, change).
 pub fn send(node: &Node, chain: Option<&str>, to: &str, cents: i64, broadcast: bool) -> R {
+    send_with(node, chain, to, cents, broadcast, None)
+}
+
+/// `send` from `key` (an own-key swap order's: its maker fee, or its dollars back on release; swaps.rs), else this
+/// wallet's DigiDollar key.
+pub fn send_with(node: &Node, chain: Option<&str>, to: &str, cents: i64, broadcast: bool, key: Option<&arcade_wallet::SecretKey>) -> R {
     let p = chain_of(node, chain)?;
     let to_key = parse_address(p, to)?;
-    let w = load(node, p)?;
-    let sk = node.app.tag_key(p, w.key_index).map_err(|e| e.to_string())?.1;
+    let (w, sk) = match key {
+        Some(k) => (load_key(node, p, PublicKey::from_secret_key(arcade_wallet::secp256k1::SECP256K1, k), 0)?, *k),
+        None => {
+            let w = load(node, p)?;
+            let sk = node.app.tag_key(p, w.key_index).map_err(|e| e.to_string())?.1;
+            (w, sk)
+        }
+    };
     // DGB for the fee: the same key's P2PKH and P2WPKH coins.
     let scripts = crate::coinsend::key_scripts(p, &w.pk);
     let mut dgb: Vec<Utxo> = Vec::new();
@@ -244,11 +261,22 @@ mod tests {
 /// its DigiDollar coins, its DGB coins (P2PKH and P2WPKH, none spent in the mempool), its DigiDollar output
 /// script, and the script DGB change goes to. Installed chains only: a trade's coins are read here.
 pub(crate) fn trade_coins(node: &Node, p: &'static ChainParams) -> Result<(arcade_wallet::SecretKey, Vec<Held>, Vec<Utxo>, Vec<u8>, Vec<u8>), String> {
-    let w = load(node, p)?;
+    trade_coins_for(node, p, None)
+}
+
+/// `trade_coins` of `key` (an own-key swap order's), else this wallet's DigiDollar key.
+pub(crate) fn trade_coins_for(node: &Node, p: &'static ChainParams, key: Option<&arcade_wallet::SecretKey>) -> Result<(arcade_wallet::SecretKey, Vec<Held>, Vec<Utxo>, Vec<u8>, Vec<u8>), String> {
+    let (w, sk) = match key {
+        Some(k) => (load_key(node, p, PublicKey::from_secret_key(arcade_wallet::secp256k1::SECP256K1, k), 0)?, *k),
+        None => {
+            let w = load(node, p)?;
+            let sk = node.app.tag_key(p, w.key_index).map_err(|e| e.to_string())?.1;
+            (w, sk)
+        }
+    };
     if w.borrowed {
         return Err(format!("{} is borrowed here: a DigiDollar trade needs it installed", p.name));
     }
-    let sk = node.app.tag_key(p, w.key_index).map_err(|e| e.to_string())?.1;
     let scripts = crate::coinsend::key_scripts(p, &w.pk);
     let mut dgb: Vec<Utxo> = Vec::new();
     for (_, sc) in &scripts {
