@@ -120,13 +120,29 @@ fn whole_fee(o: Option<&Value>, whole: u128, p: &ChainParams) -> Option<(u128, S
     (whole > 0).then(|| ((whole * bps).div_ceil(10_000).max(1), to))
 }
 
-/// An order as anybody else sees it: never its own keys or payout addresses.
+/// An order as anybody else sees it: never its own keys or payout addresses, and each leg's chain by
+/// its key ([`canon_legs`]).
 pub fn public_order(o: &Value) -> Value {
     let mut o = o.clone();
     if let Some(m) = o.as_object_mut() {
         m.remove("own");
     }
+    canon_legs(&mut o);
     o
+}
+
+/// A leg's chain by its key ("peptest"), not its mesh name ("test"): chains::find takes both, but pages
+/// and apps name a chain by its key (an order placed with "test" showed in the Market app as "undefined").
+pub fn canon_leg(leg: &mut Value) {
+    if let Some(p) = leg["chain"].as_str().and_then(crate::chains::find) {
+        leg["chain"] = json!(p.key);
+    }
+}
+
+/// [`canon_leg`] on an order's give and get.
+pub fn canon_legs(o: &mut Value) {
+    canon_leg(&mut o["give"]);
+    canon_leg(&mut o["get"]);
 }
 
 pub(crate) fn p2pkh_of(pk: &PublicKey) -> Vec<u8> {
@@ -714,6 +730,8 @@ pub fn place(node: &Node, give: &Value, get_leg: &Value, opts: &Value) -> Result
     pair_ok(node, give, get_leg)?;
     let id = arcade_mesh::random::hex(8);
     let mut o = json!({"id": id, "give": give, "get": get_leg, "status": "open", "created": arcade_app::now(), "node": node.id_hex()});
+    // Kept with each chain by its key, whatever name the order came with.
+    canon_legs(&mut o);
     if opts["key"].is_object() || opts["payout"].is_object() {
         for p in [gp, wp] {
             let k = opts["key"][p.key].as_str().ok_or_else(|| format!("an order with its own key names its key on {}", p.name))?;
@@ -915,6 +933,8 @@ pub fn book(node: &Node) -> Vec<Value> {
             for o in orders {
                 let mut o = o.clone();
                 o["node"] = json!(peer);
+                // An older arcade's order may name a chain by its mesh name.
+                canon_legs(&mut o);
                 all.push(o);
             }
         }
@@ -1338,6 +1358,22 @@ mod own_key_tests {
         let dd = json!({"chain": k, "kind": "dd", "asset": "DD", "amount": "2500"});
         let opts = json!({"key": {k: hex::encode([9u8; 32])}, "payout": {k: addr}});
         assert!(place(&t.node, &dd, &get_leg, &opts).is_err(), "no DigiDollar payout address");
+    }
+}
+
+#[cfg(test)]
+mod canon_leg_tests {
+    use super::*;
+
+    /// A leg named by the chain's mesh name ("test") is shown by its key; unknown names stay as they are.
+    #[test]
+    fn legs_name_chains_by_key() {
+        let mut o = json!({"give": {"chain": "dgbtest", "kind": "dd"}, "get": {"chain": "test", "kind": "coin"}, "own": {"keys": {}}});
+        let p = public_order(&o);
+        assert_eq!((p["give"]["chain"].as_str(), p["get"]["chain"].as_str()), (Some("dgbtest"), Some("peptest")));
+        assert!(p.get("own").is_none());
+        o["get"]["chain"] = json!("nosuchchain");
+        assert_eq!(public_order(&o)["get"]["chain"], "nosuchchain");
     }
 }
 
