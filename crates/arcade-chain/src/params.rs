@@ -38,6 +38,31 @@ pub struct ValueRules {
     pub maturity: fn(u32) -> u32,
 }
 
+/// Script flags, as libbitcoinconsensus (and Core's interpreter) number them.
+pub const SCRIPT_P2SH: u32 = 1 << 0;
+pub const SCRIPT_DERSIG: u32 = 1 << 2;
+pub const SCRIPT_CHECKLOCKTIMEVERIFY: u32 = 1 << 9;
+
+/// The rest of what Core checks when it connects a block, for chains where it is known exactly
+/// (step 3): every input's script against the coin it spends, with the flags in force at that
+/// height; the coinbase starting with the height (BIP34); the lowest block version (bad-version);
+/// each transaction final at the block (lock time); and the size and signature-operation limits.
+/// Scripts are checked above the chain's newest checkpoint (Core's "assume valid": V1 allows no
+/// fork under it), or everywhere with ARCADE_VERIFY_ALL_SCRIPTS=1. None = not checked.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockRules {
+    /// Script flags for a block at `height`.
+    pub script_flags: fn(u32) -> u32,
+    /// From this height the coinbase script starts with the height (BIP34).
+    pub bip34_height: u32,
+    /// The lowest base version (nVersion % 256) a block at `height` may carry.
+    pub min_version: fn(u32) -> i32,
+    /// Most bytes in a block, and in one transaction (witness data not counted).
+    pub max_block_size: usize,
+    /// Most signature operations in a block (legacy, plus P2SH redeem scripts).
+    pub max_sigops: u32,
+}
+
 /// `CPureBlockHeader::IsLegacy()` in the Dogecoin 1.14 family.
 pub fn is_legacy(h: &Header) -> bool {
     h.version == 1 || (h.version == 2 && h.chain_id() == 0)
@@ -85,6 +110,8 @@ pub struct ChainParams {
     pub auxpow_rules: Option<AuxpowRules>,
     /// Coin rules checked when a block is connected ([`ValueRules`]).
     pub value_rules: Option<ValueRules>,
+    /// Scripts and the rest of Core's block rules ([`BlockRules`]).
+    pub block_rules: Option<BlockRules>,
     pub bech32_hrp: Option<&'static str>,
     pub p2pkh_version: u8,
     pub p2sh_version: u8,
@@ -190,6 +217,8 @@ pub enum HeaderError {
     EarlyAuxpow,
     #[error("block does not carry the chain's AuxPoW chain id (got {got}, expected {want})")]
     WrongChainId { got: u32, want: u32 },
+    #[error("block version {got} is too old at this height (bad-version, at least {want})")]
+    BadVersion { got: i32, want: i32 },
 }
 
 /// The [`AuxpowRules`] for a header at `height` (nothing to check where the chain has none).
@@ -271,6 +300,13 @@ pub fn check_header(
         return Err(HeaderError::BadBits);
     }
     check_auxpow_rules(params, h, height)?;
+    if let Some(br) = params.block_rules {
+        // GetBaseVersion: nVersion % VERSION_AUXPOW (C++ %, which Rust's matches).
+        let (got, want) = (h.version % 256, (br.min_version)(height));
+        if got < want {
+            return Err(HeaderError::BadVersion { got, want });
+        }
+    }
     let algo = params.pow.algo(h.version, height).ok_or(HeaderError::UnknownAlgo)?;
     if params.max_easier && too_easy(params, h.bits, parent.bits) {
         return Err(HeaderError::TooEasy);
@@ -342,6 +378,26 @@ pub const PEPECOIN_VALUE_RULES: ValueRules = ValueRules {
     maturity: crate::pepecoin::maturity,
 };
 
+/// Pepecoin's block rules (Pepecoin Core 4fb5a0cd9): P2SH always; DERSIG, CHECKLOCKTIMEVERIFY,
+/// BIP34 and block version 4 from 1,000 (BIP66Height = BIP65Height = BIP34Height); CSV and SegWit
+/// never active; 1 MB and 20,000 sigops (MAX_BLOCK_SIGOPS_COST 80,000 / 4).
+pub const PEPECOIN_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |h| SCRIPT_P2SH | if h >= 1000 { SCRIPT_DERSIG | SCRIPT_CHECKLOCKTIMEVERIFY } else { 0 },
+    bip34_height: 1000,
+    min_version: |h| if h >= 1000 { 4 } else { 0 },
+    max_block_size: 1_000_000,
+    max_sigops: 20_000,
+};
+
+/// Pepecoin regtest: BIP66 at 1,251, BIP65 at 1,351, BIP34 never.
+pub const PEPECOIN_REGTEST_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |h| SCRIPT_P2SH | if h >= 1251 { SCRIPT_DERSIG } else { 0 } | if h >= 1351 { SCRIPT_CHECKLOCKTIMEVERIFY } else { 0 },
+    bip34_height: 100_000_000,
+    min_version: |h| if h >= 1351 { 4 } else if h >= 1251 { 3 } else { 0 },
+    max_block_size: 1_000_000,
+    max_sigops: 20_000,
+};
+
 /// Pepecoin regtest: halving every 150 blocks, maturity 60.
 pub const PEPECOIN_REGTEST_VALUE_RULES: ValueRules = ValueRules {
     max_money: crate::pepecoin::MAX_MONEY,
@@ -370,6 +426,7 @@ pub static PEPECOIN_TEST: ChainParams = ChainParams {
     // Pepecoin Core chainparams.cpp: auxpowConsensus from 42,000; testnet fStrictChainId false.
     auxpow_rules: Some(AuxpowRules { start: 42000, strict_chain_id: false }),
     value_rules: Some(PEPECOIN_VALUE_RULES),
+    block_rules: Some(PEPECOIN_BLOCK_RULES),
     bech32_hrp: None,
     p2pkh_version: 0x71,
     p2sh_version: 0xc4,
@@ -417,6 +474,7 @@ pub static PEPECOIN_MAIN: ChainParams = ChainParams {
     // Pepecoin Core chainparams.cpp: auxpowConsensus from 42,000; mainnet fStrictChainId true (chain id 63).
     auxpow_rules: Some(AuxpowRules { start: 42000, strict_chain_id: true }),
     value_rules: Some(PEPECOIN_VALUE_RULES),
+    block_rules: Some(PEPECOIN_BLOCK_RULES),
     bech32_hrp: None,
     p2pkh_version: 56,
     p2sh_version: 22,
@@ -466,6 +524,7 @@ pub static DIGIBYTE_MAIN: ChainParams = ChainParams {
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
     value_rules: None,
+    block_rules: None,
     bech32_hrp: Some("dgb"),
     p2pkh_version: 30,
     p2sh_version: 63,
@@ -508,6 +567,7 @@ pub static DIGIBYTE_TEST: ChainParams = ChainParams {
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
     value_rules: None,
+    block_rules: None,
     bech32_hrp: Some("dgbt"),
     p2pkh_version: 126,
     p2sh_version: 140,
@@ -545,6 +605,7 @@ pub static KOTIA_MAIN: ChainParams = ChainParams {
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
     value_rules: None,
+    block_rules: None,
     bech32_hrp: None,
     p2pkh_version: 46,
     p2sh_version: 45,
@@ -583,6 +644,7 @@ pub static FLOPCOIN_MAIN: ChainParams = ChainParams {
     // Flopcoin Core chainparams.cpp: auxpowConsensus from AUXPOWHeight 110,000; fStrictChainId true (chain id 163).
     auxpow_rules: Some(AuxpowRules { start: 110000, strict_chain_id: true }),
     value_rules: None,
+    block_rules: None,
     bech32_hrp: None,
     p2pkh_version: 35,
     p2sh_version: 22,
@@ -616,6 +678,7 @@ pub static LITECOIN_MAIN: ChainParams = ChainParams {
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
     value_rules: None,
+    block_rules: None,
     bech32_hrp: Some("ltc"),
     p2pkh_version: 48,
     p2sh_version: 50, // legacy 5 ("3...") also decodes
@@ -650,6 +713,7 @@ pub static LITECOIN_TEST: ChainParams = ChainParams {
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
     value_rules: None,
+    block_rules: None,
     bech32_hrp: Some("tltc"),
     p2pkh_version: 111,
     p2sh_version: 58, // legacy 196 ("2...") also decodes
@@ -689,6 +753,7 @@ pub static DOGECOIN_MAIN: ChainParams = ChainParams {
     // Dogecoin Core chainparams.cpp: auxpowConsensus from 371,337; fStrictChainId true (chain id 98).
     auxpow_rules: Some(AuxpowRules { start: 371337, strict_chain_id: true }),
     value_rules: None,
+    block_rules: None,
     bech32_hrp: None,
     p2pkh_version: 30,
     p2sh_version: 22,
@@ -729,6 +794,7 @@ pub static BITCOIN_MAIN: ChainParams = ChainParams {
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
     value_rules: None,
+    block_rules: None,
     bech32_hrp: Some("bc"),
     p2pkh_version: 0,
     p2sh_version: 5,
@@ -768,6 +834,7 @@ pub static WOJAKCOIN_MAIN: ChainParams = ChainParams {
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
     value_rules: None,
+    block_rules: None,
     bech32_hrp: Some("wj"),
     p2pkh_version: 73,
     p2sh_version: 5,
@@ -811,6 +878,7 @@ pub static SHIBACOIN_MAIN: ChainParams = ChainParams {
     // Shibacoin Core chainparams.cpp: auxpowConsensus from 24,000; fStrictChainId true (chain id 74).
     auxpow_rules: Some(AuxpowRules { start: 24000, strict_chain_id: true }),
     value_rules: None,
+    block_rules: None,
     bech32_hrp: None,
     p2pkh_version: 63,
     p2sh_version: 22,
@@ -861,6 +929,7 @@ pub static BELLSCOIN_MAIN: ChainParams = ChainParams {
     auxpow_strict_chain_id: true,
     auxpow_rules: None,
     value_rules: None,
+    block_rules: None,
     bech32_hrp: Some("bel"),
     p2pkh_version: 25,
     p2sh_version: 30,
@@ -913,6 +982,7 @@ pub static LUCKYCOIN_MAIN: ChainParams = ChainParams {
     // Luckycoin Core chainparams.cpp: auxpowConsensus from 176,000; fStrictChainId true (chain id 0x2013).
     auxpow_rules: Some(AuxpowRules { start: 176000, strict_chain_id: true }),
     value_rules: None,
+    block_rules: None,
     bech32_hrp: None,
     p2pkh_version: 47,
     p2sh_version: 5,
@@ -959,6 +1029,7 @@ pub static JUNKCOIN_MAIN: ChainParams = ChainParams {
     auxpow_strict_chain_id: true,
     auxpow_rules: None,
     value_rules: None,
+    block_rules: None,
     bech32_hrp: Some("jc"),
     p2pkh_version: 16,
     p2sh_version: 5,
@@ -1009,6 +1080,7 @@ pub static PEPECOIN_REGTEST: ChainParams = ChainParams {
     auxpow_strict_chain_id: true,
     auxpow_rules: Some(AuxpowRules { start: 20, strict_chain_id: true }),
     value_rules: Some(PEPECOIN_REGTEST_VALUE_RULES),
+    block_rules: Some(PEPECOIN_REGTEST_BLOCK_RULES),
     bech32_hrp: None,
     p2pkh_version: 111,
     p2sh_version: 196,

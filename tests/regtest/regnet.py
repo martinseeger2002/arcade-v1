@@ -12,8 +12,8 @@ Run it off the network (nothing here needs the Internet; Core listens on localho
 Options: --pepecoind PATH (default: pepecoind on PATH, then ~/.local/bin/pepecoind),
          --follow PATH (default: target/release/examples/regtest_follow), --keep (keep the work dir).
 
-Scenarios marked "gap" are rules V1 does not check yet (scripts and signatures, the plan's
-step 3): they are reported, and don't fail the run. Every other scenario must match, or the run fails.
+Scenarios marked "gap" are rules V1 does not check yet: they are reported, and don't fail
+the run. Since step 3 there are none for Pepecoin. Every other scenario must match, or the run fails.
 """
 import argparse, hashlib, json, os, shutil, struct, subprocess, sys, tempfile, time, urllib.request
 
@@ -40,8 +40,10 @@ def varint(n):
     return b"\xfe" + struct.pack("<I", n)
 
 def push(b):
-    assert len(b) < 0x4C
-    return bytes([len(b)]) + b
+    if len(b) < 0x4C:
+        return bytes([len(b)]) + b
+    assert len(b) < 0x100
+    return b"\x4c" + bytes([len(b)]) + b
 
 def script_num(n):
     out = b""
@@ -52,17 +54,57 @@ def script_num(n):
         out += b"\x00"
     return push(out) if out else b"\x00"
 
-def tx(inputs, outputs, version=1, witness=None):
+def tx(inputs, outputs, version=1, witness=None, lock_time=0, sequence=0xFFFFFFFF):
     """inputs: [(txid_internal, vout, script_sig)], outputs: [(value, script)].
     With `witness` (a list of stacks, one per input) the tx is witness-serialized."""
-    body_in = varint(len(inputs)) + b"".join(t + struct.pack("<I", v) + varint(len(s)) + s + b"\xff\xff\xff\xff" for t, v, s in inputs)
+    body_in = varint(len(inputs)) + b"".join(t + struct.pack("<I", v) + varint(len(s)) + s + struct.pack("<I", sequence) for t, v, s in inputs)
     body_out = varint(len(outputs)) + b"".join(struct.pack("<q", v) + varint(len(s)) + s for v, s in outputs)
-    stripped = struct.pack("<i", version) + body_in + body_out + b"\x00\x00\x00\x00"
+    lt = struct.pack("<I", lock_time)
+    stripped = struct.pack("<i", version) + body_in + body_out + lt
     if witness is None:
         return stripped, sha256d(stripped)
     wit = b"".join(varint(len(st)) + b"".join(varint(len(x)) + x for x in st) for st in witness)
-    full = struct.pack("<i", version) + b"\x00\x01" + body_in + body_out + wit + b"\x00\x00\x00\x00"
+    full = struct.pack("<i", version) + b"\x00\x01" + body_in + body_out + wit + lt
     return full, sha256d(stripped)
+
+class Key:
+    """A secp256k1 key (Python's cryptography package): P2PK scripts and legacy SIGHASH_ALL signatures."""
+    def __init__(self):
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives import serialization
+        self.k = ec.generate_private_key(ec.SECP256K1())
+        self.pub = self.k.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.CompressedPoint)
+        self.script = push(self.pub) + b"\xac"  # <pubkey> OP_CHECKSIG
+
+    def sign(self, digest):
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec, utils
+        return self.k.sign(digest, ec.ECDSA(utils.Prehashed(hashes.SHA256())))
+
+def sighash(inputs, outputs, i, script_code, lock_time=0, sequence=0xFFFFFFFF):
+    """Legacy SIGHASH_ALL: input i's script is the coin's script, the others empty."""
+    ins = [(t, v, script_code if j == i else b"") for j, (t, v, _) in enumerate(inputs)]
+    raw, _ = tx(ins, outputs, lock_time=lock_time, sequence=sequence)
+    return sha256d(raw + struct.pack("<I", 1))
+
+def signed(key, inputs, outputs, lock_time=0, sequence=0xFFFFFFFF, mangle=None):
+    """A tx whose inputs (each a coin paying key.script) are signed by `key` (P2PK)."""
+    sigs = []
+    for i in range(len(inputs)):
+        der = key.sign(sighash(inputs, outputs, i, key.script, lock_time, sequence))
+        if mangle:
+            der = mangle(der)
+        sigs.append(push(der + b"\x01"))
+    return tx([(t, v, sigs[i]) for i, (t, v, _) in enumerate(inputs)], outputs, lock_time=lock_time, sequence=sequence)
+
+def loose_der(der):
+    """The same signature with a needless leading zero in R: valid BER, not strict DER (BIP66)."""
+    rlen = der[3]
+    r = der[4:4 + rlen]
+    rest = der[4 + rlen:]
+    r2 = b"\x00" + r
+    body = b"\x02" + bytes([len(r2)]) + r2 + rest
+    return b"\x30" + bytes([len(body)]) + body
 
 def coinbase(height, value, extra=b"", outputs=None):
     script = script_num(height) + push(b"regnet" + extra)
@@ -392,15 +434,72 @@ def scenarios(net):
     r = net.submit(real, h)
     net.check("Then the real block", "both take it: the damaged copy didn't mark it", notes=r)
 
-    # ---- scripts and signatures (step 3: reported, not failing) ----
+    # ---- scripts, signatures and the rest of Core's block rules (step 3) ----
     tip, th = net.tip()
     old = net.core.call("getblockhash", th - 70)
     cbid = net.core.call("getblock", old, True)["tx"][0]
     value = round(net.core.call("gettxout", cbid, 0)["value"] * COIN)
     raw, h = on_tip(net, lambda h: good(h, b"nosig") + [tx([(bytes.fromhex(cbid)[::-1], 0, b"")], [(value - COIN, OP_TRUE)])])
     r = net.submit(raw, h)
-    net.check("Unsigned spend of a matured coinbase that needs a signature (amounts all right)", "Core: script check fails", gap=True, notes=r)
+    net.check("Unsigned spend of a matured coinbase that needs a signature (amounts all right)", "Core: script check fails", notes=r)
     heal("After the unsigned spend")
+
+    # Coins of our own behind real keys: 4 x 1,000 PEP to a key (P2PK), and one locked by
+    # CHECKLOCKTIMEVERIFY until height 1,000 (a NOP before BIP65, enforced from 1,351 here).
+    key, other = Key(), Key()
+    cltv = b"\x02\xe8\x03" + b"\xb1\x75" + OP_TRUE  # <1000> OP_CHECKLOCKTIMEVERIFY OP_DROP OP_TRUE
+    kc = coinbase(net.tip()[1] + 1, 0, b"keys", outputs=[(1000 * COIN, key.script)] * 4 + [(1000 * COIN, cltv)])
+    raw, hk = on_tip(net, lambda h: [kc])
+    r = net.submit(raw, hk)
+    net.check("A coinbase of our own paying 4 coins to a key and 1 locked by CHECKLOCKTIMEVERIFY", "both take it", notes=r)
+    net.mine(hk + 60 - net.tip()[1], auxpow=True)
+    coin = lambda v: (kc[1], v, b"")
+
+    ok = signed(key, [coin(0)], [(999 * COIN, OP_TRUE)])
+    raw, h = on_tip(net, lambda h: good(h, b"sig") + [ok])
+    r = net.submit(raw, h)
+    net.check("A correctly signed spend", "both take it", notes=r)
+
+    raw, h = on_tip(net, lambda h: good(h, b"wrong") + [signed(other, [coin(1)], [(999 * COIN, OP_TRUE)])])
+    r = net.submit(raw, h)
+    net.check("A spend signed by the wrong key", "Core: script check fails", notes=r)
+
+    late = signed(key, [coin(1)], [(999 * COIN, OP_TRUE)], lock_time=net.tip()[1] + 500, sequence=0)
+    raw, h = on_tip(net, lambda h: good(h, b"late") + [late])
+    r = net.submit(raw, h)
+    net.check("A transaction locked until 500 blocks from now", "Core: bad-txns-nonfinal", notes=r)
+
+    raw, h = on_tip(net, lambda h: [coinbase(h, 1 * COIN, b"ops", outputs=[(1 * COIN, b"\xac" * 20_001)])])
+    r = net.submit(raw, h)
+    net.check("A block with 20,001 signature operations", "Core: bad-blk-sigops", notes=r)
+
+    raw, h = on_tip(net, lambda h: [coinbase(h, 1 * COIN, b"big", outputs=[(0, b"\x6a" + b"\x00" * 1_000_000)])])
+    r = net.submit(raw, h)
+    net.check("A block over 1,000,000 bytes", "Core: bad-blk-length", notes=r)
+
+    # Past DERSIG (1,251) and CHECKLOCKTIMEVERIFY and version 4 (1,351).
+    net.mine(1360 - net.tip()[1], auxpow=True)
+    net.check("Core mines to height 1,360", "both follow")
+
+    raw, h = on_tip(net, lambda h: good(h, b"v3"), version=(CHAIN_ID << 16) | VERSION_AUXPOW | 3)
+    r = net.submit(raw, h)
+    net.check("A version-3 block after 1,351", "Core: bad-version", notes=r)
+
+    raw, h = on_tip(net, lambda h: good(h, b"ber") + [signed(key, [coin(1)], [(999 * COIN, OP_TRUE)], mangle=loose_der)])
+    r = net.submit(raw, h)
+    net.check("A signature that isn't strict DER, after 1,251", "Core: script check fails (DERSIG)", notes=r)
+
+    raw, h = on_tip(net, lambda h: good(h, b"cltv0") + [tx([coin(4)], [(999 * COIN, OP_TRUE)])])
+    r = net.submit(raw, h)
+    net.check("Spending the CHECKLOCKTIMEVERIFY coin with no lock time, after 1,351", "Core: script check fails (CLTV)", notes=r)
+
+    raw, h = on_tip(net, lambda h: good(h, b"cltv1") + [tx([coin(4)], [(999 * COIN, OP_TRUE)], lock_time=1000, sequence=0xFFFFFFFE)])
+    r = net.submit(raw, h)
+    net.check("Spending it with lock time 1,000", "both take it", notes=r)
+
+    raw, h = on_tip(net, lambda h: good(h, b"sig2") + [signed(key, [coin(2), coin(3)], [(1999 * COIN, OP_TRUE)])])
+    r = net.submit(raw, h)
+    net.check("A correctly signed spend of two coins, after 1,351", "both take it", notes=r)
 
 def main():
     ap = argparse.ArgumentParser()

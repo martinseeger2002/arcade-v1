@@ -39,16 +39,22 @@ unshare -Urn sh -c 'ip link set lo up; python3 tests/regtest/regnet.py'
 | Spending a coinbase 59 blocks later; then at 60 | premature-spend; then takes it | the same |
 | Paying out 1,001 PEP from a 1,000 PEP coin | bad-txns-in-belowout | refuse |
 | A mutated copy of a block, then the real block | refuses the copy, takes the block | the same |
-| An unsigned spend of a matured coin that needs a signature | script check fails | *gap: step 3* |
+| An unsigned spend of a matured coin that needs a signature | script check fails | refuse |
+| A correctly signed spend; one signed by the wrong key | takes it; script check fails | the same |
+| A transaction locked 500 blocks ahead | bad-txns-nonfinal | refuse |
+| 20,001 signature operations; a block over 1,000,000 bytes | bad-blk-sigops; bad-blk-length | refuse |
+| After 1,351: a version-3 block | bad-version | refuse |
+| After 1,251: a signature that isn't strict DER | script check fails (DERSIG) | refuse |
+| After 1,351: a CHECKLOCKTIMEVERIFY coin with no lock time; then with lock time 1,000 | fails; then takes it | the same |
 
-The block builder's own coins pay to `OP_TRUE`, so Core takes spends of them without a
-signature. That lets fees, maturity and amounts be tried exactly.
+The block builder's own coins pay to `OP_TRUE` (spent with no signature, to try fees, maturity
+and amounts exactly) or to a key of its own (signed with Python's `cryptography` package,
+legacy SIGHASH_ALL). The run mines to height 1,360, so DERSIG (1,251), CHECKLOCKTIMEVERIFY and
+version 4 (1,351) are in force for the last scenarios.
 
-Rows marked *gap* are rules V1 doesn't check yet: scripts and signatures, which are step 3 of
-the plan. The run reports them without failing. After each gap, Core mines two more blocks,
-and V1 must come back to Core's chain.
-
-When a later step adds a rule, drop `gap=True` from its scenario.
+A scenario can be marked `gap=True` for a rule V1 doesn't check yet. The run reports it
+without failing. Since step 3 there are none. After each bad block, Core mines two more
+blocks, and V1 must follow Core's chain.
 
 On `main` before step 1, the first 16 scenarios gave 6 match, 3 gaps and 7 FAIL. With steps 1
-and 2, all 26 give 25 match, 1 gap and 0 FAIL.
+to 3, all 38 match: no gaps.
