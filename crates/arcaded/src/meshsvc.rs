@@ -606,7 +606,10 @@ fn serve_loop(
                 }
             }
             "wl" => crate::faucet::on_welcome(node, &f.head),
-            "op" if f.head["op"] == "me" => crate::meshview::on_op_me(&link.peer_id, &f.head),
+            "op" if f.head["op"] == "me" => {
+                crate::meshview::on_op_me(&link.peer_id, &f.head);
+                crate::handlegate::on_op_me(node, &link.peer_id, &f.head);
+            }
             "lk" => crate::links::on_lk(node, &f.head),
             "addrs" => on_addrs(node, &link.peer_id, &f.head),
             "pp" => on_coin_peers(node, &f.head),
@@ -763,6 +766,12 @@ fn operator_me(node: &Node) -> Value {
     if !tag.is_empty() {
         me["tag"] = json!(tag);
         me["name"] = json!(format!("@{tag}"));
+    }
+    // The handle's key vouches for this node (handlegate.rs): what lets us take index data.
+    if let Some((proven, proof)) = crate::handlegate::own_proof(node) {
+        me["tag"] = json!(proven);
+        me["name"] = json!(format!("@{proven}"));
+        me["proof"] = proof;
     }
     me
 }
