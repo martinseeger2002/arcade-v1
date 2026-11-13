@@ -525,7 +525,10 @@ pub fn run(node: &Node, p: &'static ChainParams, syncer: &Syncer, top: u32, on_p
                 break Err(e.to_string());
             }
             let t1 = Instant::now();
-            if let Err(e) = syncer.sync_blocks(&mut pre, 1000, 1000) {
+            // 250-block chunks: sync_blocks checks and warms the next chunk while it writes
+            // this one. One 1000-block chunk did the checks and the writes one after the other,
+            // and its warmed pages had gone cold by the write (Litecoin: 2.8 blk/s against 5–6).
+            if let Err(e) = syncer.sync_blocks(&mut pre, 1000, 250) {
                 break Err(e.to_string());
             }
             waited += t1 - t0;
