@@ -55,6 +55,8 @@ fn block(prev: Hash256, txs: Vec<Tx>, time: u32) -> Block {
 /// Test chain params whose genesis is our synthetic genesis.
 fn params_for(genesis: &Block) -> &'static ChainParams {
     let mut p = PEPECOIN_TEST.clone();
+        // Made-up chains for indexing tests: no coin rules (consensus has its own tests).
+        p.value_rules = None;
     p.genesis = Box::leak(genesis.hash().to_hex().into_boxed_str());
     p.genesis_header = "";
     Box::leak(Box::new(p))
@@ -403,6 +405,38 @@ fn prune_and_restore_a_block_body() {
     f.db.restore_block(f.p, b, &b1).unwrap();
     assert!(!f.db.is_block_pruned(c, b).unwrap());
     assert_eq!(f.db.block_raw(c, &b1.hash()).unwrap().unwrap(), b1.encode());
+}
+
+/// Lost bodies (pruned, no sealed copy) are listed for chains.refill; restore_check refuses
+/// what restore_block would, without writing.
+#[test]
+fn lost_bodies_are_listed_and_checked_before_a_refill() {
+    let f = fixture();
+    let c = f.p.chain_no;
+    let b1 = block(f.g.hash(), vec![tx(&[], &[(5000, p2pkh(1))], 1)], 2);
+    let b2 = block(b1.hash(), vec![tx(&[], &[(5000, p2pkh(2))], 2)], 3);
+    let b3 = block(b2.hash(), vec![tx(&[], &[(5000, p2pkh(3))], 3)], 4);
+    f.db.connect_blocks(f.p, &[b1.clone(), b2.clone(), b3.clone()]).unwrap();
+    let n = |h: &Block| f.db.header(c, &h.hash()).unwrap().unwrap().b;
+    assert!(f.db.bodies_missing(c, 0, 3, 100).unwrap().is_empty(), "nothing pruned: nothing missing");
+    f.db.prune_blocks(f.p, &[n(&b1), n(&b3)]).unwrap();
+    assert_eq!(f.db.bodies_missing(c, 0, 3, 100).unwrap(), vec![(1, n(&b1), b1.hash()), (3, n(&b3), b3.hash())]);
+    assert_eq!(f.db.bodies_missing(c, 0, 3, 1).unwrap().len(), 1, "at most max");
+    assert_eq!(f.db.bodies_missing(c, 2, 9, 100).unwrap(), vec![(3, n(&b3), b3.hash())], "heights past the tip are skipped");
+    // A body the sealed copy answers for isn't lost.
+    let raw1 = b1.encode();
+    let h1 = b1.hash();
+    f.db.set_sealed_reader(std::sync::Arc::new(move |_c, h| if *h == h1 { Some(raw1.clone()) } else { None }));
+    assert_eq!(f.db.bodies_missing(c, 0, 3, 100).unwrap(), vec![(3, n(&b3), b3.hash())]);
+    // The checks: the right block passes, another block or a bad merkle root doesn't; nothing is written.
+    f.db.restore_check(f.p, n(&b3), &b3).unwrap();
+    assert!(f.db.restore_check(f.p, n(&b3), &b2).is_err());
+    let mut bad = b3.clone();
+    bad.txs[0] = tx(&[], &[(4999, p2pkh(3))], 3);
+    assert!(f.db.restore_check(f.p, n(&b3), &bad).is_err(), "a transaction not under the merkle root");
+    assert!(f.db.is_block_pruned(c, n(&b3)).unwrap(), "checking writes nothing");
+    f.db.restore_block(f.p, n(&b3), &b3).unwrap();
+    assert!(f.db.bodies_missing(c, 0, 3, 100).unwrap().is_empty());
 }
 
 /// A pruned block held sealed (one copy): its bytes, its transactions by id and by place come
@@ -921,4 +955,37 @@ fn txs_pending_cleared_when_addresses_removed() {
     f.db.wstore(c).unwrap().write(|w| w.put(STATE, &k_state(c, crate::addrbuild::TXS_PENDING), b"1")).unwrap();
     assert!(f.db.repair_txs_pending(c).unwrap(), "stale flag cleared");
     assert!(!f.db.txs_pending(c).unwrap());
+}
+
+/// The coin rules, where a chain has them: maturity, a transaction paying out no more than it
+/// spends, and the coinbase paying at most the subsidy plus the fees. A block breaking one is
+/// an InvalidBlock (never connected), and nothing of it is kept.
+#[test]
+fn coin_rules_refuse_what_core_refuses() {
+    let f = fixture();
+    let mut p = f.p.clone();
+    p.value_rules = Some(arcade_chain::params::ValueRules { max_money: 1_000_000, subsidy: |_, _| 50, maturity: |_| 2 });
+    let p: &'static ChainParams = Box::leak(Box::new(p));
+    let invalid = |r: arcade_store::Result<Tip>, want: &str| match r {
+        Err(arcade_store::StoreError::InvalidBlock { why, .. }) => assert!(why.contains(want), "{why}"),
+        other => panic!("expected InvalidBlock ({want}), got {other:?}"),
+    };
+    let cb1 = tx(&[], &[(50, p2pkh(1))], 1);
+    let b1 = block(f.g.hash(), vec![cb1.clone()], 2);
+    f.db.connect_blocks(p, &[b1.clone()]).unwrap();
+
+    // Height 2: one block after it was made, the coinbase hasn't matured.
+    let early = tx(&[(cb1.txid, 0)], &[(49, p2pkh(2))], 0);
+    invalid(f.db.connect_blocks(p, &[block(b1.hash(), vec![tx(&[], &[(50, p2pkh(3))], 2), early.clone()], 3)]), "premature-spend");
+    let b2 = block(b1.hash(), vec![tx(&[], &[(50, p2pkh(3))], 2)], 3);
+    f.db.connect_blocks(p, &[b2.clone()]).unwrap();
+
+    // Height 3: matured. Paying out more than it holds, or a coinbase over subsidy + fee, is refused.
+    let over = tx(&[(cb1.txid, 0)], &[(51, p2pkh(2))], 0);
+    invalid(f.db.connect_blocks(p, &[block(b2.hash(), vec![tx(&[], &[(50, p2pkh(3))], 3), over], 4)]), "in-belowout");
+    invalid(f.db.connect_blocks(p, &[block(b2.hash(), vec![tx(&[], &[(52, p2pkh(3))], 3), early.clone()], 4)]), "bad-cb-amount");
+    invalid(f.db.connect_blocks(p, &[block(b2.hash(), vec![tx(&[], &[(2_000_000, p2pkh(3))], 3)], 4)]), "out of range");
+    // Subsidy 50 + fee 1 exactly: fine.
+    let tip = f.db.connect_blocks(p, &[block(b2.hash(), vec![tx(&[], &[(51, p2pkh(3))], 3), early], 4)]).unwrap();
+    assert_eq!(tip.height, 3);
 }

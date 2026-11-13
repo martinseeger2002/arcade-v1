@@ -189,7 +189,9 @@ pub fn on_frame(node: &Node, link: &mut Link, f: &Frame) -> Result<(), LinkError
         }
         "g" => serve(node, link, &f.head)?,
         "sq" => {
-            let fams = f.head["fams"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).filter(|x| v1copy::FAMILIES.contains(x)).map(String::from).collect()).unwrap_or_default();
+            // Index copies are made on request only for a proven @handle (handlegate.rs).
+            let proven = crate::handlegate::proven(&peer).is_some();
+            let fams = f.head["fams"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).filter(|x| v1copy::FAMILIES.contains(x)).filter(|x| proven || !crate::handlegate::is_index_family(x)).map(String::from).collect()).unwrap_or_default();
             if let (Some(net), Some(h)) = (f.head["net"].as_str(), f.head["h"].as_u64()) {
                 v1copy::request(node, net, h as u32, fams);
             }
@@ -251,6 +253,10 @@ fn serve(node: &Node, link: &mut Link, h: &Value) -> Result<(), LinkError> {
     let ok = |s: &str| !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !ok(net) || !ok(fam) || snap.len() != 64 || !snap.chars().all(|c| c.is_ascii_hexdigit()) {
         return refuse(link, id, "gone");
+    }
+    // Index copies only for arcades whose operator has a proven @handle (handlegate.rs).
+    if crate::handlegate::is_index_family(fam) && crate::handlegate::proven(&link.peer_id).is_none() {
+        return refuse(link, id, crate::handlegate::NEED);
     }
     let dir = v1copy::copies_dir(node, net, fam).join(snap);
     if h["what"] == "manifest" {
@@ -339,6 +345,9 @@ pub fn start_job(node: &Node, key: &str, fam: &str, id: Option<String>, keep: bo
     let p = arcade_chain::params::by_key(key).ok_or_else(|| format!("unknown chain {key}"))?;
     if !v1copy::FAMILIES.contains(&fam) {
         return Err(format!("family is one of {}", v1copy::FAMILIES.join(", ")));
+    }
+    if crate::handlegate::is_index_family(fam) {
+        crate::handlegate::check_local(node)?;
     }
     let o = offers(p.net, fam);
     let est = established(node);
@@ -487,6 +496,10 @@ fn on_gb(peer: &str, f: &Frame) {
                 h.paused_until = Some(Instant::now() + BUSY_PAUSE);
             } else {
                 h.gone = true;
+                // A refusal with a reason (no proven @handle, handlegate.rs): show it.
+                if e != "gone" {
+                    j.detail = e.to_string();
+                }
             }
         }
         return;

@@ -1396,6 +1396,49 @@ impl ChainDb {
         })
     }
 
+    /// Heights in `from..=to` whose block body was pruned here and that no sealed copy answers
+    /// for: bodies this arcade lost (chains.refill fetches them back). At most `max`, in height
+    /// order, as (height, block number, block hash).
+    pub fn bodies_missing(&self, c: u16, from: u32, to: u32, max: usize) -> Result<Vec<(u32, u32, Hash256)>> {
+        let mut out = Vec::new();
+        let mut h = from;
+        while h <= to && out.len() < max {
+            if let Some(hash) = self.hash_at(c, h)? {
+                if let Some(rec) = self.header(c, &hash)? {
+                    if rec.b != 0 && self.is_block_pruned(c, rec.b)? && self.block_raw(c, &hash)?.is_none() {
+                        out.push((h, rec.b, hash));
+                    }
+                }
+            }
+            if h == u32::MAX {
+                break;
+            }
+            h += 1;
+        }
+        Ok(out)
+    }
+
+    /// The checks [`restore_block`](Self::restore_block) makes, without writing: the block's id
+    /// is the stored header's, its transaction count and merkle root match, and every stored
+    /// stub's txid is the block's transaction at that place.
+    pub fn restore_check(&self, params: &ChainParams, b: u32, blk: &Block) -> Result<()> {
+        let c = params.chain_no;
+        let (h, _, n) = self.block_at(params, b)?.ok_or_else(|| other("no such block"))?;
+        if params.block_id(&h) != params.block_id(&blk.header) || blk.txs.len() as u32 != n || blk.computed_merkle_root() != h.merkle_root {
+            return Err(other("block does not match the stored header"));
+        }
+        self.store(c).read(|r| {
+            for (p, tx) in blk.txs.iter().enumerate() {
+                if let Some(old) = r.get(BLOCK_TX, &k_block_tx(c, b, p as u32))? {
+                    if row_txid(&old, params)? != tx.txid {
+                        return Err(other("transaction does not match the stored txid"));
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// Put a pruned block's body back (fetched from another arcade or a coin peer; checked
     /// against the stored header and each stub's txid).
     pub fn restore_block(&self, params: &ChainParams, b: u32, blk: &Block) -> Result<()> {
@@ -1640,6 +1683,48 @@ impl ChainDb {
         })
     }
 
+    /// `bad` breaks its chain's rules (it could not be connected): mark it and every stored
+    /// header built on it invalid, and make the valid header with the most work the best one,
+    /// so the syncer goes back to the best valid chain instead of trying `bad` again every
+    /// round (Core: InvalidBlockFound, then the next best candidate). Returns the new best.
+    ///
+    /// The mark is kept, as in Core; [`ChainDb::reconsider_invalid`] clears it.
+    /// `prefer` (the tip before the reorg that ran into `bad`) wins a tie in work, as in Core.
+    pub fn mark_invalid(&self, params: &ChainParams, bad: &Hash256, prefer: Option<Hash256>) -> Result<Option<Hash256>> {
+        let c = params.chain_no;
+        self.wstore(c)?.write(|w| {
+            let Some(mut rec) = header_rec(w, c, bad)? else { return Ok(None) };
+            rec.status = STATUS_INVALID;
+            w.put(HEADERS, &k_header(c, &bad.0), &rec.index_value())?;
+            // A reorg never goes deeper than the undo window, so the best valid header is at
+            // most that far under `bad`.
+            let floor = rec.height.saturating_sub(UNDO_DEPTH + 1);
+            pick_best(w, params, floor, true, prefer)
+        })
+    }
+
+    /// Clear every invalid mark on chain `c` and pick the best header again (Core:
+    /// reconsiderblock). For when a block was marked because of a fault here, not in the block.
+    pub fn reconsider_invalid(&self, params: &ChainParams) -> Result<Option<Hash256>> {
+        let c = params.chain_no;
+        self.wstore(c)?.write(|w| {
+            let mut first = None;
+            for (k, v) in w.scan(HEADERS, &c.to_be_bytes())? {
+                if v.get(8) == Some(&STATUS_INVALID) {
+                    let mut v = v.clone();
+                    v[8] = STATUS_HEADER;
+                    w.put(HEADERS, &k, &v)?;
+                    let h = be_u32(&v, 0);
+                    first = Some(first.map_or(h, |f: u32| f.min(h)));
+                }
+            }
+            match first {
+                Some(h) => pick_best(w, params, h.saturating_sub(UNDO_DEPTH + 1), false, None),
+                None => Ok(w.get(STATE, &k_state(c, "best"))?.map(|v| Hash256(v[..32].try_into().unwrap()))),
+            }
+        })
+    }
+
     /// Work of a child of `parent` with `bits`.
     pub fn child_work(parent: &HeaderRec, bits: u32) -> U256 {
         parent.work.checked_add(work_from_bits(bits)).unwrap_or(U256::MAX)
@@ -1857,6 +1942,56 @@ enum Addr {
 /// are more than DEFER_BEHIND (20,000) deep, far past the UNDO_DEPTH (1,000) a reorg may undo,
 /// and their records would only be deleted again later.
 #[allow(clippy::too_many_arguments)]
+/// Walk the stored headers from height `floor` up (every stored header's parent is stored, so
+/// heights run without gaps). With `spread`, a header whose parent is invalid is marked invalid
+/// too. The valid header with the most work becomes the best header; on a tie, `prefer` (when
+/// valid), else the tip, else the first found.
+fn pick_best(w: &WriteTxn, params: &ChainParams, floor: u32, spread: bool, prefer: Option<Hash256>) -> Result<Option<Hash256>> {
+    let c = params.chain_no;
+    let mut invalid: std::collections::HashSet<Hash256> = std::collections::HashSet::new();
+    let mut best: Option<(U256, Hash256)> = None;
+    let tip = w.get(STATE, &k_state(c, "tip"))?.map(|v| decode_tip(&v).hash);
+    for h in [prefer, tip].into_iter().flatten() {
+        if let Some(r) = header_rec(w, c, &h)? {
+            if r.status != STATUS_INVALID && best.map(|(bw, _)| r.work > bw).unwrap_or(true) {
+                best = Some((r.work, h));
+            }
+        }
+    }
+    let mut height = floor;
+    loop {
+        let rows = w.scan(HDR, &k_height(c, height))?;
+        if rows.is_empty() {
+            break;
+        }
+        for (_, d) in rows {
+            let header = Header::parse(d[..80].try_into().unwrap());
+            let work = U256::from_be_bytes(d[80..112].try_into().unwrap());
+            let hash = params.block_id(&header);
+            let Some(ix) = w.get(HEADERS, &k_header(c, &hash.0))? else { continue };
+            let mut status = ix[8];
+            if spread && status != STATUS_INVALID && invalid.contains(&header.prev) {
+                status = STATUS_INVALID;
+                let mut ix = ix.clone();
+                ix[8] = STATUS_INVALID;
+                w.put(HEADERS, &k_header(c, &hash.0), &ix)?;
+            }
+            if status == STATUS_INVALID {
+                invalid.insert(hash);
+            } else if best.map(|(bw, _)| work > bw).unwrap_or(true) {
+                best = Some((work, hash));
+            }
+        }
+        height += 1;
+    }
+    if let Some((wk, h)) = best {
+        let mut v = h.0.to_vec();
+        v.extend_from_slice(&wk.to_be_bytes());
+        w.put(STATE, &k_state(c, "best"), &v)?;
+    }
+    Ok(best.map(|(_, h)| h))
+}
+
 fn connect_one(
     w: &WriteTxn,
     params: &ChainParams,
@@ -1886,7 +2021,7 @@ fn connect_one(
         }
     };
     if check {
-        blk.check().map_err(other)?;
+        blk.check().map_err(|e| if e.breaks_rules() { StoreError::InvalidBlock { block: hash.0, why: e.to_string() } } else { other(e) })?;
     }
 
     // The block's bytes: stored once, kept even if later disconnected (forks included).
@@ -1932,8 +2067,14 @@ fn connect_one(
         l.put(ADDR_LOG, &k, &v)
     };
     let mut prevouts: Vec<Vec<Prevout>> = Vec::with_capacity(blk.txs.len());
+    // Coin rules (where the chain has them): what the block's transactions leave as fees,
+    // and what its coinbase pays out.
+    let vr = params.value_rules.filter(|_| height > 0);
+    let broke = |tx: &Hash256, why: &str| StoreError::InvalidBlock { block: hash.0, why: format!("height {height}: tx {tx}: {why}") };
+    let (mut fees, mut coinbase_out) = (0u128, 0u128);
     for (p, tx) in blk.txs.iter().enumerate() {
         let mut pv = Vec::new();
+        let mut value_in = 0u128;
         let p = p as u32;
         let t12 = tx.txid.t12();
         settle_mempool(w, params, tx)?;
@@ -1949,11 +2090,11 @@ fn connect_one(
         let t_sp = std::time::Instant::now();
         if !tx.is_coinbase() {
             for (vin, inp) in tx.inputs.iter().enumerate() {
-                let missing = || {
-                    other(format!(
-                        "height {height}: tx {} spends unknown coin {}:{}",
-                        tx.txid, inp.prevout.txid, inp.prevout.vout
-                    ))
+                // Core: bad-txns-inputs-missingorspent. The block breaks the rules: its branch
+                // can never be the chain.
+                let missing = || StoreError::InvalidBlock {
+                    block: hash.0,
+                    why: format!("height {height}: tx {} spends unknown coin {}:{}", tx.txid, inp.prevout.txid, inp.prevout.vout),
                 };
                 let ((pb, pp), ok, coin) = match cache.as_deref() {
                     Some(cc) => {
@@ -1968,6 +2109,17 @@ fn connect_one(
                         ((pb, pp), k_pos(c, pb, pp, inp.prevout.vout), coin)
                     }
                 };
+                if let Some(vr) = &vr {
+                    value_in += coin.value as u128;
+                    if coin.value > vr.max_money || value_in > vr.max_money as u128 {
+                        return Err(broke(&tx.txid, "input values out of range (bad-txns-inputvalues-outofrange)"));
+                    }
+                    let need = (vr.maturity)(coin.height);
+                    if coin.coinbase && height.saturating_sub(coin.height) < need {
+                        return Err(broke(&tx.txid, &format!(
+                            "spends a coinbase from height {} before it matures ({need} blocks) (bad-txns-premature-spend-of-coinbase)", coin.height)));
+                    }
+                }
                 let sid = script_id(&coin.script);
                 pv.push(Prevout { value: coin.value, script: coin.script.clone() });
                 match cache.as_deref_mut() {
@@ -2004,6 +2156,26 @@ fn connect_one(
             }
         }
         tadd(4, t_sp);
+        if let Some(vr) = &vr {
+            let mut out = 0u128;
+            for o in &tx.outputs {
+                out += o.value as u128;
+                if o.value > vr.max_money || out > vr.max_money as u128 {
+                    return Err(broke(&tx.txid, "output values out of range (bad-txns-vout-toolarge)"));
+                }
+            }
+            if tx.is_coinbase() {
+                coinbase_out = out;
+            } else if !tx.is_coinstake() && !tx.hogex {
+                if value_in < out {
+                    return Err(broke(&tx.txid, &format!("pays out {out} but spends {value_in} (bad-txns-in-belowout)")));
+                }
+                fees += value_in - out;
+                if fees > vr.max_money as u128 {
+                    return Err(broke(&tx.txid, "fees out of range (bad-txns-fee-outofrange)"));
+                }
+            }
+        }
         prevouts.push(pv);
         let t_out = std::time::Instant::now();
         // Block 0's outputs are never coins (Bitcoin-family rule).
@@ -2036,6 +2208,13 @@ fn connect_one(
             }
         }
         tadd(5, t_out);
+    }
+
+    if let Some(vr) = &vr {
+        let limit = (vr.subsidy)(height, &blk.header.prev) as u128 + fees;
+        if coinbase_out > limit {
+            return Err(broke(&blk.txs[0].txid, &format!("coinbase pays {coinbase_out}, more than the subsidy and fees ({limit}) (bad-cb-amount)")));
+        }
     }
 
     // Protocol indexes, in the same commit; only those exactly caught up to the parent.

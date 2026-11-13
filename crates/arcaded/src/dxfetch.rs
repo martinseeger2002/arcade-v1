@@ -552,6 +552,10 @@ pub fn run(node: Arc<Node>) {
 }
 
 fn step(node: &Arc<Node>, p: &'static ChainParams) {
+    // Index copies are for operators with a @handle (handlegate.rs).
+    if !crate::handlegate::have_handle(node) {
+        return;
+    }
     let want = rules(p).unwrap_or(0);
     let (have, tip_h) = (ours(node, p), tip(node, p));
     let max_h = if unstored_ok() { u64::MAX } else { tip_h + 1 };

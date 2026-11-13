@@ -761,6 +761,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let blocks = chain(30);
         let mut pp = arcade_chain::params::PEPECOIN_TEST.clone();
+        // Made-up chains for indexing tests: no coin rules (consensus has its own tests).
+        pp.value_rules = None;
         pp.genesis = Box::leak(blocks[0].hash().to_hex().into_boxed_str());
         pp.genesis_header = "";
         let p: &'static ChainParams = Box::leak(Box::new(pp));
@@ -882,6 +884,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let blocks = chain(30);
         let mut pp = arcade_chain::params::PEPECOIN_TEST.clone();
+        pp.value_rules = None;
         pp.genesis = Box::leak(blocks[0].hash().to_hex().into_boxed_str());
         pp.genesis_header = "";
         let p: &'static ChainParams = Box::leak(Box::new(pp));

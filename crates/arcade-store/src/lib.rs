@@ -35,6 +35,10 @@ pub enum StoreError {
     Corrupt { table: &'static str, why: &'static str },
     #[error("{0}")]
     Other(String),
+    /// A block that breaks its chain's rules (as opposed to a damaged copy or a local fault):
+    /// the caller should never try to connect it again. `block` is its id.
+    #[error("invalid block: {why}")]
+    InvalidBlock { block: [u8; 32], why: String },
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;

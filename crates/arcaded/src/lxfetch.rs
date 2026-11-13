@@ -481,6 +481,10 @@ pub fn run(node: Arc<Node>) {
 }
 
 fn step(node: &Arc<Node>, p: &'static ChainParams) {
+    // Index copies are for operators with a @handle (handlegate.rs).
+    if !crate::handlegate::have_handle(node) {
+        return;
+    }
     let (have, tip_h) = (ours(node, p), tip(node, p));
     let est = crate::vxshare::established(node);
     let mut s = st();

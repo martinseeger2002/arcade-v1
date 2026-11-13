@@ -6,6 +6,7 @@
 //!           [--http-port N|0] [--http-bind ADDR] [--site DIR] [--stun-port N|0]
 
 mod accountsvc;
+mod handlegate;
 mod addrsvc;
 mod collsvc;
 mod knowncoll;
@@ -70,6 +71,7 @@ mod ordsend;
 mod peerbook;
 mod psync;
 mod realtime;
+mod refill;
 mod pagechain;
 mod prizesvc;
 mod refereesvc;

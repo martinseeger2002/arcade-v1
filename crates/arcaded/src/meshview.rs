@@ -158,6 +158,8 @@ pub fn overview(node: &Node) -> Value {
         arcades.push(json!({
             "node": id,
             "tag": op["tag"], "name": op["name"], "version": op["version"],
+            // Its handle proven by the handle's key (handlegate.rs): what gets it index data.
+            "handle_proven": crate::handlegate::proven(&id),
             "linked": link.is_some(),
             "addr": link.map(|l| l.addr.clone()).or_else(|| offers.get(&id).map(|o| o.addr.clone()).filter(|a| !a.is_empty())),
             "since": link.map(|l| l.since),
@@ -194,9 +196,13 @@ pub fn overview(node: &Node) -> Value {
         }
     }
     let avail: Vec<Value> = avail.into_iter().map(|(k, (ix, n, lends))| json!({"key": k, "name": name_of(&k), "indexes": ix, "arcades": n, "lends": lends})).collect();
-    let tag = node.app.tag_keys(node.params.chain_no).unwrap_or_default().into_iter().find_map(|k| k.tag);
+    // The wallet's remembered @tag, else the one the ledger shows its keys hold (a wallet just
+    // restored remembers none yet).
+    let tag = node.app.tag_keys(node.params.chain_no).unwrap_or_default().into_iter().find_map(|k| k.tag)
+        .or_else(|| crate::handlegate::own_proof(node).map(|(t, _)| t));
     json!({
-        "me": {"node": node.id_hex(), "tag": tag, "version": option_env!("ARCADE_VERSION"), "links": links.len(), "chains": mine},
+        "me": {"node": node.id_hex(), "tag": tag, "version": option_env!("ARCADE_VERSION"), "links": links.len(), "chains": mine,
+               "handle_proven": crate::handlegate::have_handle(node)},
         "mesh": {"linked": arcades.iter().filter(|a| a["linked"] == true).count(), "heard": arcades.iter().filter(|a| a["linked"] != true).count(), "chains": avail},
         "arcades": arcades,
     })

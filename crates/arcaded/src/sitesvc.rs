@@ -482,6 +482,8 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let g = block(Hash256::ZERO, vec![tx(&[], &[(50, p2pkh(0))], 0)], 1);
         let mut pp = arcade_chain::params::PEPECOIN_TEST.clone();
+        // Made-up chains for indexing tests: no coin rules (consensus has its own tests).
+        pp.value_rules = None;
         pp.genesis = Box::leak(g.hash().to_hex().into_boxed_str());
         pp.genesis_header = "";
         edit(&mut pp);

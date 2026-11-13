@@ -86,7 +86,8 @@ impl Chain {
         }
         // Coinbases first (one block), spent by the inscriptions in the next.
         let b1 = block(self.tip, cbs.clone(), self.nonce);
-        self.db.connect_blocks(self.p, &[b1.clone()]).unwrap();
+        // Made-up transactions (null inputs): connected without Block::check, which would refuse them.
+        self.db.connect_blocks_checked(self.p, &[b1.clone()], false).unwrap();
         self.tip = b1.hash();
         self.nonce += 1;
         txs.push(tx(None, 5000, self.nonce));
@@ -96,7 +97,8 @@ impl Chain {
             txs.push(tx(Some((cb.txid, s)), 4000, self.nonce));
         }
         let b2 = block(self.tip, txs, self.nonce);
-        self.db.connect_blocks(self.p, &[b2.clone()]).unwrap();
+        // Made-up transactions (null inputs): connected without Block::check, which would refuse them.
+        self.db.connect_blocks_checked(self.p, &[b2.clone()], false).unwrap();
         self.tip = b2.hash();
         self.coins = cbs;
     }
