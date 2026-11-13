@@ -603,24 +603,22 @@ fn handle_here(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
             // Newest first (by deploy inscription number) when listing them all; a tick search (q), open mints and
             // order "name" stay alphabetical.
             let newest = q.is_empty() && !open && req["order"] != "name";
-            let rows = if newest {
-                let page = newest_page(&x, tokens::TICK, pre.clone(), num_tick, off, want);
-                // (the page below skips `off` rows: the newest page already starts there)
-                std::iter::repeat_n((Vec::new(), Vec::new()), off).chain(page).collect()
+            // `rows` is this page's rows, already past `off` either way (for open mints, `off` counts open ones).
+            let rows: Vec<(Vec<u8>, Vec<u8>)> = if newest {
+                newest_page(&x, tokens::TICK, pre.clone(), num_tick, off, want)
             } else {
-                x.node.chain.store(x.c()).read(|r| r.scan_prefix_limit(tokens::TICK, &pre, scan)).map_err(e)?
-            };
-            let rows: Vec<_> = if open {
-                rows.into_iter().filter(|(_, v)| {
+                let all = x.node.chain.store(x.c()).read(|r| r.scan_prefix_limit(tokens::TICK, &pre, scan)).map_err(e)?;
+                all.into_iter().filter(|(_, v)| {
+                    if !open {
+                        return true;
+                    }
                     let v: Value = serde_json::from_slice(v).unwrap_or(Value::Null);
                     let big = |k: &str| v[k].as_str().and_then(|x| x.parse::<u128>().ok()).unwrap_or(0);
                     big("minted") < big("supply")
-                }).collect()
-            } else {
-                rows
+                }).skip(off).collect()
             };
             Ok(json!({"protocol": tokens::protocol(x.p).map(|t| t.0).unwrap_or("tokens"), "total": tokens::tick_count(&x.node.chain, x.c()),
-                "offset": off, "items": rows.into_iter().skip(off).filter_map(|(k, v)| {
+                "offset": off, "items": rows.into_iter().take(want).filter_map(|(k, v)| {
                 let mut v: Value = serde_json::from_slice(&v).ok()?;
                 v["tick"] = json!(String::from_utf8_lossy(&k[2..]));
                 Some(v)
@@ -1673,6 +1671,8 @@ mod tests {
         assert_eq!(ticks(json!({"n": 10})), ["bbbb", "abcd", "aaaa"]);
         assert_eq!(ticks(json!({"n": 1, "offset": 1})), ["abcd"]);
         assert_eq!(ticks(json!({"n": 10, "q": "a"})), ["aaaa", "abcd"]);
+        assert_eq!(ticks(json!({"n": 1, "q": "a", "offset": 1})), ["abcd"]);
+        assert_eq!(ticks(json!({"n": 1, "open": true, "offset": 2})), ["bbbb"], "open mints page alphabetically, the offset counting open ones");
         let sum = handle_here(&t.node, "explorer.summary", &json!({}), false).unwrap();
         assert_eq!(sum["tokens"][0]["tick"], "bbbb", "the overview shows the newest tokens too");
         assert_eq!(sum["name_rows"][0]["name"], "zebra.doge", "the overview shows the newest names too");
