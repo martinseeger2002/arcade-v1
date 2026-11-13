@@ -429,6 +429,8 @@ pub fn auto_seal(node: &Node, net: &Net, catalog: &Catalog) {
     let (n, net, full) = (node.self_arc(), *net, catalog.segment_bytes());
     crate::arcseal::set_sealing(Some((format!("{} {}", p0.key, family_name(f0)), 0, 0)));
     let _ = std::thread::Builder::new().name("arc sealing".into()).spawn(move || {
+        // Sealing takes every core; chain sync and the rest come first.
+        crate::rulecheck::lowest_priority();
         for (p, family) in work {
             let what = family_name(family);
             if let Err(why) = seal_on(&n, &net, p, family, full) {
