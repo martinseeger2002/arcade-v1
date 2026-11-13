@@ -651,7 +651,8 @@ pub fn handle_of(node: &Node, address: &str) -> Option<String> {
         let script = arcade_ledger::address::script_for_address(p, address)?;
         let ids = arcade_ledger::ord::held_by(&node.chain, p, &script).ok()?;
         let mut won: Vec<String> = Vec::new();
-        for id in ids.iter().take(5000) {
+        // Every inscription it holds (a collector holds tens of thousands; the answer is kept 10 minutes).
+        for id in ids.iter().take(100_000) {
             let Some(meta) = arcade_ledger::ord::inscription(&node.chain, p, id) else { continue };
             if meta["size"].as_u64().is_none_or(|n| n > 64) || !meta["ct"].as_str().is_some_and(|c| c.starts_with("text/")) {
                 continue;
