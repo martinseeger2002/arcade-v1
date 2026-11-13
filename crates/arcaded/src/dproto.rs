@@ -530,7 +530,9 @@ fn judge_action(rows: &Rows, regs: &[Registrar], rec: &Value) -> Value {
     match op {
         1 | 2 | 4 | 5 | 6 => {
             for p in rows.posts_with_prefix(&t11[..10]) {
-                if t11[10] != 0 || !earlier(&p, rec) || !matches!(p["body"]["map"]["type"].as_str(), Some("post" | "comment" | "quote")) {
+                // The earliest matching inscription, wherever the action sits: an action spends nothing of the post, so
+                // a miner may place it before the post in the same block (DogeFeed counts those).
+                if t11[10] != 0 || !matches!(p["body"]["map"]["type"].as_str(), Some("post" | "comment" | "quote")) {
                     continue;
                 }
                 let tid = p["txid"].as_str().unwrap_or("").to_string();
@@ -542,7 +544,11 @@ fn judge_action(rows: &Rows, regs: &[Registrar], rec: &Value) -> Value {
             }
             if candidates.is_empty() {
                 ev["target"] = json!(format!("{}…i{}", hex::encode(&t11[..10]), t11[10]));
-                return bad(ev, "its target is not a D:// post here");
+                return bad(ev, if t11[10] != 0 {
+                    "its target is not an inscribed D:// post (a post DogeFeed keeps off chain can't be checked here)"
+                } else {
+                    "its target is not a D:// post here"
+                });
             }
         }
         3 => {
@@ -1087,10 +1093,13 @@ mod tests {
                 dp::DprotoIndexer.connect(&BlockCtx { l: &l, params: p, block: &b, height: h, prevouts: &pv })
             }).unwrap();
         };
-        // The posts first (earlier blocks), then the records about them, each at its own height.
+        // The posts first (earlier blocks), then the records about them, each at its own height; but the liked post
+        // AFTER its like (a miner may order them so in one block): the like still finds it.
+        let liked_txid = f["like"]["target"].as_str().unwrap()[..64].to_string();
         let mut h = 6_448_000;
-        for (_, v) in f["_parents"].as_object().unwrap() {
-            connect(h, v["hex"].as_str().unwrap(), None);
+        for (k, v) in f["_parents"].as_object().unwrap() {
+            let at = if *k == liked_txid { 6_460_000 } else { h };
+            connect(at, v["hex"].as_str().unwrap(), None);
             h += 1;
         }
         let kinds = ["post", "comment", "quote", "like", "branch", "follow", "tip"];
