@@ -1332,6 +1332,8 @@ pub fn status(node: &Node) -> Result<Value, String> {
         // What this arcade earns with, and what it writes blocks with (replicas count for the draw DRAW_WEIGHT_WAIT
         // blocks after their first passed audit).
         "weight": st.chain.storage().pay_weight(&me),
+        // Of that, its own replicas' (the rest is genesis bytes, paid to its genesis earner).
+        "own_weight": st.chain.storage().owner_pay_weight(&me),
         "draw_weight": st.chain.storage().weight(&me),
         "pot": st.chain.storage().pot(),
         "coins": st.chain.coins().len(),
@@ -1343,10 +1345,15 @@ pub fn status(node: &Node) -> Result<Value, String> {
         // The rules (§14.21): the version now, what this arcade knows, and an update the mesh says is needed.
         "rules": {"now": svc.net.rules_at(t.height + 1), "known": params::RULES_KNOWN, "protocol": params::PROTOCOL,
                   "update_needed": update_needed(), "outdated_peers": OUTDATED.lock().unwrap().len()},
-        // Every owner with replicas: the weight they count with now (a missed audit takes a replica out) and the
-        // pay accrued for their next turn.
-        "owners": st.chain.storage().owners().iter().map(|o| json!({"owner": hex::encode(o), "weight": st.chain.storage().pay_weight(o), "draw_weight": st.chain.storage().weight(o),
+        // Every owner with replicas: the weight of its own replicas (a missed audit takes one out; genesis bytes
+        // are paid to the genesis earners below, not here) and the pay accrued for its next turn.
+        "owners": st.chain.storage().owners().iter().map(|o| json!({"owner": hex::encode(o), "weight": st.chain.storage().owner_pay_weight(o), "draw_weight": st.chain.storage().weight(o),
             "accrued": st.chain.storage().accrued_of(&arcade_arc::registry::Earner::Owner(*o))})).collect::<Vec<_>>(),
+        // The genesis earners, paid apart from the owners: per payout address, the genesis bytes behind it, the
+        // keys holding them, and what it has accrued for its next turn.
+        "genesis": st.chain.storage().genesis_earners().iter().map(|(pay, w, keys, acc)| json!({
+            "address": arcade_ledger::address::base58check(pay[0], &pay[1..]), "weight": w,
+            "keys": keys.iter().map(hex::encode).collect::<Vec<_>>(), "accrued": acc})).collect::<Vec<_>>(),
         // Owners with serving verdicts since their last turn, or pay held back (§14.19 2).
         "serving": st.chain.storage().owners().iter().filter_map(|owner| {
             let (v, h) = (st.chain.storage().verdicts_of(owner), st.chain.storage().held_of(owner));
