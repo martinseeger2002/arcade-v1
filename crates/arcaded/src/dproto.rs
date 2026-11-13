@@ -939,6 +939,47 @@ mod tests {
     }
 
     #[test]
+    fn a_record_this_arcade_signs_and_stamps_passes_the_guides_checks() {
+        let p = doge();
+        let author = arcade_wallet::SecretKey::from_slice(&[11u8; 32]).unwrap();
+        let apk = arcade_wallet::secp256k1::PublicKey::from_secret_key(arcade_wallet::secp256k1::SECP256K1, &author).serialize();
+        let addr = arcade_ledger::address::base58check(p.p2pkh_version, &arcade_ledger::address::hash160(&apk));
+        let reg = arcade_wallet::SecretKey::from_slice(&[12u8; 32]).unwrap();
+        let rpk = arcade_wallet::secp256k1::PublicKey::from_secret_key(arcade_wallet::secp256k1::SECP256K1, &reg).serialize();
+        let raddr = arcade_ledger::address::base58check(p.p2pkh_version, &arcade_ledger::address::hash160(&rpk));
+        let mut rec = json!({"p": "D://", "v": 1, "b": {"mime": "text/markdown", "text": "gm from an arcade é"},
+                             "map": {"app": "dogefeed", "type": "post", "ts": 1794600000000u64, "tags": ["gm"]},
+                             "aip": {"alg": "DOGE_ECDSA", "addr": addr}});
+        rec["aip"]["sig"] = json!(arcade_wallet::keys::signmessage(&author, MAGIC, &signed_string(&rec)));
+        assert_eq!(shape_ok(&rec).unwrap(), "post");
+        rec["att"] = json!({"kid": kid_of(&rpk), "sig": arcade_wallet::keys::signmessage(&reg, MAGIC, &att_message(&rec))});
+        assert!(verify_msg(&addr, rec["aip"]["sig"].as_str().unwrap(), &signed_string(&rec)));
+        assert!(verify_msg(&raddr, rec["att"]["sig"].as_str().unwrap(), &att_message(&rec)));
+        assert!(kid_of(&rpk).starts_with("arc-") && kid_of(&rpk).len() <= 32);
+        // The body as inscribed reads back to the same record.
+        let (_, body) = dp::envelope_body(&{
+            let mut s = vec![3, b'o', b'r', b'd', 0x51, 16];
+            s.extend_from_slice(b"application/json");
+            s.push(0);
+            for c in jcs(&rec).as_bytes().chunks(240) { s.push(0x4c); s.push(c.len() as u8); s.extend_from_slice(c); }
+            s
+        }).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), rec);
+    }
+
+    #[test]
+    fn amounts_follow_the_guide() {
+        assert!(amounts_ok(1, 88_000_000, FEE).is_ok());
+        assert!(amounts_ok(1, 88_000_000, FEE - 1).is_err());
+        assert!(amounts_ok(4, 90_000_000, 10_000_000).is_ok());
+        assert!(amounts_ok(4, 80_000_000, 10_000_000).is_err());
+        assert!(amounts_ok(6, 0, FEE).is_ok());
+        assert_eq!(koinu_of("2.5"), Some(250_000_000));
+        assert_eq!(koinu_of("0.00000001"), Some(1));
+        assert_eq!(koinu_of("1.000000001"), None);
+    }
+
+    #[test]
     fn jcs_sorts_keys_without_spaces() {
         let v = json!({"b": 1, "a": {"z": "x\ny", "c": [1, "é"]}});
         assert_eq!(jcs(&v), r#"{"a":{"c":[1,"é"],"z":"x\ny"},"b":1}"#);
@@ -955,4 +996,349 @@ mod tests {
             &arcade_wallet::SecretKey::from_slice(&[8u8; 32]).unwrap()).serialize();
         assert!(!verify_digest(&other, &d, &s));
     }
+}
+
+// ---------------- this arcade as a registrar: writing D:// ----------------
+
+/// What every record's inscription carries to its author (DogeFeed's postage).
+pub const POSTAGE: u64 = 100_000;
+/// A like, branch, follow, comment or quote costs its author 1 DOGE in all: 0.1 to the registrar, the network fee,
+/// and the rest to the author it is about.
+pub const ONE_DOGE: u64 = 100_000_000;
+const CTYPE: &str = "application/json";
+
+/// "5", "2.5", "0.12345678" DOGE as koinu (exact, at most 8 decimals).
+fn koinu_of(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (w, f) = s.split_once('.').unwrap_or((s, ""));
+    if w.is_empty() && f.is_empty() || f.len() > 8 || !w.chars().chain(f.chars()).all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let w: u64 = if w.is_empty() { 0 } else { w.parse().ok()? };
+    let f: u64 = if f.is_empty() { 0 } else { format!("{f:0<8}").parse().ok()? };
+    w.checked_mul(100_000_000)?.checked_add(f)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+fn script_of(a: &str) -> Result<Vec<u8>, String> {
+    arcade_ledger::address::script_for_address(doge(), a).ok_or_else(|| format!("{a} is not a Dogecoin address"))
+}
+
+/// The guide's shape checks for a record a registrar is asked to stamp (before any signature).
+fn shape_ok(rec: &Value) -> Result<&str, String> {
+    if rec["p"] != "D://" || rec["v"] != 1 || rec["map"]["app"] != "dogefeed" {
+        return Err("a D:// record has p \"D://\", v 1 and map.app \"dogefeed\"".into());
+    }
+    let ty = rec["map"]["type"].as_str().unwrap_or("");
+    if !["post", "comment", "quote", "edit", "keylink"].contains(&ty) {
+        return Err("map.type is post, comment, quote, edit or keylink".into());
+    }
+    if !rec["map"]["ts"].as_u64().is_some_and(|t| t > 0) {
+        return Err("map.ts is a positive integer (milliseconds)".into());
+    }
+    let iid = |k: &str| rec["map"][k].as_str().is_some_and(|s| dp::parse_iid(s).is_some());
+    match ty {
+        "comment" if !iid("reply") && !rec["map"]["pay"].is_string() => return Err("a comment needs map.reply or map.pay".into()),
+        "quote" if !iid("quote") && !rec["map"]["pay"].is_string() => return Err("a quote needs map.quote or map.pay".into()),
+        "edit" if !iid("ref") => return Err("an edit needs map.ref".into()),
+        "keylink" if !rec["map"]["key"].is_string() || !rec["map"]["ops"].is_array() => return Err("a keylink needs map.key and map.ops".into()),
+        _ => {}
+    }
+    if let Some(t) = rec["map"]["tags"].as_array() {
+        if t.len() > 10 || t.iter().any(|x| x.as_str().is_none_or(|s| s.len() > 50)) {
+            return Err("map.tags is at most 10 short strings".into());
+        }
+    }
+    if ty != "keylink" {
+        if rec["b"]["mime"].as_str().is_some_and(|m| m != "text/markdown") {
+            return Err("b.mime is text/markdown".into());
+        }
+        if rec["b"]["media"].as_array().is_some_and(|m| m.iter().any(|x| x.as_str().and_then(dp::parse_iid).is_none())) {
+            return Err("b.media lists inscription ids".into());
+        }
+    }
+    if rec["aip"]["alg"] != "DOGE_ECDSA" || !rec["aip"]["addr"].is_string() {
+        return Err("aip has alg DOGE_ECDSA and the author's addr".into());
+    }
+    if jcs(rec).len() > dp::MAX_BODY {
+        return Err("the record is over 4096 bytes".into());
+    }
+    Ok(ty)
+}
+
+/// `dogefeed.stamp {record}`: this arcade's registrar stamp (att) for a record its author signed: checked as the
+/// guide checks it, then attested with this arcade's kid. For a website or app whose users sign in their browsers.
+pub fn stamp(node: &Node, req: &Value) -> Result<Value, String> {
+    let mut rec = req["record"].clone();
+    if rec.is_string() {
+        rec = serde_json::from_str(rec.as_str().unwrap()).map_err(|_| "record is a JSON object")?;
+    }
+    shape_ok(&rec)?;
+    let author = rec["aip"]["addr"].as_str().unwrap_or("").to_string();
+    if !verify_msg(&author, rec["aip"]["sig"].as_str().unwrap_or(""), &signed_string(&rec)) {
+        return Err("the author's signature (aip.sig) does not verify".into());
+    }
+    let (reg, rsk) = own(node)?;
+    let sig = arcade_wallet::keys::signmessage(&rsk, MAGIC, &att_message(&rec));
+    rec["att"] = json!({"kid": reg.kid, "sig": sig});
+    Ok(json!({"record": rec, "att": rec["att"], "fee_address": reg.fee_address, "fee": FEE, "postage": POSTAGE}))
+}
+
+/// The op number of an action name.
+fn op_of(name: &str) -> Option<u8> {
+    (1..=7).find(|o| op_name(*o) == Some(name))
+}
+
+/// The full target of an action (post: txid in wire order + index u32 LE; address: hash160) and its 11-byte form.
+fn full_target(op: u8, target: &str) -> Result<(Vec<u8>, [u8; 11]), String> {
+    if matches!(op, 3 | 7) {
+        let (_, h) = arcade_ledger::address::decode_base58check(target.trim()).ok_or("the target is a Dogecoin address")?;
+        let mut t = [0u8; 11];
+        t.copy_from_slice(&h[..11]);
+        return Ok((h, t));
+    }
+    let (t, i) = dp::parse_iid(target.trim()).ok_or("the target is an inscription id (txid + i + index)")?;
+    let mut full = t.to_vec();
+    full.reverse();
+    full.extend_from_slice(&i.to_le_bytes());
+    Ok((full, dp::post_target(&t, i)))
+}
+
+/// The 80-byte OP_RETURN record: "D://", version 1 and op, the 11-byte target, the registrar's signature.
+fn action_bytes(op: u8, t11: &[u8; 11], sig: &[u8; 64]) -> Vec<u8> {
+    let mut d = b"D://".to_vec();
+    d.push(0x10 | op);
+    d.extend_from_slice(t11);
+    d.extend_from_slice(sig);
+    d
+}
+
+/// The amounts an action must carry (the guide, §3 step 5).
+fn amounts_ok(op: u8, recipient: u64, fee: u64) -> Result<(), String> {
+    match op {
+        1..=3 if fee < FEE || recipient < DUST => Err("a like, branch or follow pays the registrar 0.1 DOGE and the author at least 0.01".into()),
+        4 | 5 if recipient == 0 || fee * 9 + 1 < recipient || fee * 9 > recipient + 1 => Err("a tip or reveal pays 90% to the author and 10% to the registrar".into()),
+        6 | 7 if fee < FEE => Err("a delete or keyrevoke pays the registrar 0.1 DOGE".into()),
+        _ => Ok(()),
+    }
+}
+
+/// `dogefeed.sign_action {op, target, inputs: [{txid, vout}], recipient?: {address, value}, fee: {value}}`: this
+/// arcade's registrar signature for a paid action a browser wallet builds: the fee output pays this arcade's fee
+/// address. Answers the 80-byte OP_RETURN data (hex) to put in the transaction.
+pub fn sign_action(node: &Node, req: &Value) -> Result<Value, String> {
+    let op = op_of(req["op"].as_str().unwrap_or("")).ok_or("op is like, branch, follow, tip, reveal, delete or keyrevoke")?;
+    let (full, t11) = full_target(op, req["target"].as_str().ok_or("give the target")?)?;
+    let inputs: Vec<([u8; 32], u32)> = req["inputs"].as_array().ok_or("give the inputs [{txid, vout}]")?.iter().map(|i| {
+        let mut b = [0u8; 32];
+        hex::decode_to_slice(i["txid"].as_str().unwrap_or(""), &mut b).map_err(|_| "an input's txid is 64 hex")?;
+        b.reverse();
+        Ok((b, i["vout"].as_u64().ok_or("an input names its vout")? as u32))
+    }).collect::<Result<_, String>>()?;
+    if inputs.is_empty() || inputs.len() > 255 {
+        return Err("1 to 255 inputs".into());
+    }
+    let (reg, rsk) = own(node)?;
+    let fee_v = req["fee"]["value"].as_u64().ok_or("give the fee output's value")?;
+    let recipient = if matches!(op, 6 | 7) { None } else {
+        let a = req["recipient"]["address"].as_str().ok_or("give the recipient's address")?;
+        Some((req["recipient"]["value"].as_u64().ok_or("give the recipient's value")?, script_of(a)?))
+    };
+    if op == 3 && recipient.as_ref().map(|(_, s)| arcade_ledger::address::address_of(s, doge())).flatten()
+        .and_then(|a| dp::h160_target(&a)) != Some(t11) {
+        return Err("a follow pays the followed address".into());
+    }
+    amounts_ok(op, recipient.as_ref().map(|r| r.0).unwrap_or(0), fee_v)?;
+    let fee_s = script_of(&reg.fee_address)?;
+    let d = action_digest(0x10 | op, &full, &inputs, recipient.as_ref().map(|(v, s)| (*v, s.as_slice())), (fee_v, &fee_s));
+    let sig = sign_digest(&rsk, &d);
+    Ok(json!({"data": hex::encode(action_bytes(op, &t11, &sig)), "kid": reg.kid, "fee_address": reg.fee_address}))
+}
+
+/// This wallet's Dogecoin P2PKH coins and key (every input of a D:// action comes from one address).
+fn wallet(node: &Node) -> Result<(arcade_wallet::SecretKey, arcade_wallet::secp256k1::PublicKey, String, Vec<arcade_wallet::tx::Utxo>), String> {
+    let p = doge();
+    if crate::borrow::is_borrowed(p.key) || !crate::chains::kept(node, p) {
+        return Err("Dogecoin is not installed here: a D:// record spends this arcade's own DOGE".into());
+    }
+    let (sk, pk) = crate::swaps::wallet_key(node, p)?;
+    let own = crate::swaps::p2pkh_of(&pk);
+    let addr = arcade_ledger::address::base58check(p.p2pkh_version, &arcade_ledger::address::hash160(&pk.serialize()));
+    let coins = crate::swaps::coins(node, p, &pk).into_iter().filter(|c| c.script == own).collect();
+    Ok((sk, pk, addr, coins))
+}
+
+/// `dogefeed.post {type?, text?, media?, reply?|quote?|pay?, ref?, tags?, mentions?, send?}`: a post, comment,
+/// quote or edit from this arcade's own Dogecoin wallet, signed by it, stamped by this arcade's registrar key and
+/// inscribed exactly as DogeFeed writes one. Without send: the record and what it costs.
+pub fn post(node: &Node, req: &Value) -> Result<Value, String> {
+    let p = doge();
+    let ty = req["type"].as_str().unwrap_or("post");
+    let (sk, pk, author, coins) = wallet(node)?;
+    let mut map = json!({"app": "dogefeed", "type": ty, "ts": now_ms()});
+    for k in ["reply", "quote", "ref", "pay"] {
+        if let Some(v) = req[k].as_str().filter(|v| !v.trim().is_empty()) {
+            map[k] = json!(v.trim().to_lowercase().replace(char::is_whitespace, ""));
+            if k == "pay" {
+                map[k] = json!(v.trim());
+            }
+        }
+    }
+    for k in ["tags", "mentions"] {
+        if req[k].is_array() {
+            map[k] = req[k].clone();
+        }
+    }
+    let mut b = json!({"mime": "text/markdown"});
+    if let Some(t) = req["text"].as_str() {
+        b["text"] = json!(t);
+    }
+    if req["media"].is_array() {
+        b["media"] = req["media"].clone();
+    }
+    let mut rec = json!({"p": "D://", "v": 1, "b": b, "map": map, "aip": {"alg": "DOGE_ECDSA", "addr": author}});
+    let sig = arcade_wallet::keys::signmessage(&sk, MAGIC, &signed_string(&rec));
+    rec["aip"]["sig"] = json!(sig);
+    let stamped = stamp(node, &json!({"record": rec}))?;
+    let rec = stamped["record"].clone();
+    let body = jcs(&rec);
+    // Who a comment or quote pays: the parent's author (from the index here, or the mesh), else map.pay.
+    let payee = match ty {
+        "comment" | "quote" => {
+            let parent = rec["map"][if ty == "comment" { "reply" } else { "quote" }].as_str();
+            let from_index = parent.and_then(|id| {
+                crate::explorer::handle(node, "explorer.dogefeed_inscription", &json!({"chain": "doge", "id": id})).ok()
+                    .and_then(|v| v["author"].as_str().map(String::from))
+            });
+            Some(from_index.or_else(|| rec["map"]["pay"].as_str().map(String::from))
+                .ok_or("the post it answers isn't found on D:// here: give pay (its author's address)")?)
+        }
+        _ => None,
+    };
+    let fee_s = script_of(stamped["fee_address"].as_str().unwrap_or(""))?;
+    let own = crate::swaps::p2pkh_of(&pk);
+    let per_kb = crate::claims::FEE_PER_KB;
+    // The reveal: the inscription to the author, the registrar's fee, the payout; its own fee, with soft dust.
+    let mut outs: Vec<(u64, Vec<u8>)> = vec![(POSTAGE, own.clone()), (FEE, fee_s)];
+    if let Some(a) = &payee {
+        outs.push((ONE_DOGE - FEE - POSTAGE, script_of(a)?)); // settled below, once the fees are known
+    }
+    let reveal_fee = |outs: &[(u64, Vec<u8>)]| arcade_wallet::tx::fee_for_size(p, arcade_wallet::ordwrite::chunked_reveal_size(CTYPE, body.as_bytes(), outs) as u64, per_kb)
+        + outs.iter().filter(|(v, _)| *v < crate::swaps::SOFT_DUST).count() as u64 * crate::swaps::SOFT_DUST;
+    let lock = arcade_wallet::ordwrite::chunked_lock(&pk, CTYPE, body.as_bytes());
+    let commit_for = |outs: &[(u64, Vec<u8>)]| {
+        let value = outs.iter().map(|o| o.0).sum::<u64>() + reveal_fee(outs);
+        crate::swaps::build(node, p, &sk, vec![], coins.clone(), vec![arcade_wallet::tx::TxOutSpec { value, script: lock.clone() }], &own)
+    };
+    let have = |tx: &arcade_chain::Tx| tx.inputs.iter().filter_map(|i| coins.iter().find(|c| c.outpoint == i.prevout).map(|c| c.value)).sum::<u64>();
+    let mut commit = commit_for(&outs)?;
+    let mut commit_fee = have(&commit).saturating_sub(commit.outputs.iter().map(|o| o.value).sum());
+    if payee.is_some() {
+        // 1 DOGE in all: the payout is what is left after the registrar, the postage and both network fees.
+        let rest = ONE_DOGE.saturating_sub(FEE + POSTAGE + reveal_fee(&outs) + commit_fee);
+        if rest < DUST {
+            return Err("the network fees leave nothing for the author".into());
+        }
+        outs[2].0 = rest;
+        commit = commit_for(&outs)?;
+        commit_fee = have(&commit).saturating_sub(commit.outputs.iter().map(|o| o.value).sum());
+    }
+    let vout = commit.outputs.iter().position(|o| o.script_pubkey == lock).ok_or("the commit doesn't pay the lock")? as u32;
+    let reveal = arcade_wallet::ordwrite::reveal_chunked(p, &sk, arcade_chain::OutPoint { txid: commit.txid, vout }, CTYPE, body.as_bytes(), outs.clone(), arcade_app::now() as u32)?;
+    let rtx = arcade_chain::Tx::parse_with(&reveal, &p.format).map_err(|e| e.to_string())?;
+    let cost = outs.iter().filter(|(_, s)| *s != own).map(|o| o.0).sum::<u64>() + reveal_fee(&outs) + commit_fee;
+    let mut v = json!({"record": rec, "bytes": body.len(), "author": author, "registrar": stamped["att"]["kid"],
+                       "fee": FEE, "payout": payee.as_ref().map(|a| json!({"address": a, "value": outs[2].0})),
+                       "network_fee": reveal_fee(&outs) + commit_fee, "cost": cost, "inscription": format!("{}i0", rtx.txid.to_hex())});
+    if req["send"] != true {
+        return Ok(v);
+    }
+    crate::swaps::send(node, p, &commit)?;
+    crate::swaps::send_raw(node, p, &reveal)?;
+    let _ = node.app.event("dogefeed", &format!("{ty} inscribed on D:// ({}i0)", rtx.txid.to_hex()));
+    v["sent"] = json!(true);
+    v["commit"] = json!(commit.txid.to_hex());
+    Ok(v)
+}
+
+/// `dogefeed.act {op, target, amount?, send?}`: a like, branch, follow, tip, reveal, delete or keyrevoke from this
+/// arcade's own Dogecoin wallet, signed by this arcade's registrar, built exactly as the guide says (all inputs
+/// from one address, the recipient and the registrar's fee outputs, the 80-byte OP_RETURN). amount (tips and
+/// reveals) in DOGE: 90% to the author, 10% to the registrar.
+pub fn act(node: &Node, req: &Value) -> Result<Value, String> {
+    let p = doge();
+    let name = req["op"].as_str().unwrap_or("");
+    let op = op_of(name).ok_or("op is like, branch, follow, tip, reveal, delete or keyrevoke")?;
+    let target = req["target"].as_str().ok_or("give the target: an inscription id, or an address to follow")?.trim().to_string();
+    let (full, t11) = full_target(op, &target)?;
+    let (sk, pk, author, coins) = wallet(node)?;
+    let (reg, rsk) = own(node)?;
+    // Who is paid: the post's author (from the index here or the mesh), or the followed address.
+    let to: Option<String> = match op {
+        3 => Some(target.clone()),
+        6 | 7 => None,
+        _ => Some(crate::explorer::handle(node, "explorer.dogefeed_inscription", &json!({"chain": "doge", "id": target})).ok()
+            .and_then(|v| v["author"].as_str().map(String::from))
+            .ok_or("that post isn't found on D:// (the dogefeed index, here or on the mesh)")?),
+    };
+    if op == 6 && to.is_none() {
+        let post = crate::explorer::handle(node, "explorer.dogefeed_inscription", &json!({"chain": "doge", "id": target}))?;
+        if post["author"] != author.as_str() {
+            return Err("you can only delete your own post".into());
+        }
+    }
+    let (rec_v, fee_v) = match op {
+        4 | 5 => {
+            let a = req["amount"].as_str().map(String::from).or_else(|| req["amount"].as_f64().map(|f| f.to_string())).ok_or("give the amount in DOGE")?;
+            let k = koinu_of(&a).filter(|k| *k >= DUST * 10).ok_or("the amount is in DOGE, at least 0.1, for example 5")?;
+            let fee = k / 10;
+            (fee * 9, fee)
+        }
+        6 | 7 => (0, FEE),
+        _ => (ONE_DOGE - FEE, FEE), // settled below: 1 DOGE in all, network fee included
+    };
+    let fee_s = script_of(&reg.fee_address)?;
+    let own_s = crate::swaps::p2pkh_of(&pk);
+    let mut recipient = to.as_ref().map(|a| script_of(a)).transpose()?.map(|s| (rec_v, s));
+    let outs = |recipient: &Option<(u64, Vec<u8>)>, data: Vec<u8>| {
+        let mut o = Vec::new();
+        if let Some((v, s)) = recipient {
+            o.push(arcade_wallet::tx::TxOutSpec { value: *v, script: s.clone() });
+        }
+        o.push(arcade_wallet::tx::TxOutSpec { value: fee_v, script: fee_s.clone() });
+        o.push(arcade_wallet::tx::TxOutSpec { value: 0, script: arcade_wallet::tx::op_return(&data) });
+        o
+    };
+    // Pass 1 picks the coins (the OP_RETURN's size is fixed); the network fee then settles a 1 DOGE action's payout.
+    let draft = crate::swaps::build(node, p, &sk, vec![], coins.clone(), outs(&recipient, vec![0; 80]), &own_s)?;
+    let used: Vec<arcade_wallet::tx::Utxo> = draft.inputs.iter().filter_map(|i| coins.iter().find(|c| c.outpoint == i.prevout).cloned()).collect();
+    let in_sum: u64 = used.iter().map(|u| u.value).sum();
+    let net_fee = in_sum.saturating_sub(draft.outputs.iter().map(|o| o.value).sum());
+    if matches!(op, 1..=3) {
+        if let Some(r) = recipient.as_mut() {
+            r.0 = (ONE_DOGE - FEE).saturating_sub(net_fee);
+        }
+    }
+    amounts_ok(op, recipient.as_ref().map(|r| r.0).unwrap_or(0), fee_v)?;
+    let outpoints: Vec<([u8; 32], u32)> = used.iter().map(|u| (u.outpoint.txid.0, u.outpoint.vout)).collect();
+    let d = action_digest(0x10 | op, &full, &outpoints, recipient.as_ref().map(|(v, s)| (*v, s.as_slice())), (fee_v, &fee_s));
+    let data = action_bytes(op, &t11, &sign_digest(&rsk, &d));
+    let tx = crate::swaps::build(node, p, &sk, used.clone(), vec![], outs(&recipient, data.clone()), &own_s)?;
+    if tx.inputs.iter().map(|i| (i.prevout.txid.0, i.prevout.vout)).collect::<Vec<_>>() != outpoints {
+        return Err("the coins changed while building; try again".into());
+    }
+    let mut v = json!({"op": name, "target": target, "author": author, "registrar": reg.kid, "fee": fee_v,
+                       "recipient": recipient.as_ref().map(|(val, _)| json!({"address": to, "value": val})),
+                       "network_fee": in_sum.saturating_sub(tx.outputs.iter().map(|o| o.value).sum()),
+                       "data": hex::encode(&data), "txid": tx.txid.to_hex()});
+    if req["send"] != true {
+        return Ok(v);
+    }
+    crate::swaps::send(node, p, &tx)?;
+    let _ = node.app.event("dogefeed", &format!("{name} on D:// ({})", tx.txid.to_hex()));
+    v["sent"] = json!(true);
+    Ok(v)
 }
