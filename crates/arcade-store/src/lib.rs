@@ -82,7 +82,7 @@ pub struct Schema {
 /// Room for add-on index tables (ord, tokens, other chains' protocols) created later
 /// with [`Store::add_table`]; they must be named under a prefix in `ADDON_PREFIXES`.
 pub const ADDON_TABLE_SLOTS: u64 = 256;
-pub const ADDON_PREFIXES: &[&str] = &["ord.", "tok.", "names.", "sites.", "maps.", "ledger.", "msg.", "coll.", "addon."];
+pub const ADDON_PREFIXES: &[&str] = &["ord.", "tok.", "names.", "sites.", "maps.", "ledger.", "msg.", "coll.", "dproto.", "addon."];
 
 pub struct Store {
     db: Database<NoWriteMap>,

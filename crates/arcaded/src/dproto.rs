@@ -239,43 +239,50 @@ pub fn sign_digest(sk: &arcade_wallet::SecretKey, digest: &[u8; 32]) -> [u8; 64]
 
 // ---------------- reading the index ----------------
 
-struct Rows<'a> {
-    node: &'a Node,
+/// The dogefeed index's rows on one chain store, and that chain's tip (for confirmations).
+pub struct Rows {
+    store: std::sync::Arc<arcade_store::Store>,
     c: u16,
+    tip: u32,
 }
 
-impl<'a> Rows<'a> {
-    fn new(node: &'a Node) -> Self {
-        Rows { node, c: doge().chain_no }
+impl Rows {
+    fn new(node: &Node) -> Self {
+        let c = doge().chain_no;
+        Rows { store: node.chain.store(c), c, tip: node.chain.tip(c).ok().flatten().map(|t| t.height).unwrap_or(0) }
+    }
+    #[cfg(test)]
+    fn of(store: std::sync::Arc<arcade_store::Store>, tip: u32) -> Self {
+        Rows { store, c: doge().chain_no, tip }
     }
     fn rec_at(&self, at: &[u8]) -> Option<Value> {
         let k = KeyBuf::new().u16(self.c).bytes(at).done();
-        self.node.chain.store(self.c).read(|r| r.get(dp::REC, &k)).ok().flatten().and_then(|v| serde_json::from_slice(&v).ok())
+        self.store.read(|r| r.get(dp::REC, &k)).ok().flatten().and_then(|v| serde_json::from_slice(&v).ok())
     }
     fn by_txid(&self, txid: &str) -> Option<Value> {
         let mut b = [0u8; 32];
         hex::decode_to_slice(txid.get(..64)?, &mut b).ok()?;
         let k = KeyBuf::new().u16(self.c).bytes(&b).done();
-        let at = self.node.chain.store(self.c).read(|r| r.get(dp::BY_TX, &k)).ok().flatten()?;
+        let at = self.store.read(|r| r.get(dp::BY_TX, &k)).ok().flatten()?;
         self.rec_at(&at)
     }
     /// The `at` suffixes under a prefix of a list table, newest first, after a cursor.
     fn list(&self, table: &str, prefix: &[u8], after: Option<&[u8]>, n: usize) -> Vec<Vec<u8>> {
         let k = KeyBuf::new().u16(self.c).bytes(prefix).done();
         let after_k = after.map(|a| [k.as_slice(), a].concat());
-        self.node.chain.store(self.c).read(|r| r.scan_after(table, &k, after_k.as_deref(), n)).unwrap_or_default()
+        self.store.read(|r| r.scan_after(table, &k, after_k.as_deref(), n)).unwrap_or_default()
             .into_iter().map(|(key, _)| key[key.len() - 8..].to_vec()).collect()
     }
     /// Inscribed records whose txid starts with these 10 bytes, oldest first.
     fn posts_with_prefix(&self, prefix10: &[u8]) -> Vec<Value> {
         let k = KeyBuf::new().u16(self.c).bytes(prefix10).done();
-        let mut v: Vec<Value> = self.node.chain.store(self.c).read(|r| r.scan_prefix_limit(dp::BY_TX, &k, 16)).unwrap_or_default()
+        let mut v: Vec<Value> = self.store.read(|r| r.scan_prefix_limit(dp::BY_TX, &k, 16)).unwrap_or_default()
             .into_iter().filter_map(|(_, at)| self.rec_at(&at)).filter(|r| r["k"] != "act").collect();
         v.sort_by_key(|r| (r["h"].as_u64(), r["pos"].as_u64()));
         v
     }
     fn tip(&self) -> u32 {
-        self.node.chain.tip(self.c).ok().flatten().map(|t| t.height).unwrap_or(0)
+        self.tip
     }
 }
 
@@ -304,11 +311,7 @@ pub fn judge(node: &Node, rec: &Value) -> Value {
         }
     }
     let rows = Rows::new(node);
-    let regs = registrars(node);
-    let mut ev = if rec["k"] == "act" { judge_action(&rows, &regs, rec) } else { judge_inscribed(&rows, &regs, rec) };
-    ev["txid"] = json!(txid);
-    ev["height"] = rec["h"].clone();
-    ev["position"] = rec["pos"].clone();
+    let mut ev = judge_with(&rows, &registrars(node), rec);
     let mut c = CACHE.lock().unwrap();
     let m = c.get_or_insert_with(HashMap::new);
     if m.len() > 20_000 {
@@ -320,8 +323,17 @@ pub fn judge(node: &Node, rec: &Value) -> Value {
     ev
 }
 
+/// One record judged against these registrars (no confirmations yet).
+pub fn judge_with(rows: &Rows, regs: &[Registrar], rec: &Value) -> Value {
+    let mut ev = if rec["k"] == "act" { judge_action(rows, regs, rec) } else { judge_inscribed(rows, regs, rec) };
+    ev["txid"] = rec["txid"].clone();
+    ev["height"] = rec["h"].clone();
+    ev["position"] = rec["pos"].clone();
+    ev
+}
+
 fn confirmations(node: &Node, ev: &mut Value) {
-    let tip = Rows::new(node).tip();
+    let tip = node.chain.tip(doge().chain_no).ok().flatten().map(|t| t.height).unwrap_or(0);
     let n = (tip + 1).saturating_sub(ev["height"].as_u64().unwrap_or(u64::MAX).min(u32::MAX as u64) as u32);
     ev["confirmations"] = json!(n);
     ev["status"] = json!(if n >= CONFIRMED { "confirmed" } else { "pending" });
@@ -977,6 +989,70 @@ mod tests {
         assert_eq!(koinu_of("2.5"), Some(250_000_000));
         assert_eq!(koinu_of("0.00000001"), Some(1));
         assert_eq!(koinu_of("1.000000001"), None);
+    }
+
+    /// DogeFeed's real mainnet records (and the posts they point at) through the real dogefeed indexer into a chain
+    /// store, then judged as the API judges them: every one valid, stamped by dfreg1; a changed amount is not.
+    #[test]
+    fn real_records_index_and_judge_valid_end_to_end() {
+        use arcade_chaindb::indexer::{BlockCtx, Indexer, Prevout};
+        let f: Value = serde_json::from_str(include_str!("../../arcade-ledger/testdata/dproto_mainnet.json")).unwrap();
+        let p = doge();
+        let dir = tempfile::tempdir().unwrap();
+        let db = arcade_chaindb::ChainDb::open(dir.path().join("chain.mdbx")).unwrap();
+        let store = db.wstore(p.chain_no).unwrap();
+        db.add_indexer(p.chain_no, std::sync::Arc::new(dp::DprotoIndexer)).unwrap();
+        let block_of = |txs: Vec<arcade_chain::Tx>| {
+            let ids: Vec<_> = txs.iter().map(|t| t.txid).collect();
+            let header = arcade_chain::Header { version: 1, prev: arcade_chain::Hash256::ZERO, merkle_root: arcade_chain::hash::merkle_root(&ids), time: 1, bits: 0x207fffff, nonce: 0 };
+            let mut raw = header.encode().to_vec();
+            arcade_chain::encode::write_varint(&mut raw, txs.len() as u64);
+            for t in &txs {
+                raw.extend_from_slice(&t.raw);
+            }
+            arcade_chain::Block::parse(&raw).unwrap()
+        };
+        let connect = |h: u32, hex_: &str, author: Option<&str>| {
+            let tx = arcade_chain::Tx::parse(&hex::decode(hex_).unwrap()).unwrap();
+            let script = author.map(|a| arcade_ledger::address::script_for_address(p, a).unwrap()).unwrap_or_default();
+            let pv = vec![tx.inputs.iter().map(|_| Prevout { value: 1, script: script.clone() }).collect::<Vec<_>>()];
+            let b = block_of(vec![tx]);
+            store.write(|w| {
+                let l = arcade_chaindb::undo::Logged::new(w);
+                dp::DprotoIndexer.connect(&BlockCtx { l: &l, params: p, block: &b, height: h, prevouts: &pv })
+            }).unwrap();
+        };
+        // The posts first (earlier blocks), then the records about them, each at its own height.
+        let mut h = 6_448_000;
+        for (_, v) in f["_parents"].as_object().unwrap() {
+            connect(h, v["hex"].as_str().unwrap(), None);
+            h += 1;
+        }
+        let kinds = ["post", "comment", "quote", "like", "branch", "follow", "tip"];
+        for k in kinds {
+            connect(f[k]["height"].as_u64().unwrap() as u32, f[k]["hex"].as_str().unwrap(), f[k]["author"].as_str());
+        }
+        let rows = Rows::of(store.clone(), 6_456_200);
+        let regs = vec![Registrar { kid: "dfreg1".into(), pubkey: hex::decode(DFREG1_PUB).unwrap(), address: DFREG1_ADDR.into(),
+                                    fee_address: DOGEFEED_FEE.into(), name: "DogeFeed".into(), source: "dogefeed".into() }];
+        for k in kinds {
+            let rec = rows.by_txid(f[k]["txid"].as_str().unwrap()).unwrap_or_else(|| panic!("{k} indexed"));
+            let ev = judge_with(&rows, &regs, &rec);
+            assert_eq!(ev["valid"], true, "{k}: {}", ev["reason"]);
+            assert_eq!(ev["type"], k, "{k}");
+            assert_eq!(ev["registrar"]["kid"], "dfreg1", "{k}");
+            if let Some(t) = f[k]["target"].as_str().filter(|t| dp::parse_iid(t).is_some() || k == "follow") {
+                assert_eq!(ev["target"], t, "{k}: target resolved");
+            }
+        }
+        // Counted: the like is found by the post it names (its 10-byte prefix and index).
+        let liked = f["like"]["target"].as_str().unwrap();
+        let (t, i) = dp::parse_iid(liked).unwrap();
+        let prefix = [&[b'p'][..], &dp::post_target(&t, i)[..]].concat();
+        assert!(rows.list(dp::BY_TARGET, &prefix, None, 10).iter().filter_map(|a| rows.rec_at(a)).any(|r| r["txid"] == f["like"]["txid"]));
+        // Without DogeFeed's key nothing is valid: a record counts only with a registrar known here.
+        let rec = rows.by_txid(f["like"]["txid"].as_str().unwrap()).unwrap();
+        assert_eq!(judge_with(&rows, &[], &rec)["valid"], false);
     }
 
     #[test]
