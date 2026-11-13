@@ -336,6 +336,12 @@ pub fn groups_of(v: &Value) -> Option<Vec<u8>> {
 
 // ---------------- fetching blocks we don't hold ----------------
 
+/// Whether arcade `id` may hold the blocks around height `h`: it announced holding their range,
+/// or it doesn't share the chain (an arcade not sharing holds all), or it announced nothing.
+pub fn may_hold_blocks(node: &Node, p: &ChainParams, id: &str, h: u32) -> bool {
+    node.holds.lock().unwrap().get(id).map(|(_, c)| holds_unit(&c[p.net], "blocks", (h / RANGE) as u64) || c[p.net].is_null()).unwrap_or(true)
+}
+
 /// Blocks by hash for a chain: from arcades that hold them, else the coin's P2P network.
 /// Every block is checked against the header we already have.
 pub fn fetch_blocks(node: &Node, p: &'static ChainParams, hashes: &[Hash256]) -> Result<Vec<Block>, String> {
@@ -358,8 +364,7 @@ pub fn fetch_blocks(node: &Node, p: &'static ChainParams, hashes: &[Hash256]) ->
     for (id, addr, kind, _) in node.offers_for(p.net) {
         // Only arcades that announce holding these blocks (any arcade not sharing holds all).
         let h0 = node.chain.header(p.chain_no, &hashes[0]).ok().flatten().map(|r| r.height).unwrap_or(0);
-        let hold = node.holds.lock().unwrap().get(&id).map(|(_, c)| holds_unit(&c[p.net], "blocks", (h0 / RANGE) as u64) || c[p.net].is_null()).unwrap_or(true);
-        if !hold {
+        if !may_hold_blocks(node, p, &id, h0) {
             continue;
         }
         let got = match kind {

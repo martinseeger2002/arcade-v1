@@ -1396,6 +1396,49 @@ impl ChainDb {
         })
     }
 
+    /// Heights in `from..=to` whose block body was pruned here and that no sealed copy answers
+    /// for: bodies this arcade lost (chains.refill fetches them back). At most `max`, in height
+    /// order, as (height, block number, block hash).
+    pub fn bodies_missing(&self, c: u16, from: u32, to: u32, max: usize) -> Result<Vec<(u32, u32, Hash256)>> {
+        let mut out = Vec::new();
+        let mut h = from;
+        while h <= to && out.len() < max {
+            if let Some(hash) = self.hash_at(c, h)? {
+                if let Some(rec) = self.header(c, &hash)? {
+                    if rec.b != 0 && self.is_block_pruned(c, rec.b)? && self.block_raw(c, &hash)?.is_none() {
+                        out.push((h, rec.b, hash));
+                    }
+                }
+            }
+            if h == u32::MAX {
+                break;
+            }
+            h += 1;
+        }
+        Ok(out)
+    }
+
+    /// The checks [`restore_block`](Self::restore_block) makes, without writing: the block's id
+    /// is the stored header's, its transaction count and merkle root match, and every stored
+    /// stub's txid is the block's transaction at that place.
+    pub fn restore_check(&self, params: &ChainParams, b: u32, blk: &Block) -> Result<()> {
+        let c = params.chain_no;
+        let (h, _, n) = self.block_at(params, b)?.ok_or_else(|| other("no such block"))?;
+        if params.block_id(&h) != params.block_id(&blk.header) || blk.txs.len() as u32 != n || blk.computed_merkle_root() != h.merkle_root {
+            return Err(other("block does not match the stored header"));
+        }
+        self.store(c).read(|r| {
+            for (p, tx) in blk.txs.iter().enumerate() {
+                if let Some(old) = r.get(BLOCK_TX, &k_block_tx(c, b, p as u32))? {
+                    if row_txid(&old, params)? != tx.txid {
+                        return Err(other("transaction does not match the stored txid"));
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// Put a pruned block's body back (fetched from another arcade or a coin peer; checked
     /// against the stored header and each stub's txid).
     pub fn restore_block(&self, params: &ChainParams, b: u32, blk: &Block) -> Result<()> {

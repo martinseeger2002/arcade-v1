@@ -70,6 +70,7 @@ mod ordsend;
 mod peerbook;
 mod psync;
 mod realtime;
+mod refill;
 mod pagechain;
 mod prizesvc;
 mod refereesvc;

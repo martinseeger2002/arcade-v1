@@ -28,6 +28,8 @@ const HELP: &str = "arcade — Arcade V1.0
   arcade chain copy status [key]             Core-data copies (cb) offered, fetches in progress, trusted/verified coin sets
   arcade chain copy start <key> [coins|all]  bootstrap from the best copy (coins: coin set only, the default)
   arcade chain copy cancel|verify <key>      stop a fetch (sync it myself) | re-check a copied coin set now
+  arcade chain refill <key> [from to [sources]]  fetch back lost block bodies (2+ independent sources must agree)
+  arcade chain refill status [key] | cancel <key>   a refill's progress | stop it
   arcade chain index copy status [key]       index copies old arcades offer, fetches, votes, copied indexes
   arcade chain index copy start <key> ledger|ord [--from NODE]   take a copy now (2+ other arcades must agree)
   arcade chain index copy cancel <key> ledger|ord                stop fetching it
@@ -309,6 +311,12 @@ fn main() {
         ["chain", "copy", "start", k] => json!({"cmd": "chains.copy_start", "key": k}),
         ["chain", "copy", "start", k, w] => json!({"cmd": "chains.copy_start", "key": k, "what": w}),
         ["chain", "copy", "cancel", k] => json!({"cmd": "chains.copy_cancel", "key": k}),
+        ["chain", "refill", "status"] => json!({"cmd": "chains.refill_status"}),
+        ["chain", "refill", "status", k] => json!({"cmd": "chains.refill_status", "key": k}),
+        ["chain", "refill", "cancel", k] => json!({"cmd": "chains.refill_cancel", "key": k}),
+        ["chain", "refill", k] => json!({"cmd": "chains.refill", "key": k}),
+        ["chain", "refill", k, from, to] => json!({"cmd": "chains.refill", "key": k, "from": from.parse::<u64>().ok(), "to": to.parse::<u64>().ok()}),
+        ["chain", "refill", k, from, to, n] => json!({"cmd": "chains.refill", "key": k, "from": from.parse::<u64>().ok(), "to": to.parse::<u64>().ok(), "sources": n.parse::<u64>().ok()}),
         ["chain", "copy", "verify", k] => json!({"cmd": "chains.copy_verify", "key": k}),
         ["chain", "share", "offers", k] => json!({"cmd": "share.offers", "key": k}),
         ["chain", "share", "fetch", k, f] => json!({"cmd": "share.fetch", "key": k, "fam": f}),

@@ -407,6 +407,38 @@ fn prune_and_restore_a_block_body() {
     assert_eq!(f.db.block_raw(c, &b1.hash()).unwrap().unwrap(), b1.encode());
 }
 
+/// Lost bodies (pruned, no sealed copy) are listed for chains.refill; restore_check refuses
+/// what restore_block would, without writing.
+#[test]
+fn lost_bodies_are_listed_and_checked_before_a_refill() {
+    let f = fixture();
+    let c = f.p.chain_no;
+    let b1 = block(f.g.hash(), vec![tx(&[], &[(5000, p2pkh(1))], 1)], 2);
+    let b2 = block(b1.hash(), vec![tx(&[], &[(5000, p2pkh(2))], 2)], 3);
+    let b3 = block(b2.hash(), vec![tx(&[], &[(5000, p2pkh(3))], 3)], 4);
+    f.db.connect_blocks(f.p, &[b1.clone(), b2.clone(), b3.clone()]).unwrap();
+    let n = |h: &Block| f.db.header(c, &h.hash()).unwrap().unwrap().b;
+    assert!(f.db.bodies_missing(c, 0, 3, 100).unwrap().is_empty(), "nothing pruned: nothing missing");
+    f.db.prune_blocks(f.p, &[n(&b1), n(&b3)]).unwrap();
+    assert_eq!(f.db.bodies_missing(c, 0, 3, 100).unwrap(), vec![(1, n(&b1), b1.hash()), (3, n(&b3), b3.hash())]);
+    assert_eq!(f.db.bodies_missing(c, 0, 3, 1).unwrap().len(), 1, "at most max");
+    assert_eq!(f.db.bodies_missing(c, 2, 9, 100).unwrap(), vec![(3, n(&b3), b3.hash())], "heights past the tip are skipped");
+    // A body the sealed copy answers for isn't lost.
+    let raw1 = b1.encode();
+    let h1 = b1.hash();
+    f.db.set_sealed_reader(std::sync::Arc::new(move |_c, h| if *h == h1 { Some(raw1.clone()) } else { None }));
+    assert_eq!(f.db.bodies_missing(c, 0, 3, 100).unwrap(), vec![(3, n(&b3), b3.hash())]);
+    // The checks: the right block passes, another block or a bad merkle root doesn't; nothing is written.
+    f.db.restore_check(f.p, n(&b3), &b3).unwrap();
+    assert!(f.db.restore_check(f.p, n(&b3), &b2).is_err());
+    let mut bad = b3.clone();
+    bad.txs[0] = tx(&[], &[(4999, p2pkh(3))], 3);
+    assert!(f.db.restore_check(f.p, n(&b3), &bad).is_err(), "a transaction not under the merkle root");
+    assert!(f.db.is_block_pruned(c, n(&b3)).unwrap(), "checking writes nothing");
+    f.db.restore_block(f.p, n(&b3), &b3).unwrap();
+    assert!(f.db.bodies_missing(c, 0, 3, 100).unwrap().is_empty());
+}
+
 /// A pruned block held sealed (one copy): its bytes, its transactions by id and by place come
 /// back through the sealed reader, checked against the block's hash.
 #[test]

@@ -570,6 +570,9 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "chains.copy_status" => Ok(crate::coreboot::status(node, s("key").as_deref())),
         "chains.copy_start" => crate::coreboot::start(&node.self_arc(), &s("key").ok_or("key required")?, &s("what").unwrap_or_else(|| "coins".into())),
         "chains.copy_cancel" => crate::coreboot::cancel(node, &s("key").ok_or("key required")?),
+        "chains.refill" => crate::refill::start(node.self_arc(), &s("key").ok_or("key required")?, req["from"].as_u64(), req["to"].as_u64(), req["sources"].as_u64()),
+        "chains.refill_status" => Ok(crate::refill::status(s("key").as_deref())),
+        "chains.refill_cancel" => crate::refill::cancel(&s("key").ok_or("key required")?),
         "chains.copy_verify" => {
             let key = s("key").ok_or("key required")?;
             let p = arcade_chain::params::by_key(&key).ok_or("unknown chain")?;
