@@ -1147,6 +1147,13 @@ fn walk_indexes(node: &Node, run: &ChainRun, max_batches: usize) -> Option<bool>
     Some(left)
 }
 
+/// What an index waits on while another index walks: its turn, but only while it has blocks
+/// to walk (an index at the newest block isn't waiting for anything; it walks each new block
+/// in the next slice).
+fn turn_wait(busy: Option<&str>, name: &str, at: u64, tip: u64) -> Option<String> {
+    busy.filter(|b| *b != name && at < tip).map(|b| format!("its turn (the chain thread is walking {b})"))
+}
+
 /// Chains a follow thread is storing. A restart (an index added, say) sets the old run's stop
 /// and launches a new thread at once, while the old one can be minutes into a round.
 static FOLLOWING: Mutex<Vec<u16>> = Mutex::new(Vec::new());
@@ -1412,8 +1419,12 @@ pub(crate) fn watch_obs(node: &Node, run: &ChainRun) -> Vec<crate::watchdog::Obs
     let mut v = Vec::new();
     let blocks_wait = if ["no ", "headers:", "blocks:", "genesis:"].iter().any(|s| state.starts_with(s)) {
         Some(format!("peers ({state})"))
-    } else {
+    } else if top > tip {
         busy.as_ref().map(|b| format!("the {b} index walk (the chain thread walks the indexes between block fetches)"))
+    } else {
+        // At the newest block there is nothing to wait for: new blocks are fetched between the
+        // index walk's 30 s slices (WALK_SLICE).
+        None
     };
     v.push(Obs { stage: "blocks".into(), at: tip, working: !held && top > tip, waiting_on: blocks_wait });
     let far = node.far_behind(p);
@@ -1441,7 +1452,7 @@ pub(crate) fn watch_obs(node: &Node, run: &ChainRun) -> Vec<crate::watchdog::Obs
         } else if let Some(n) = notes.get(name) {
             Some(n.clone())
         } else {
-            busy.as_ref().filter(|b| b.as_str() != name).map(|b| format!("its turn (the chain thread is walking {b})"))
+            turn_wait(busy.as_deref(), name, at, tip)
         };
         v.push(Obs { stage: ix.clone(), at, working: !held && !far && running.contains(&name) && at < tip, waiting_on });
     }
@@ -1454,4 +1465,19 @@ pub(crate) fn watch_obs(node: &Node, run: &ChainRun) -> Vec<crate::watchdog::Obs
         v.push(Obs { stage: "addresses".into(), at, working: !held && !far, waiting_on });
     }
     v
+}
+
+#[cfg(test)]
+mod turn_wait_tests {
+    use super::turn_wait;
+
+    #[test]
+    fn only_an_index_with_blocks_to_walk_waits_for_its_turn() {
+        // Darrells, 2026-11-12: ledger and profiles at the newest block showed "waiting on its
+        // turn (the chain thread is walking ord.v1)" for 24 minutes while ord built.
+        assert_eq!(turn_wait(Some("ord.v1"), "ledger.v1", 1_290_967, 1_290_967), None);
+        assert_eq!(turn_wait(Some("ord.v1"), "ledger.v1", 1_290_960, 1_290_967).as_deref(), Some("its turn (the chain thread is walking ord.v1)"));
+        assert_eq!(turn_wait(Some("ord.v1"), "ord.v1", 1_004_428, 1_290_967), None, "the walking index itself");
+        assert_eq!(turn_wait(None, "ledger.v1", 10, 20), None, "nothing walking");
+    }
 }

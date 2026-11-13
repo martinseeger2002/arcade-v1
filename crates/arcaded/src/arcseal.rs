@@ -18,9 +18,10 @@ use arcade_arc::params::Net;
 use arcade_arc::sloth::{self, DATA_LEAF, SEALED_LEAF};
 use arcade_chain::params::ChainParams;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 /// A replica this arcade holds.
 #[derive(Clone, Debug)]
@@ -400,8 +401,15 @@ impl Replica {
 //                bytes of the units sealed so far
 //   sealed.bin   the leaves sealed so far, 128 bytes each; the last one, partly filled, is sealed again as bytes come
 //   offsets.bin  one u64 (LE) per height from `first`: where its unit starts in the segment (the table, once cut)
-// A unit is sealed once it is settled; its plain copy then goes (reads unseal it here). When a range ends and the units
-// hold a full segment, the table goes on the end and the open segment becomes a replica (sealed/<segment id>/).
+// A unit is sealed once it is settled. When a range ends and the units hold a full segment, the table goes on the end and
+// the open segment becomes a replica (sealed/<segment id>/); only then do the plain copies of its heights go
+// (arcseg::seal_on), so an open segment lost or set aside never loses data.
+//
+// Closing is durable on every system: every file handle is closed before the folder moves (Windows won't move a
+// folder with a file inside held open), the move is tried again for a moment when Windows refuses it (a scanner or a
+// reader holding a file), and open.json/offsets.bin go only after the move went. A folder that can't be read as an
+// open segment but holds sealed bytes is never deleted: a close whose move didn't go (replica.json there) is finished,
+// anything else is moved aside to <home>/arc/<net>/quarantine/.
 
 /// A segment being sealed as its blocks arrive.
 #[derive(Clone, Debug)]
@@ -417,8 +425,111 @@ pub struct Open {
     pub dir: PathBuf,
 }
 
-pub fn open_dir(node: &Node, net: &Net, chain: &str, family: u8) -> PathBuf {
-    node.home.join("arc").join(net.key).join("open").join(format!("{chain}-{family}"))
+/// <home>/arc/<net>: open/, sealed/ and quarantine/ are under it.
+fn arc_dir(node: &Node, net: &Net) -> PathBuf {
+    node.home.join("arc").join(net.key)
+}
+
+fn open_dir_at(arc: &Path, chain: &str, family: u8) -> PathBuf {
+    arc.join("open").join(format!("{chain}-{family}"))
+}
+
+/// How many times a folder move is tried before it counts as failed, and the longest wait between tries.
+const MOVE_TRIES: u32 = 8;
+const MOVE_WAIT_MAX: Duration = Duration::from_secs(2);
+
+/// A refusal that passes: Windows' "Access is denied" (5), sharing violation (32) and lock violation (33), which a virus
+/// scanner or another reader holding a file inside gives for a moment.
+fn passes(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::PermissionDenied || matches!(e.raw_os_error(), Some(5 | 32 | 33))
+}
+
+/// The system's rename.
+fn fs_rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
+}
+
+/// Rename `from` to `to` with `rename`, tried again after a growing wait while the refusal is one that passes.
+pub(crate) fn rename_retrying(from: &Path, to: &Path, tries: u32, rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>) -> std::io::Result<()> {
+    let mut wait = Duration::from_millis(50);
+    let mut tried = 0;
+    loop {
+        tried += 1;
+        match rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) if tried < tries && passes(&e) => {
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(MOVE_WAIT_MAX);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Move a folder holding sealed bytes out of the way (never deleted): <arc>/quarantine/<name>-<time>.
+fn quarantine(arc: &Path, dir: &Path, rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>) -> Result<PathBuf, String> {
+    let q = arc.join("quarantine");
+    std::fs::create_dir_all(&q).map_err(|e| format!("{}: {e}", q.display()))?;
+    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "open".into());
+    let mut to = q.join(format!("{name}-{}", arcade_app::now()));
+    let mut n = 1;
+    while to.exists() {
+        to = q.join(format!("{name}-{}-{n}", arcade_app::now()));
+        n += 1;
+    }
+    rename_retrying(dir, &to, MOVE_TRIES, rename).map_err(|e| format!("setting {} aside: {e}", dir.display()))?;
+    eprintln!("arc: {} couldn't be read as an open segment; its sealed bytes were kept in {}", dir.display(), to.display());
+    Ok(to)
+}
+
+/// Does a folder hold sealed bytes (or a finished replica) that must not be thrown away?
+fn holds_sealed(dir: &Path) -> bool {
+    dir.join("sealed.bin").exists() || dir.join("replica.json").exists()
+}
+
+/// Move a closed segment's folder (replica.json written) to sealed/<segment id>/; open.json and offsets.bin go only
+/// once it's there. The replica as it reads back from its new place.
+fn finish_move(arc: &Path, dir: &Path, r: &Replica, rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>) -> Result<Replica, String> {
+    let to = arc.join("sealed").join(hex::encode(r.segment));
+    if to.exists() {
+        if read_replica(&to).is_some_and(|t| t.segment == r.segment) {
+            // Already in place (an earlier move went and this is a second copy): keep this one aside, don't delete it.
+            quarantine(arc, dir, rename)?;
+            forget_cache();
+            return read_replica(&to).ok_or_else(|| "replica.json unreadable".into());
+        }
+        if holds_sealed(&to) {
+            quarantine(arc, &to, rename)?;
+        } else {
+            let _ = std::fs::remove_dir_all(&to);
+        }
+    }
+    let parent = to.parent().ok_or("no sealed folder")?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    rename_retrying(dir, &to, MOVE_TRIES, rename).map_err(|e| format!("moving {} to {}: {e}", dir.display(), to.display()))?;
+    for leftover in ["open.json", "open.json.tmp", "offsets.bin"] {
+        let _ = std::fs::remove_file(to.join(leftover));
+    }
+    forget_cache();
+    read_replica(&to).ok_or_else(|| "replica.json unreadable".into())
+}
+
+/// Put a family's open folder right before it's used: a close whose move didn't go (replica.json there, written by
+/// Open::close before the move) is finished. The replica it finished, if any.
+pub fn recover(node: &Node, net: &Net, chain: &str, family: u8) -> Result<Option<Replica>, String> {
+    recover_at(&arc_dir(node, net), chain, family, &mut fs_rename)
+}
+
+pub(crate) fn recover_at(arc: &Path, chain: &str, family: u8, rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>) -> Result<Option<Replica>, String> {
+    let dir = open_dir_at(arc, chain, family);
+    match read_replica(&dir).filter(|r| r.chain == chain && r.family == family) {
+        Some(r) => {
+            let done = finish_move(arc, &dir, &r, rename)?;
+            eprintln!("arc: finished moving sealed {chain} {}..={} into place", done.first, done.last);
+            Ok(Some(done))
+        }
+        None => Ok(None),
+    }
 }
 
 fn read_open(net: &Net, dir: &std::path::Path) -> Option<Open> {
@@ -475,12 +586,28 @@ fn seal_run(me: &[u8; 32], mask: &Hash, start: u64, data: &[u8], file: &std::fs:
 
 impl Open {
     /// A new open segment from height `first` (one there for another first height is started again).
+    /// A folder there that can't be used is never deleted while it holds sealed bytes: a close whose move didn't go is
+    /// finished (and the caller asks again next round), anything else is set aside in quarantine/.
     pub fn start(node: &Node, net: &Net, chain: &str, family: u8, first: u64) -> Result<Open, String> {
-        let dir = open_dir(node, net, chain, family);
+        Self::start_at(&arc_dir(node, net), net, chain, family, first, &mut fs_rename)
+    }
+
+    pub(crate) fn start_at(arc: &Path, net: &Net, chain: &str, family: u8, first: u64, rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>) -> Result<Open, String> {
+        let dir = open_dir_at(arc, chain, family);
         if let Some(o) = read_open(net, &dir).filter(|o| o.first == first) {
             return Ok(o);
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        if dir.exists() {
+            if holds_sealed(&dir) {
+                if let Some(r) = read_replica(&dir).filter(|r| r.chain == chain && r.family == family) {
+                    let r = finish_move(arc, &dir, &r, rename)?;
+                    return Err(format!("finished moving sealed {chain} {}..={} into place; sealing goes on next round", r.first, r.last));
+                }
+                quarantine(arc, &dir, rename)?;
+            } else {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let o = Open { chain: chain.to_string(), family, first, through: None, bytes: 0, mask: arcade_arc::block::slot(net, chain, family, first), dir };
         o.save()?;
@@ -491,7 +618,7 @@ impl Open {
         let v = json!({"chain": self.chain, "family": self.family, "first": self.first, "through": self.through, "bytes": self.bytes});
         let tmp = self.dir.join("open.json.tmp");
         std::fs::write(&tmp, v.to_string()).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, self.dir.join("open.json")).map_err(|e| e.to_string())
+        rename_retrying(&tmp, &self.dir.join("open.json"), MOVE_TRIES, &mut fs_rename).map_err(|e| e.to_string())
     }
 
     fn file(&self) -> Result<std::fs::File, String> {
@@ -564,9 +691,36 @@ impl Open {
         self.save()
     }
 
-    /// Cut here: the table goes on the end and the segment becomes a replica (sealed/<segment id>/).
+    /// Through a range's end with a full segment's bytes in: the segment ends here, but its close hasn't gone yet (a
+    /// close cut short or refused is tried again from this state, which stays readable).
+    pub fn is_full(&self, range: u64, full: u64) -> bool {
+        self.through.is_some_and(|t| (t + 1) % range == 0) && self.bytes >= full
+    }
+
+    /// Cut here: the table goes on the end and the segment becomes a replica (sealed/<segment id>/). Every file is
+    /// closed before the folder moves; open.json and offsets.bin go only after the move went, so a close that fails
+    /// leaves the open segment as it was (readable, and closed again next round).
     pub fn close(self, node: &Node, net: &Net, owner: &[u8; 32]) -> Result<Replica, String> {
+        self.close_at(&arc_dir(node, net), net, owner, &mut fs_rename)
+    }
+
+    pub(crate) fn close_at(self, arc: &Path, net: &Net, owner: &[u8; 32], rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>) -> Result<Replica, String> {
         let last = self.through.ok_or("nothing sealed")?;
+        let (bytes, leaves, root, replica_root) = self.cut(owner, last)?;
+        let segment = segment_id(net, &self.chain, self.family, self.first, last, bytes, root);
+        let v = json!({"chain": self.chain, "family": self.family, "first": self.first, "last": last, "bytes": bytes, "leaves": leaves,
+                       "segment": hex::encode(segment), "root": hex::encode(root), "replica_root": hex::encode(replica_root),
+                       "mask": hex::encode(self.mask), "sealed_at": arcade_app::now()});
+        let tmp = self.dir.join("replica.json.tmp");
+        std::fs::write(&tmp, v.to_string()).map_err(|e| e.to_string())?;
+        rename_retrying(&tmp, &self.dir.join("replica.json"), MOVE_TRIES, &mut fs_rename).map_err(|e| e.to_string())?;
+        let r = read_replica(&self.dir).ok_or("replica.json unreadable")?;
+        finish_move(arc, &self.dir, &r, rename)
+    }
+
+    /// The table on the end, sealed.bin cut to its leaves, both hash files written: (bytes, leaves, root, replica
+    /// root). Every file it opens is closed (and on disk) when it returns.
+    fn cut(&self, owner: &[u8; 32], last: u64) -> Result<(u64, u64, Hash, Hash), String> {
         let heights = last - self.first + 1;
         let table = std::fs::read(self.dir.join("offsets.bin")).map_err(|e| e.to_string())?;
         let table = table.get(..(heights * 8) as usize).ok_or("the offsets are short")?.to_vec();
@@ -591,23 +745,14 @@ impl Open {
             dh.write_all(&d).map_err(io)?;
             sh.write_all(&h).map_err(io)?;
         }
-        dh.flush().map_err(io)?;
-        sh.flush().map_err(io)?;
+        // Closed here, each on disk first: Windows won't move the folder while any of them is open.
+        dh.into_inner().map_err(|e| e.to_string())?.sync_all().map_err(io)?;
+        sh.into_inner().map_err(|e| e.to_string())?.sync_all().map_err(io)?;
+        f.sync_all().map_err(io)?;
+        drop(f);
         let root = data_tree.finish().map_err(|e| e.to_string())?;
         let replica_root = sealed_tree.finish().map_err(|e| e.to_string())?;
-        let segment = segment_id(net, &self.chain, self.family, self.first, last, bytes, root);
-        let v = json!({"chain": self.chain, "family": self.family, "first": self.first, "last": last, "bytes": bytes, "leaves": leaves,
-                       "segment": hex::encode(segment), "root": hex::encode(root), "replica_root": hex::encode(replica_root),
-                       "mask": hex::encode(self.mask), "sealed_at": arcade_app::now()});
-        std::fs::write(self.dir.join("replica.json"), v.to_string()).map_err(io)?;
-        let _ = std::fs::remove_file(self.dir.join("open.json"));
-        let _ = std::fs::remove_file(self.dir.join("offsets.bin"));
-        let to = dir_of(node, net, &segment);
-        let _ = std::fs::remove_dir_all(&to);
-        std::fs::create_dir_all(to.parent().unwrap()).map_err(io)?;
-        std::fs::rename(&self.dir, &to).map_err(io)?;
-        forget_cache();
-        read_replica(&to).ok_or_else(|| "replica.json unreadable".into())
+        Ok((bytes, leaves, root, replica_root))
     }
 }
 
@@ -716,5 +861,204 @@ mod tests {
         let again = read_open(&net, &dir).unwrap();
         assert_eq!((again.first, again.through, again.bytes), (200, Some(208), all.len() as u64));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+    // ---- closing durably (a Windows node lost sealed ranges when the folder move was refused) ----
+
+    fn arc_tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("arcseal-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn some_blocks() -> Vec<Vec<u8>> {
+        [80usize, 1, 127, 300, 46, 999, 128, 7].iter().enumerate().map(|(i, n)| (0..*n).map(|k| (i * 17 + k * 5) as u8).collect()).collect()
+    }
+
+    /// An open segment from height 0 with `some_blocks` sealed into it.
+    fn an_open_segment(arc: &Path, owner: &[u8; 32]) -> (Open, Vec<Vec<u8>>) {
+        let net = arcade_arc::params::TESTNET;
+        let mut o = Open::start_at(arc, &net, "peptest", 0, 0, &mut fs_rename).unwrap();
+        let blocks = some_blocks();
+        o.append(owner, &blocks[..3]).unwrap();
+        o.append(owner, &blocks[3..]).unwrap();
+        (o, blocks)
+    }
+
+    fn assert_replica_reads_back(r: &Replica, owner: &[u8; 32], blocks: &[Vec<u8>]) {
+        for (h, b) in blocks.iter().enumerate() {
+            assert_eq!(&r.block(owner, h as u64).unwrap(), b, "block {h} from the replica");
+        }
+    }
+
+    fn other_error() -> std::io::Error {
+        std::io::Error::other("the move was refused")
+    }
+
+    fn refused() -> std::io::Error {
+        std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+    }
+
+    #[test]
+    fn a_refusal_that_passes_is_tried_again_and_others_are_not() {
+        let arc = arc_tmp("retry");
+        let (a, b) = (arc.join("a"), arc.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        let mut tries = 0;
+        rename_retrying(&a, &b, MOVE_TRIES, &mut |x, y| {
+            tries += 1;
+            if tries <= 3 { Err(refused()) } else { std::fs::rename(x, y) }
+        })
+        .unwrap();
+        assert_eq!(tries, 4);
+        assert!(b.exists() && !a.exists());
+        let mut tries = 0;
+        assert!(rename_retrying(&b, &a, MOVE_TRIES, &mut |_, _| {
+            tries += 1;
+            Err(other_error())
+        })
+        .is_err());
+        assert_eq!(tries, 1, "an error that doesn't pass isn't tried again");
+        let mut tries = 0;
+        assert!(rename_retrying(&b, &a, 3, &mut |_, _| {
+            tries += 1;
+            Err(refused())
+        })
+        .is_err());
+        assert_eq!(tries, 3, "no more than the tries given");
+        std::fs::remove_dir_all(&arc).unwrap();
+    }
+
+    /// Readers holding the segment's files open while it closes: the close closes its own files first, tries the move
+    /// again while it is refused, and the replica reads back from sealed/ with nothing of the open state left there.
+    #[test]
+    fn a_segment_closes_while_its_files_are_held_open() {
+        let arc = arc_tmp("held");
+        let owner = [7u8; 32];
+        let net = arcade_arc::params::TESTNET;
+        let (o, blocks) = an_open_segment(&arc, &owner);
+        let dir = o.dir.clone();
+        let held = (std::fs::File::open(dir.join("sealed.bin")).unwrap(), std::fs::File::open(dir.join("offsets.bin")).unwrap());
+        // Let go a moment later, the way a scanner does.
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        let mut refusals = 0;
+        let r = o
+            .close_at(&arc, &net, &owner, &mut |a, b| {
+                if refusals < 2 && a.is_dir() {
+                    refusals += 1;
+                    return Err(refused());
+                }
+                std::fs::rename(a, b)
+            })
+            .unwrap();
+        t.join().unwrap();
+        assert!(!dir.exists(), "the open folder moved");
+        assert_eq!(r.dir, arc.join("sealed").join(hex::encode(r.segment)));
+        assert!(!r.dir.join("open.json").exists() && !r.dir.join("offsets.bin").exists());
+        assert_eq!((r.first, r.last), (0, blocks.len() as u64 - 1));
+        assert_replica_reads_back(&r, &owner, &blocks);
+        std::fs::remove_dir_all(&arc).unwrap();
+    }
+
+    /// The move refused for good: the close fails, the open segment stays exactly as it was (open.json, offsets.bin,
+    /// every unit readable), start() gives it back, and the next round finishes the move with no data lost.
+    #[test]
+    fn a_close_whose_move_fails_keeps_the_open_segment_and_finishes_later() {
+        let arc = arc_tmp("fail");
+        let owner = [9u8; 32];
+        let net = arcade_arc::params::TESTNET;
+        let (o, blocks) = an_open_segment(&arc, &owner);
+        let dir = o.dir.clone();
+        let (through, bytes) = (o.through, o.bytes);
+        assert!(o.clone().close_at(&arc, &net, &owner, &mut |_, _| Err(other_error())).is_err());
+        let again = read_open(&net, &dir).expect("open.json kept");
+        assert_eq!((again.through, again.bytes), (through, bytes));
+        assert!(dir.join("offsets.bin").exists() && dir.join("sealed.bin").exists());
+        for (h, b) in blocks.iter().enumerate() {
+            assert_eq!(&again.unit(&owner, h as u64).unwrap(), b, "block {h} still reads from the open segment");
+        }
+        assert!(replicas_on_disk_at(&arc).is_empty());
+        let started = Open::start_at(&arc, &net, "peptest", 0, 0, &mut fs_rename).unwrap();
+        assert_eq!((started.through, started.bytes), (through, bytes), "start gives the same open segment back");
+        let r = recover_at(&arc, "peptest", 0, &mut fs_rename).unwrap().expect("the pending move is finished");
+        assert!(!dir.exists());
+        assert_replica_reads_back(&r, &owner, &blocks);
+        assert!(recover_at(&arc, "peptest", 0, &mut fs_rename).unwrap().is_none(), "nothing left to recover");
+        std::fs::remove_dir_all(&arc).unwrap();
+    }
+
+    /// What the earlier close left behind when Windows refused the move (open.json and offsets.bin already gone,
+    /// replica.json and sealed.bin there): start() used to delete the folder, the only copy. Now it finishes the move.
+    #[test]
+    fn start_finishes_a_close_that_lost_its_open_json() {
+        let arc = arc_tmp("leftover");
+        let owner = [4u8; 32];
+        let net = arcade_arc::params::TESTNET;
+        let (o, blocks) = an_open_segment(&arc, &owner);
+        let dir = o.dir.clone();
+        let _ = o.close_at(&arc, &net, &owner, &mut |_, _| Err(other_error()));
+        std::fs::remove_file(dir.join("open.json")).unwrap();
+        std::fs::remove_file(dir.join("offsets.bin")).unwrap();
+        let e = Open::start_at(&arc, &net, "peptest", 0, 0, &mut fs_rename).unwrap_err();
+        assert!(e.contains("finished moving"), "{e}");
+        let rs = replicas_on_disk_at(&arc);
+        assert_eq!(rs.len(), 1);
+        assert_replica_reads_back(&rs[0], &owner, &blocks);
+        std::fs::remove_dir_all(&arc).unwrap();
+    }
+
+    /// A folder with sealed bytes that can't be read as an open segment (no open.json, no replica.json; or another
+    /// first height): set aside in quarantine/ byte for byte, never deleted; a fresh open segment starts.
+    #[test]
+    fn start_sets_aside_sealed_bytes_it_cannot_read() {
+        let arc = arc_tmp("quarantine");
+        let owner = [2u8; 32];
+        let net = arcade_arc::params::TESTNET;
+        let (o, _) = an_open_segment(&arc, &owner);
+        let sealed = std::fs::read(o.dir.join("sealed.bin")).unwrap();
+        std::fs::remove_file(o.dir.join("open.json")).unwrap();
+        let fresh = Open::start_at(&arc, &net, "peptest", 0, 0, &mut fs_rename).unwrap();
+        assert_eq!((fresh.through, fresh.bytes), (None, 0));
+        let q: Vec<PathBuf> = std::fs::read_dir(arc.join("quarantine")).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(q.len(), 1);
+        assert_eq!(std::fs::read(q[0].join("sealed.bin")).unwrap(), sealed, "kept byte for byte");
+        // Another first height asked for while this one holds sealed bytes: set aside too.
+        let mut o2 = fresh;
+        o2.append(&owner, &some_blocks()[..2]).unwrap();
+        let next = Open::start_at(&arc, &net, "peptest", 0, 10_000, &mut fs_rename).unwrap();
+        assert_eq!(next.first, 10_000);
+        assert_eq!(std::fs::read_dir(arc.join("quarantine")).unwrap().count(), 2);
+        std::fs::remove_dir_all(&arc).unwrap();
+    }
+
+    /// The replicas under an arc folder (replicas_on_disk without a node).
+    fn replicas_on_disk_at(arc: &Path) -> Vec<Replica> {
+        let Ok(rd) = std::fs::read_dir(arc.join("sealed")) else { return Vec::new() };
+        rd.filter_map(|e| read_replica(&e.ok()?.path())).collect()
+    }
+
+    /// On Windows itself: a reader holding sealed.bin without delete sharing makes the folder move fail with a sharing
+    /// violation; once it lets go, the close goes through (the case the Windows node hit).
+    #[cfg(windows)]
+    #[test]
+    fn windows_close_waits_out_a_file_held_without_delete_sharing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let arc = arc_tmp("win");
+        let owner = [6u8; 32];
+        let net = arcade_arc::params::TESTNET;
+        let (o, blocks) = an_open_segment(&arc, &owner);
+        let held = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(o.dir.join("offsets.bin")).unwrap();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            drop(held);
+        });
+        let r = o.close_at(&arc, &net, &owner, &mut fs_rename).unwrap();
+        t.join().unwrap();
+        assert_replica_reads_back(&r, &owner, &blocks);
+        std::fs::remove_dir_all(&arc).unwrap();
     }
 }

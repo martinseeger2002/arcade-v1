@@ -408,8 +408,9 @@ const FREE_FLOOR: u64 = 2_000_000_000;
 
 /// Earn ARCADE: for each kept coin switched on, and always for the ARCADE chain itself (sealing it is not an option,
 /// §14.17), every settled unit is sealed as it comes, block by block (Martin 2026-11-12), from block 0 up: into the
-/// family's open segment (arcseal::Open), its plain copy pruned once sealed so the sealed copy is the database's only
-/// copy (reads unseal it, arcseal::reader). When a range ends with a full segment's bytes in, the table goes on the end
+/// family's open segment (arcseal::Open). Once a segment is closed into sealed/, the plain copies of its heights are
+/// pruned so the sealed copy is the database's only copy (reads unseal it, arcseal::reader); never before, so an open
+/// segment that is lost or set aside costs no data. When a range ends with a full segment's bytes in, the table goes on the end
 /// and the segment becomes a replica to register. Blocks first, then each index, per coin; one run at a time, in the
 /// background.
 pub fn auto_seal(node: &Node, net: &Net, catalog: &Catalog) {
@@ -471,10 +472,22 @@ fn seal_on(node: &Node, net: &Net, p: &'static ChainParams, family: u8, full: u6
     let me = node.identity.verifying_key().to_bytes();
     let what = family_name(family);
     let t0 = std::time::Instant::now();
+    let prune = |first: u64, last: u64| {
+        prune_closed(node, p, family, first, last);
+    };
     while t0.elapsed().as_secs() < 300 {
+        // A close whose folder move didn't go (Windows refused it): finished first, then its plain copies go.
+        if let Some(r) = crate::arcseal::recover(node, net, p.key, family)? {
+            prune(r.first, r.last);
+        }
         let Some((next, settled)) = seal_work(node, net, p, family).filter(|(n, s)| n <= s) else { return Ok(()) };
         let closed = crate::arcseal::replicas(node, net).iter().filter(|r| r.chain == p.key && r.family == family).map(|r| r.last + 1).max().unwrap_or(0);
         let mut open = crate::arcseal::Open::start(node, net, p.key, family, closed)?;
+        // A segment that ended at its range's end but whose close didn't go: closed again before anything is added.
+        if open.is_full(RANGE, full) {
+            close_then_prune(open, full, true, |o| o.close(node, net, &me), prune)?;
+            continue;
+        }
         // No further than the end of the range `next` is in: a segment can only end there.
         let range_end = next - next % RANGE + RANGE - 1;
         let to = settled.min(range_end).min(next + SEAL_BATCH - 1);
@@ -484,20 +497,34 @@ fn seal_on(node: &Node, net: &Net, p: &'static ChainParams, family: u8, full: u6
             units.push(unit_bytes(node, p, family, h as u32).ok_or_else(|| format!("{} {what} {h} isn't here", p.name))?);
         }
         open.append(&me, &units)?;
-        // One copy on disk: the sealed one.
-        let freed = if family == segment::FAMILY_BLOCKS {
-            if crate::arcsvc::runs(p) { 0 } else { prune_sealed(node, p, next, to) }
-        } else {
-            node.chain.prune_journals(p.chain_no, family, next as u32, to as u32).unwrap_or(0)
-        };
-        let _ = freed;
-        if to == range_end && open.bytes >= full {
-            let t1 = std::time::Instant::now();
-            let r = open.close(node, net, &me)?;
-            eprintln!("arc: sealed {} {what} {}..={} ({} leaves, {} bytes), block by block, its plain copy pruned as it went; closed in {:.1} s", r.chain, r.first, r.last, r.leaves, r.bytes, t1.elapsed().as_secs_f64());
+        let t1 = std::time::Instant::now();
+        if let Some(r) = close_then_prune(open, full, to == range_end, |o| o.close(node, net, &me), prune)? {
+            eprintln!("arc: sealed {} {what} {}..={} ({} leaves, {} bytes), block by block; closed in {:.1} s, then its plain copy pruned", r.chain, r.first, r.last, r.leaves, r.bytes, t1.elapsed().as_secs_f64());
         }
     }
     Ok(())
+}
+
+/// After sealing into an open segment: when its range ended (`range_ended`) with a full segment's bytes in, close it,
+/// and only once the close went (the segment is a replica in sealed/) do the plain copies of its heights go. Until
+/// then nothing is pruned: an open segment is not yet a replica, and losing it (a close Windows refused, a folder set
+/// aside) must never lose the data.
+fn close_then_prune(open: crate::arcseal::Open, full: u64, range_ended: bool, close: impl FnOnce(crate::arcseal::Open) -> Result<crate::arcseal::Replica, String>, prune: impl FnOnce(u64, u64)) -> Result<Option<crate::arcseal::Replica>, String> {
+    if !range_ended || open.bytes < full {
+        return Ok(None);
+    }
+    let r = close(open)?;
+    prune(r.first, r.last);
+    Ok(Some(r))
+}
+
+/// One copy on disk once a segment is closed: the sealed one (the ARCADE chain keeps its own blocks as it writes them).
+fn prune_closed(node: &Node, p: &'static ChainParams, family: u8, first: u64, last: u64) -> u64 {
+    if family == segment::FAMILY_BLOCKS {
+        if crate::arcsvc::runs(p) { 0 } else { prune_sealed(node, p, first, last) }
+    } else {
+        node.chain.prune_journals(p.chain_no, family, first as u32, last as u32).unwrap_or(0)
+    }
 }
 
 /// After a segment is sealed: its blocks' plain bodies go (the sealed copy answers for them).
@@ -659,5 +686,53 @@ mod tests {
         let mut blob = Vec::new();
         a.encode(&mut blob);
         assert_eq!(on_items(&params::TESTNET, &blob), 0);
+    }
+    /// An open segment from height 0 under `arc` with `n` small units sealed.
+    fn open_with(arc: &std::path::Path, owner: &[u8; 32], n: usize) -> crate::arcseal::Open {
+        let mut o = crate::arcseal::Open::start_at(arc, &params::TESTNET, "peptest", 0, 0, &mut |a, b| std::fs::rename(a, b)).unwrap();
+        let units: Vec<Vec<u8>> = (0..n).map(|i| vec![i as u8; 40 + i % 7]).collect();
+        o.append(owner, &units).unwrap();
+        o
+    }
+
+    /// The plain copies of a segment's heights stay until its close has gone: nothing is pruned while it's open, nor
+    /// when its close fails; they go once, for exactly its heights, when it's a replica.
+    #[test]
+    fn plain_copies_stay_until_the_segment_is_closed() {
+        let arc = std::env::temp_dir().join(format!("arcseg-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&arc);
+        let owner = [3u8; 32];
+        let o = open_with(&arc, &owner, 20);
+        let pruned = std::cell::RefCell::new(Vec::new());
+        let prune = |a: u64, b: u64| pruned.borrow_mut().push((a, b));
+        // The range hasn't ended, or the bytes aren't a full segment yet: no close, nothing pruned.
+        assert!(close_then_prune(o.clone(), 1, false, |_| panic!("not closed before the range ends"), prune).unwrap().is_none());
+        assert!(close_then_prune(o.clone(), o.bytes + 1, true, |_| panic!("not closed short of a full segment"), prune).unwrap().is_none());
+        assert!(pruned.borrow().is_empty());
+        // The close fails (Windows refused the move): nothing pruned, and the open segment still answers for every unit.
+        let net = params::TESTNET;
+        let failed = close_then_prune(o.clone(), o.bytes, true, |x| x.close_at(&arc, &net, &owner, &mut |_, _| Err(std::io::Error::other("refused"))), prune);
+        assert!(failed.is_err());
+        assert!(pruned.borrow().is_empty(), "plain copies kept while the close hasn't gone");
+        for h in 0..20u64 {
+            assert!(o.unit(&owner, h).is_ok(), "unit {h} still sealed in the open segment");
+        }
+        // It goes: pruned once, for its heights.
+        let r = close_then_prune(o.clone(), o.bytes, true, |x| x.close_at(&arc, &net, &owner, &mut |a, b| std::fs::rename(a, b)), prune).unwrap().unwrap();
+        assert_eq!(*pruned.borrow(), vec![(r.first, r.last)]);
+        assert_eq!((r.first, r.last), (0, 19));
+        std::fs::remove_dir_all(&arc).unwrap();
+    }
+
+    /// A segment through its range's end with a full segment's bytes is one whose close is still owed.
+    #[test]
+    fn a_full_open_segment_is_known_as_owing_its_close() {
+        let mut o = crate::arcseal::Open { chain: "peptest".into(), family: 0, first: 0, through: Some(RANGE - 1), bytes: 100, mask: [0; 32], dir: std::path::PathBuf::new() };
+        assert!(o.is_full(RANGE, 100));
+        assert!(!o.is_full(RANGE, 101), "short of a full segment: goes on into the next range");
+        o.through = Some(RANGE - 2);
+        assert!(!o.is_full(RANGE, 1));
+        o.through = None;
+        assert!(!o.is_full(RANGE, 0));
     }
 }
