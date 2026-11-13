@@ -83,6 +83,8 @@ impl Chain {
         let db = ChainDb::open(dir.path().join("chain.mdbx")).unwrap();
         let g = block(Hash256::ZERO, vec![tx(None, 0, 0)], 1);
         let mut p: ChainParams = DIGIBYTE_MAIN.clone();
+        // A DigiByte-shaped test chain whose ord index starts at its genesis (DigiByte itself starts at its first inscription).
+        p.net = "dgbreg";
         p.genesis = Box::leak(g.hash().to_hex().into_boxed_str());
         p.genesis_header = "";
         p.format = arcade_chain::params::PEPECOIN_TEST.format.clone();
