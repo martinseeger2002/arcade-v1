@@ -35,6 +35,9 @@ pub const GATED_READS: &[&str] = &[
     "explorer.ledger_token", "explorer.ledger_inscriptions", "explorer.ledger_inscription", "explorer.ledger_bytes",
     "explorer.tag", "explorer.search", "explorer.collections", "explorer.collection", "explorer.collection_of",
     "explorer.held",
+    // DogeFeed's D:// records (the dogefeed index), as the other indexes; its registrar keys are public setup, not
+    // index data, and stay open.
+    "explorer.dogefeed", "explorer.dogefeed_tx", "explorer.dogefeed_inscription", "explorer.dogefeed_address",
 ];
 
 /// `sh q` questions that carry index data (besides gated Explorer reads).
@@ -149,6 +152,9 @@ mod tests {
             assert!(!is_gated_question("x", &format!(r#"{{"cmd":"{open}"}}"#)), "{open} stays open");
         }
         assert!(!is_gated_question("mk", "") && !is_gated_question("tu", ""));
+        // DogeFeed is an index like the others; its registrar keys stay open.
+        assert!(is_gated_question("x", r#"{"cmd":"explorer.dogefeed"}"#) && !is_gated_question("x", r#"{"cmd":"explorer.dogefeed_keys"}"#));
+        assert!(is_index_family("dogefeed") && crate::v1copy::FAMILIES.contains(&"dogefeed") && !crate::chains::tables_of("dogefeed").is_empty());
         // Every gated read is one another arcade may be asked at all.
         for c in GATED_READS {
             assert!(crate::explorer::FORWARDABLE.contains(c), "{c}");
