@@ -106,7 +106,10 @@ pub fn agree(format: &Format, want: &[Hash256], answers: &[Answer], need: usize,
             let why = match Block::parse_with(raw, format) {
                 Err(e) => Some(format!("a block that doesn't parse ({e})")),
                 Ok(b) if b.id != *w => Some(format!("another block for {w}")),
-                Ok(b) if b.computed_merkle_root() != b.header.merkle_root => Some(format!("block {w} with a bad merkle root")),
+                // The whole of Block::check: the merkle root, no repeated transactions, the witness
+                // commitment (txids don't cover witness data, so the stored txids alone can't tell
+                // a forged witness) and the rules every block keeps.
+                Ok(b) if b.check().is_err() => Some(format!("block {w} that fails its checks ({})", b.check().unwrap_err())),
                 Ok(b) => match check(i, &b) {
                     Err(e) => Some(format!("block {w} that doesn't match what is stored here ({e})")),
                     Ok(()) => {
@@ -467,7 +470,7 @@ mod tests {
         let mut forged = raws.clone();
         forged[1] = bad;
         let e = agree(&PEPECOIN.format, &want, &[ans("aaaa", "1.1.1.1", raws.clone()), ans("bbbb", "2.2.2.2", forged.clone())], 2, &ok).unwrap_err();
-        assert!(e.contains("bad merkle root") && e.contains("only 1"), "{e}");
+        assert!(e.contains("merkle root mismatch") && e.contains("only 1"), "{e}");
         // Two bad ones agreeing byte for byte still count for nothing.
         let e = agree(&PEPECOIN.format, &want, &[ans("aaaa", "1.1.1.1", forged.clone()), ans("bbbb", "2.2.2.2", forged)], 2, &ok).unwrap_err();
         assert!(e.contains("no source sent blocks that check out"), "{e}");
