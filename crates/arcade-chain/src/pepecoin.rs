@@ -38,15 +38,29 @@ pub fn next_bits(p: &ChainParams, parent_height: u32, parent_bits: u32, parent_t
     bits_from_target(if new > limit_t { limit_t } else { new })
 }
 
-/// GetPepecoinBlockSubsidy with fSimplifiedRewards (testnet, every era).
+/// GetPepecoinBlockSubsidy with fSimplifiedRewards (every era on mainnet and testnet).
 pub fn subsidy(height: u32) -> u64 {
-    let halvings = height / HALVING;
-    if height < 6 * HALVING {
+    subsidy_every(height, HALVING)
+}
+
+/// The same schedule with another halving interval (regtest: 150).
+pub fn subsidy_every(height: u32, interval: u32) -> u64 {
+    let halvings = height / interval;
+    if height < 6 * interval {
         (500_000 * COIN) >> halvings
     } else {
         10_000 * COIN
     }
 }
+
+/// Coinbase maturity for a coin made at `height` (Core: GetConsensus(coin height)):
+/// 30 blocks before Digishield (1,000), 240 from it, on mainnet and testnet.
+pub fn maturity(height: u32) -> u32 {
+    if height < 1000 { 30 } else { 240 }
+}
+
+/// Pepecoin MAX_MONEY: 10,000,000,000 PEP (amount.h).
+pub const MAX_MONEY: u64 = 10_000_000_000 * COIN;
 
 #[cfg(test)]
 mod tests {

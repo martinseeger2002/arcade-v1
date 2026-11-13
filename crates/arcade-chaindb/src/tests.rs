@@ -55,6 +55,8 @@ fn block(prev: Hash256, txs: Vec<Tx>, time: u32) -> Block {
 /// Test chain params whose genesis is our synthetic genesis.
 fn params_for(genesis: &Block) -> &'static ChainParams {
     let mut p = PEPECOIN_TEST.clone();
+        // Made-up chains for indexing tests: no coin rules (consensus has its own tests).
+        p.value_rules = None;
     p.genesis = Box::leak(genesis.hash().to_hex().into_boxed_str());
     p.genesis_header = "";
     Box::leak(Box::new(p))
@@ -921,4 +923,37 @@ fn txs_pending_cleared_when_addresses_removed() {
     f.db.wstore(c).unwrap().write(|w| w.put(STATE, &k_state(c, crate::addrbuild::TXS_PENDING), b"1")).unwrap();
     assert!(f.db.repair_txs_pending(c).unwrap(), "stale flag cleared");
     assert!(!f.db.txs_pending(c).unwrap());
+}
+
+/// The coin rules, where a chain has them: maturity, a transaction paying out no more than it
+/// spends, and the coinbase paying at most the subsidy plus the fees. A block breaking one is
+/// an InvalidBlock (never connected), and nothing of it is kept.
+#[test]
+fn coin_rules_refuse_what_core_refuses() {
+    let f = fixture();
+    let mut p = f.p.clone();
+    p.value_rules = Some(arcade_chain::params::ValueRules { max_money: 1_000_000, subsidy: |_, _| 50, maturity: |_| 2 });
+    let p: &'static ChainParams = Box::leak(Box::new(p));
+    let invalid = |r: arcade_store::Result<Tip>, want: &str| match r {
+        Err(arcade_store::StoreError::InvalidBlock { why, .. }) => assert!(why.contains(want), "{why}"),
+        other => panic!("expected InvalidBlock ({want}), got {other:?}"),
+    };
+    let cb1 = tx(&[], &[(50, p2pkh(1))], 1);
+    let b1 = block(f.g.hash(), vec![cb1.clone()], 2);
+    f.db.connect_blocks(p, &[b1.clone()]).unwrap();
+
+    // Height 2: one block after it was made, the coinbase hasn't matured.
+    let early = tx(&[(cb1.txid, 0)], &[(49, p2pkh(2))], 0);
+    invalid(f.db.connect_blocks(p, &[block(b1.hash(), vec![tx(&[], &[(50, p2pkh(3))], 2), early.clone()], 3)]), "premature-spend");
+    let b2 = block(b1.hash(), vec![tx(&[], &[(50, p2pkh(3))], 2)], 3);
+    f.db.connect_blocks(p, &[b2.clone()]).unwrap();
+
+    // Height 3: matured. Paying out more than it holds, or a coinbase over subsidy + fee, is refused.
+    let over = tx(&[(cb1.txid, 0)], &[(51, p2pkh(2))], 0);
+    invalid(f.db.connect_blocks(p, &[block(b2.hash(), vec![tx(&[], &[(50, p2pkh(3))], 3), over], 4)]), "in-belowout");
+    invalid(f.db.connect_blocks(p, &[block(b2.hash(), vec![tx(&[], &[(52, p2pkh(3))], 3), early.clone()], 4)]), "bad-cb-amount");
+    invalid(f.db.connect_blocks(p, &[block(b2.hash(), vec![tx(&[], &[(2_000_000, p2pkh(3))], 3)], 4)]), "out of range");
+    // Subsidy 50 + fee 1 exactly: fine.
+    let tip = f.db.connect_blocks(p, &[block(b2.hash(), vec![tx(&[], &[(51, p2pkh(3))], 3), early], 4)]).unwrap();
+    assert_eq!(tip.height, 3);
 }

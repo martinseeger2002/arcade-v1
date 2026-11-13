@@ -148,7 +148,9 @@ fn litecoin_ord_numbers_curses_fees_and_pointers() {
     let t3 = spend(&[(cb1.txid, 2, Some(env("text/plain", b"c", None))), (cb1.txid, 3, Some(env("text/plain", b"d", None)))], &[500], 3);
     let t4 = spend(&[(cb2.txid, 0, Some(env("text/plain", b"e", Some(4500))))], &[4000, 900], 4);
     let b4 = block(b3.hash(), vec![cb4.clone(), t3.clone(), t4.clone()], 5);
-    db.connect_blocks(p, &[b1, b2, b3, b4]).unwrap();
+    // Made-up blocks without a witness commitment (the coinbases stay simple): connected
+    // without Block::check, which would refuse their witness data, as Core would.
+    db.connect_blocks_checked(p, &[b1, b2, b3, b4], false).unwrap();
 
     let get = |id: String| arcade_ledger::ord::inscription(&db, p, &id).unwrap_or_else(|| panic!("{id} not indexed"));
     let at = |id: String| arcade_ledger::ord::location(&db, p, &id);
@@ -241,7 +243,9 @@ fn ltc20_deploy_mint_transfer_and_a_transfer_lost_to_the_fee() {
     // The note's coin is input 1, at 1000 of 500 out: the fee.
     let fee = spend_to(&[(cb1.txid, 5, None), (tx2.txid, 0, None)], &[(500, sc)]);
     let b6 = block(b5.hash(), vec![coinbase(&[5_000_000_000, 10_000], 6), fee], 7);
-    db.connect_blocks(p, &[b1, b2, b3, b4, b5, b6]).unwrap();
+    // Made-up blocks without a witness commitment (the coinbases stay simple): connected
+    // without Block::check, which would refuse their witness data, as Core would.
+    db.connect_blocks_checked(p, &[b1, b2, b3, b4, b5, b6], false).unwrap();
 
     let e18 = |n: u128| (n * 10u128.pow(18)).to_string();
     let bal = |who: &str| arcade_ledger::tokens::balances(&db, p.chain_no, who).into_iter().find(|t| t.0 == "lite").map(|t| (t.1, t.2));

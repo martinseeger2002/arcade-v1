@@ -7,7 +7,7 @@
 //!    disconnect anything above the fork, then fetch and connect blocks forward in
 //!    batches, each batch one commit.
 
-use crate::db::{ChainDb, HeaderRec, Tip, STATUS_HEADER};
+use crate::db::{ChainDb, HeaderRec, Tip, STATUS_HEADER, STATUS_INVALID};
 use arcade_chain::params::{check_block_work, check_context, check_header, ChainParams, PowCheck, MEDIAN_TIME_SPAN};
 use arcade_chain::p2p::{HeaderEntry, Peer};
 use arcade_chain::pow::{meets_target, pow_hash, work_from_bits, PowAlgo, U256};
@@ -26,6 +26,12 @@ pub enum SyncError {
     BadHeader { height: u32, why: String },
     #[error("peer sent a bad block {hash}: {why}")]
     BadBlock { hash: Hash256, why: String },
+    /// The block breaks the chain's rules: it and every block built on it are marked invalid,
+    /// and the best valid chain is the one to follow again.
+    #[error("block {hash} is invalid: {why}")]
+    InvalidBlock { hash: Hash256, why: String },
+    #[error("peer sent a header at height {height} built on the invalid block {parent}")]
+    BuildsOnInvalid { height: u32, parent: Hash256 },
     #[error("reorg of {0} blocks is deeper than the undo window")]
     ReorgTooDeep(u32),
     #[error("reorg to below the checkpoint at height {0}")]
@@ -67,6 +73,10 @@ pub struct Syncer<'a> {
     /// The chain's height as a source told us, when our headers only run a little ahead of
     /// the blocks (sources that send headers with the blocks).
     pub known_top: std::cell::Cell<u32>,
+    /// The tip before the last reorg started: if the branch turns out invalid, it is the one
+    /// to go back to when another valid branch has the same work (Core keeps the chain it
+    /// had: the first seen wins a tie).
+    pre_reorg_tip: std::cell::Cell<Option<Hash256>>,
 }
 
 /// The deepest reorg taken onto a branch none of whose headers has a checked proof of work
@@ -92,7 +102,7 @@ pub struct Progress {
 
 impl<'a> Syncer<'a> {
     pub fn new(db: &'a ChainDb, params: &'static ChainParams) -> Self {
-        Syncer { db, params, path: Default::default(), defer_addresses: true, known_top: Default::default() }
+        Syncer { db, params, path: Default::default(), defer_addresses: true, known_top: Default::default(), pre_reorg_tip: Default::default() }
     }
 
     fn c(&self) -> u16 {
@@ -168,6 +178,7 @@ impl<'a> Syncer<'a> {
         // The headers under the one being checked, parent first (for the time and difficulty
         // rules); slid along while the batch runs in order, looked up again when it doesn't.
         let mut below: (Hash256, Vec<Header>) = (Hash256::ZERO, Vec::new());
+        let mut refused = None;
         for e in entries {
             let hash = self.params.block_id(&e.header);
             if pending.contains_key(&hash) || self.db.header(c, &hash)?.is_some() {
@@ -181,6 +192,11 @@ impl<'a> Syncer<'a> {
                 },
             };
             let height = parent.height + 1;
+            if parent.status == STATUS_INVALID {
+                // Core: bad-prevblk. Keep what came before it in this batch.
+                refused = Some(SyncError::BuildsOnInvalid { height, parent: e.header.prev });
+                break;
+            }
             let bad = |why: String| SyncError::BadHeader { height, why };
             if let Some(cp) = floor.filter(|cp| height < *cp) {
                 return Err(bad(format!("forks below the checkpoint at height {cp}")));
@@ -224,7 +240,10 @@ impl<'a> Syncer<'a> {
         if n > 0 {
             self.db.put_headers(c, &batch)?;
         }
-        Ok(n)
+        match refused {
+            Some(e) => Err(e),
+            None => Ok(n),
+        }
     }
 
     /// Up to MEDIAN_TIME_SPAN headers ending at `prev`, newest first, from this batch or the store.
@@ -259,6 +278,17 @@ impl<'a> Syncer<'a> {
             }
         }
         Ok(false)
+    }
+
+    /// `hash` breaks the chain's rules: mark it (and what is built on it) invalid, so the next
+    /// round goes back to the best valid chain; the error to return.
+    fn invalid(&self, hash: Hash256, why: String) -> SyncError {
+        eprintln!("{}: block {hash} is invalid ({why}); marked, back to the best valid chain", self.params.key);
+        *self.path.borrow_mut() = (Hash256::ZERO, Vec::new());
+        match self.db.mark_invalid(self.params, &hash, self.pre_reorg_tip.take()) {
+            Ok(_) => SyncError::InvalidBlock { hash, why },
+            Err(e) => SyncError::Store(e),
+        }
     }
 
     /// Hashes from just above the fork point up to the best header, and the fork height.
@@ -312,6 +342,7 @@ impl<'a> Syncer<'a> {
             if depth > UNVERIFIED_REORG_DEPTH && !self.has_checked_work(fork, &path)? {
                 return Err(SyncError::UnverifiedReorg(depth));
             }
+            self.pre_reorg_tip.set(Some(tip.hash));
             for _ in 0..depth {
                 self.db.disconnect_tip(c)?;
                 prog.disconnected += 1;
@@ -329,13 +360,19 @@ impl<'a> Syncer<'a> {
         // writes stay in order, on this thread).
         let format = &self.params.format;
         let (db, params) = (self.db, self.params);
-        let check_chunk = move |raws: Vec<Vec<u8>>, first_height: u32| -> std::result::Result<HashMap<Hash256, Block>, SyncError> {
+        // The blocks that pass, and the first failure (connected up to it: Core too connects
+        // what it has, and one damaged block doesn't hold back the good ones before it).
+        let check_chunk = move |raws: Vec<Vec<u8>>, first_height: u32| -> (HashMap<Hash256, Block>, Option<SyncError>) {
             let one = |(i, raw): (usize, &Vec<u8>)| -> std::result::Result<Block, SyncError> {
                 let b = Block::parse_with(raw, format).map_err(|e| SyncError::BadBlock { hash: Hash256::ZERO, why: e.to_string() })?;
                 if b.encode() != *raw {
                     return Err(SyncError::BadBlock { hash: b.hash(), why: "does not rebuild byte-identically".into() });
                 }
-                b.check().map_err(|e| SyncError::BadBlock { hash: b.hash(), why: e.to_string() })?;
+                b.check().map_err(|e| match e.breaks_rules() {
+                    // Marked by the writer thread, which owns the syncer.
+                    true => SyncError::InvalidBlock { hash: b.hash(), why: e.to_string() },
+                    false => SyncError::BadBlock { hash: b.hash(), why: e.to_string() },
+                })?;
                 db.warm(params, &b, first_height + i as u32, addresses_live);
                 Ok(b)
             };
@@ -351,20 +388,27 @@ impl<'a> Syncer<'a> {
                 })
             };
             let mut by_hash = HashMap::with_capacity(parsed.len());
+            let mut first_err = None;
             for b in parsed {
-                let b = b?;
-                by_hash.insert(b.hash(), b);
+                match b {
+                    Ok(b) => {
+                        by_hash.insert(b.hash(), b);
+                    }
+                    Err(e) => {
+                        first_err.get_or_insert(e);
+                    }
+                }
             }
-            Ok(by_hash)
+            (by_hash, first_err)
         };
         let chunks: Vec<&[Hash256]> = path.chunks(batch.max(1)).collect();
         std::thread::scope(|sc| -> Result<()> {
-            let mut next: Option<(std::thread::ScopedJoinHandle<'_, std::result::Result<HashMap<Hash256, Block>, SyncError>>, std::time::Duration, std::time::Instant)> = None;
+            let mut next: Option<(std::thread::ScopedJoinHandle<'_, (HashMap<Hash256, Block>, Option<SyncError>)>, std::time::Duration, std::time::Instant)> = None;
             for (i, chunk) in chunks.iter().enumerate() {
                 let first = height + 1;
-                let (mut by_hash, got, checked) = match next.take() {
+                let ((mut by_hash, mut chunk_err), got, checked) = match next.take() {
                     Some((h, got, t0)) => {
-                        let m = h.join().expect("block check thread")?;
+                        let m = h.join().expect("block check thread");
                         (m, got, t0.elapsed())
                     }
                     None => {
@@ -372,7 +416,7 @@ impl<'a> Syncer<'a> {
                         let raws = peer.get_blocks(chunk).map_err(SyncError::Source)?;
                         let got = t_get.elapsed();
                         let t0 = std::time::Instant::now();
-                        (check_chunk(raws, first)?, got, t0.elapsed())
+                        (check_chunk(raws, first), got, t0.elapsed())
                     }
                 };
                 if let Some(nc) = chunks.get(i + 1) {
@@ -384,16 +428,24 @@ impl<'a> Syncer<'a> {
                     next = Some((sc.spawn(move || check_chunk(raws, nf)), got, std::time::Instant::now()));
                 }
                 let mut blocks = Vec::with_capacity(chunk.len());
+                let mut stop = None;
                 for h in chunk.iter() {
                     height += 1;
-                    let b = by_hash
-                        .remove(h)
-                        .ok_or_else(|| SyncError::BadBlock { hash: *h, why: "peer did not send it".into() })?;
+                    let Some(b) = by_hash.remove(h) else {
+                        stop = Some(match chunk_err.take() {
+                            Some(SyncError::InvalidBlock { hash, why }) => self.invalid(hash, why),
+                            Some(e) => e,
+                            None => SyncError::BadBlock { hash: *h, why: "peer did not send it".into() },
+                        });
+                        break;
+                    };
                     if let Some(rec) = self.db.header(c, h)? {
                         let parent = self.db.header(c, &rec.header.prev)?.expect("parent stored");
                         if let Ok(PowCheck::NeedsBlock) = check_header(self.params, &b.header, &parent.header, height) {
-                            check_block_work(self.params, &b, height)
-                                .map_err(|e| SyncError::BadBlock { hash: *h, why: e.to_string() })?;
+                            if let Err(e) = check_block_work(self.params, &b, height) {
+                                stop = Some(self.invalid(*h, e.to_string()));
+                                break;
+                            }
                         }
                     }
                     blocks.push(b);
@@ -413,7 +465,11 @@ impl<'a> Syncer<'a> {
                         n += blocks[to].txs.len();
                         to += 1;
                     }
-                    self.db.connect_blocks_checked(self.params, &blocks[from..to], defer)?;
+                    match self.db.connect_blocks_checked(self.params, &blocks[from..to], defer) {
+                        Ok(_) => {}
+                        Err(arcade_store::StoreError::InvalidBlock { block, why }) => return Err(self.invalid(Hash256(block), why)),
+                        Err(e) => return Err(e.into()),
+                    }
                     from = to;
                 }
                 let wrote = t_w.elapsed();
@@ -437,6 +493,10 @@ impl<'a> Syncer<'a> {
                 let mut cached = self.path.borrow_mut();
                 let n = blocks.len().min(cached.1.len());
                 cached.1.drain(..n);
+                drop(cached);
+                if let Some(e) = stop {
+                    return Err(e);
+                }
             }
             Ok(())
         })?;
@@ -513,6 +573,8 @@ mod tests {
     /// Test params from `base`: our genesis, plain blocks, an easy powLimit.
     fn params(base: &ChainParams, g: &Block, tweak: impl FnOnce(&mut ChainParams)) -> &'static ChainParams {
         let mut p = base.clone();
+        // Made-up chains for indexing tests: no coin rules (consensus has its own tests).
+        p.value_rules = None;
         p.genesis = Box::leak(g.hash().to_hex().into_boxed_str());
         p.genesis_header = "";
         p.format = Format::BITCOIN;
@@ -560,6 +622,70 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = ChainDb::open(dir.path().join("chain.mdbx")).unwrap();
         (dir, db)
+    }
+
+    /// A heavier branch holding a block that can't be connected (it spends a coin that doesn't
+    /// exist): V1 marks it and what is built on it invalid and goes back to the chain it had,
+    /// as Core does, instead of failing on it every round; headers built on it are refused.
+    #[test]
+    fn invalid_block_in_a_heavier_branch_is_marked_and_left() {
+        let g = genesis();
+        let p = params(&PEPECOIN_TEST, &g, |p| p.digishield_from = None);
+        let (_d, db) = open();
+        let s = Syncer::new(&db, p);
+        let main = extend(&g, 0, 3, 1, EASY, 1, Some(PowAlgo::Scrypt));
+        sync(&s, &mut Src::new(&[&[g.clone()], &main])).unwrap();
+        let top = main[2].hash();
+
+        // Branch from height 1: a good block, then one spending a coin nobody made, then two more.
+        let b2 = extend(&main[0], 1, 1, 1, EASY, 2, Some(PowAlgo::Scrypt)).remove(0);
+        let mut b3 = extend(&b2, 2, 1, 1, EASY, 3, Some(PowAlgo::Scrypt)).remove(0);
+        let ghost = {
+            let mut o = Vec::new();
+            o.extend_from_slice(&1i32.to_le_bytes());
+            write_varint(&mut o, 1);
+            o.extend_from_slice(&[7; 32]);
+            o.extend_from_slice(&0u32.to_le_bytes());
+            write_varint(&mut o, 0);
+            o.extend_from_slice(&u32::MAX.to_le_bytes());
+            write_varint(&mut o, 1);
+            o.extend_from_slice(&1u64.to_le_bytes());
+            write_varint(&mut o, 1);
+            o.push(0x51);
+            o.extend_from_slice(&0u32.to_le_bytes());
+            Tx::parse(&o).unwrap()
+        };
+        b3.txs.push(ghost);
+        b3.header.merkle_root = merkle_root(&b3.txs.iter().map(|t| t.txid).collect::<Vec<_>>());
+        b3.header.nonce = 0;
+        while !meets_target(&try_pow_hash(PowAlgo::Scrypt, &b3.header.encode()).unwrap(), EASY) {
+            b3.header.nonce += 1;
+        }
+        let b3 = Block::parse(&b3.encode()).unwrap();
+        let rest = extend(&b3, 3, 2, 1, EASY, 4, Some(PowAlgo::Scrypt));
+        let mut src = Src::new(&[&[g.clone()], &main, &[b2.clone(), b3.clone()], &rest]);
+        while s.sync_headers_once(&mut src).unwrap() > 0 {}
+        assert_eq!(db.best_header(p.chain_no).unwrap(), Some(rest[1].hash()), "the branch has more work");
+
+        let r = s.sync_blocks(&mut src, 100, 50);
+        assert!(matches!(r, Err(SyncError::InvalidBlock { hash, .. }) if hash == b3.hash()), "{r:?}");
+        assert_eq!(db.best_header(p.chain_no).unwrap(), Some(top), "back to the chain it had");
+        for h in [b3.hash(), rest[0].hash(), rest[1].hash()] {
+            assert_eq!(db.header(p.chain_no, &h).unwrap().unwrap().status, crate::db::STATUS_INVALID);
+        }
+        s.sync_blocks(&mut src, 100, 50).unwrap();
+        assert_eq!(db.tip(p.chain_no).unwrap().unwrap().hash, top, "the old tip is connected again");
+        s.sync_blocks(&mut src, 100, 50).unwrap();
+        assert_eq!(db.tip(p.chain_no).unwrap().unwrap().hash, top, "and stays: no retrying the bad block");
+
+        // A header on top of the invalid branch is refused.
+        let more = extend(&rest[1], 5, 1, 1, EASY, 5, Some(PowAlgo::Scrypt));
+        let r = s.sync_headers_once(&mut Src::new(&[&more]));
+        assert!(matches!(r, Err(SyncError::BuildsOnInvalid { .. })), "{r:?}");
+
+        // reconsider_invalid clears the marks (and the heavier branch is best again).
+        db.reconsider_invalid(p).unwrap();
+        assert_eq!(db.best_header(p.chain_no).unwrap(), Some(rest[1].hash()));
     }
 
     /// One made-up header whose work isn't checked (a DigiByte algorithm not implemented here,

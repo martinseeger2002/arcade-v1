@@ -116,6 +116,8 @@ pub fn chain(n: u32) -> Vec<Block> {
 
 fn params_for(genesis: &Block) -> &'static ChainParams {
     let mut p = PEPECOIN_TEST.clone();
+        // Made-up chains for indexing tests: no coin rules (consensus has its own tests).
+        p.value_rules = None;
     p.genesis = Box::leak(genesis.hash().to_hex().into_boxed_str());
     p.genesis_header = "";
     Box::leak(Box::new(p))
