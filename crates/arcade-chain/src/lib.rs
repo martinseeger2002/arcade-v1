@@ -15,6 +15,7 @@ pub mod params;
 pub mod pepecoin;
 pub mod header;
 pub mod pow;
+pub mod sigops;
 pub mod tx;
 
 pub use block::Block;

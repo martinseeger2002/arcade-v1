@@ -160,17 +160,24 @@ Everything else reads. libmdbx reads are lock-free and memory-mapped.
      no null or repeated inputs);
    - every input spends a coin that exists.
 
-   Where a chain's coin rules are known exactly (`ChainParams::value_rules`; Pepecoin's three
-   networks so far), also: coinbase maturity, inputs covering outputs, MoneyRange, and a
-   coinbase paying at most the subsidy plus the fees.
+   Where a chain's rules are known exactly (Pepecoin's three networks so far), also:
+   - **coin rules** (`ChainParams::value_rules`): coinbase maturity, inputs covering outputs,
+     MoneyRange, and a coinbase paying at most the subsidy plus the fees;
+   - **scripts and the rest of Core's block rules** (`ChainParams::block_rules`): every input's
+     script run against the coin it spends by Bitcoin Core's own consensus library
+     (libbitcoinconsensus), with the flags in force at that height (P2SH; DERSIG and
+     CHECKLOCKTIMEVERIFY from BIP66/BIP65); the coinbase starting with the height (BIP34);
+     the lowest block version; lock-time finality; 1 MB and 20,000 signature operations a block.
+     Scripts are checked above the newest checkpoint, as Core's "assume valid" (no fork may
+     start below it), or everywhere with `ARCADE_VERIFY_ALL_SCRIPTS=1`.
 
    A block that breaks a rule is marked invalid, with everything built on it, and the sync goes
    back to the best valid chain. A damaged copy (one that doesn't match its header) is only
    refused, since another copy may be good.
 
-   **Not checked yet:** scripts and signatures (step 3, above an "assume valid" point per
-   chain, as Core does), and the coin rules on chains other than Pepecoin. A block breaking
-   those could only come from someone mining it.
+   **Not checked yet:** the coin and block rules on chains other than Pepecoin. Each needs its
+   Core's parameters verified and its whole history run with them before they are switched on.
+   BIP30 isn't checked: from BIP34 on, a duplicate transaction can't be made.
 
    `tests/regtest` runs V1 against a real Pepecoin Core, block for block.
 

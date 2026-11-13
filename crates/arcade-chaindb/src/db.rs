@@ -1942,6 +1942,13 @@ enum Addr {
 /// are more than DEFER_BEHIND (20,000) deep, far past the UNDO_DEPTH (1,000) a reorg may undo,
 /// and their records would only be deleted again later.
 #[allow(clippy::too_many_arguments)]
+/// ARCADE_VERIFY_ALL_SCRIPTS=1: check scripts under the newest checkpoint too (a full check of
+/// a chain's history, as Core with -assumevalid=0).
+fn verify_all_scripts() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("ARCADE_VERIFY_ALL_SCRIPTS").is_ok_and(|v| v == "1"))
+}
+
 /// Walk the stored headers from height `floor` up (every stored header's parent is stored, so
 /// heights run without gaps). With `spread`, a header whose parent is invalid is marked invalid
 /// too. The valid header with the most work becomes the best header; on a tie, `prefer` (when
@@ -2072,6 +2079,38 @@ fn connect_one(
     let vr = params.value_rules.filter(|_| height > 0);
     let broke = |tx: &Hash256, why: &str| StoreError::InvalidBlock { block: hash.0, why: format!("height {height}: tx {tx}: {why}") };
     let (mut fees, mut coinbase_out) = (0u128, 0u128);
+    // Core's remaining block rules (where the chain has them): size, BIP34, finality, sigops,
+    // and every input's script above the newest checkpoint ("assume valid").
+    let br = params.block_rules.filter(|_| height > 0);
+    let script_flags = br.filter(|_| verify_all_scripts() || params.last_checkpoint(u32::MAX).is_none_or(|cp| height > cp)).map(|b| (b.script_flags)(height));
+    let mut sigops = 0u32;
+    if let Some(br) = &br {
+        // Sizes without witness data (Core's SERIALIZE_TRANSACTION_NO_WITNESS): the wire bytes,
+        // re-encoded only for a transaction that has a witness.
+        let stripped = |t: &arcade_chain::Tx| if t.has_witness() { t.encode_legacy().len() } else { t.raw.len() };
+        let mut count = Vec::new();
+        arcade_chain::encode::write_varint(&mut count, blk.txs.len() as u64);
+        let no_witness = 80 + blk.auxpow.as_ref().map_or(0, |a| a.raw.len()) + count.len() + blk.txs.iter().map(stripped).sum::<usize>()
+            + blk.sig.as_ref().map_or(0, |g| { let mut v = Vec::new(); arcade_chain::encode::write_varint(&mut v, g.len() as u64); v.len() + g.len() }) + blk.extra.len();
+        if blk.txs.len() > br.max_block_size || no_witness > br.max_block_size {
+            return Err(broke(&blk.txs[0].txid, &format!("block is {no_witness} bytes, over {} (bad-blk-length)", br.max_block_size)));
+        }
+        if height >= br.bip34_height && !blk.txs[0].inputs[0].script_sig.starts_with(&arcade_chain::sigops::height_push(height)) {
+            return Err(broke(&blk.txs[0].txid, "coinbase doesn't start with the block height (bad-cb-height)"));
+        }
+        for tx in &blk.txs {
+            if stripped(tx) > br.max_block_size {
+                return Err(broke(&tx.txid, "transaction over the size limit (bad-txns-oversize)"));
+            }
+            if !arcade_chain::sigops::is_final(tx, height, blk.header.time) {
+                return Err(broke(&tx.txid, &format!("not final: lock time {} (bad-txns-nonfinal)", tx.lock_time)));
+            }
+            sigops = sigops.saturating_add(arcade_chain::sigops::legacy_sig_ops(tx));
+        }
+        if sigops > br.max_sigops {
+            return Err(broke(&blk.txs[0].txid, &format!("{sigops} signature operations, over {} (bad-blk-sigops)", br.max_sigops)));
+        }
+    }
     for (p, tx) in blk.txs.iter().enumerate() {
         let mut pv = Vec::new();
         let mut value_in = 0u128;
@@ -2156,6 +2195,24 @@ fn connect_one(
             }
         }
         tadd(4, t_sp);
+        if let (Some(br), false) = (&br, tx.is_coinbase()) {
+            // P2SH redeem scripts' signature operations (GetP2SHSigOpCount), then the scripts.
+            for (inp, prev) in tx.inputs.iter().zip(&pv) {
+                if arcade_chain::sigops::is_p2sh(&prev.script) {
+                    sigops = sigops.saturating_add(arcade_chain::sigops::p2sh_sig_op_count(&inp.script_sig));
+                }
+            }
+            if sigops > br.max_sigops {
+                return Err(broke(&tx.txid, &format!("{sigops} signature operations, over {} (bad-blk-sigops)", br.max_sigops)));
+            }
+            if let Some(flags) = script_flags {
+                for (i, prev) in pv.iter().enumerate() {
+                    if let Err(e) = bitcoinconsensus::verify_with_flags(&prev.script, prev.value, &tx.raw, None, i, flags) {
+                        return Err(broke(&tx.txid, &format!("input {i}: script check failed ({e:?}) (mandatory-script-verify-flag-failed)")));
+                    }
+                }
+            }
+        }
         if let Some(vr) = &vr {
             let mut out = 0u128;
             for o in &tx.outputs {
