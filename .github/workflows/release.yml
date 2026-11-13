@@ -86,6 +86,11 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    env:
+      # Bitcoin Core's consensus library (crate bitcoinconsensus) builds secp256k1 statically;
+      # on MSVC its header declares the functions as DLL imports unless SECP256K1_STATIC is
+      # defined (link errors __imp_secp256k1_*). cl.exe adds CL to every compile.
+      CL: /DSECP256K1_STATIC
     steps:
       - uses: actions/checkout@v4
 
