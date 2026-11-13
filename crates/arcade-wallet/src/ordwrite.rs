@@ -103,6 +103,74 @@ pub fn inscribe(p: &ChainParams, key: &SecretKey, coins: &[Utxo], ctype: &str, b
     Ok(Inscription { commit, reveal, reveal_txid: txid })
 }
 
+/// DogeFeed's envelope (its buildEnvelope): "ord", 1, type, 0, then EVERY 240-byte chunk of the body in the same
+/// script, the last one shorter; D:// readers join them (arcade_ledger::dproto::envelope_body).
+fn chunked(ctype: &[u8], body: &[u8]) -> Vec<Vec<u8>> {
+    let mut v = vec![b"ord".to_vec(), vec![1], ctype.to_vec(), vec![]];
+    if body.is_empty() {
+        v.push(Vec::new());
+    }
+    v.extend(body.chunks(240).map(|c| c.to_vec()));
+    v
+}
+
+/// Dogecoin relays a scriptSig of at most 1,650 bytes.
+pub const MAX_SCRIPT_SIG: usize = 1650;
+
+/// The reveal of a chunked (DogeFeed) envelope spending `commit`, paying `outputs`; the inscription lands on the
+/// first output. Its scriptSig must stay within [`MAX_SCRIPT_SIG`].
+pub fn reveal_chunked(p: &ChainParams, key: &SecretKey, commit: OutPoint, ctype: &str, body: &[u8], outputs: Vec<(u64, Vec<u8>)>, time: u32) -> Result<Vec<u8>, String> {
+    let pk = PublicKey::from_secret_key(SECP256K1, key);
+    let env = chunked(ctype.as_bytes(), body);
+    let r = redeem(&pk, env.len());
+    let shape = Shape { version: 1, time: p.format.tx_time.then_some(time), inputs: vec![In { prevout: commit, sequence: 0xffff_ffff }], outputs, lock_time: 0 };
+    let d = legacy::sighash(&shape, 0, &r, ALL)?;
+    let mut ss = Vec::new();
+    for item in &env {
+        push_item(&mut ss, item);
+    }
+    push(&mut ss, &legacy::sign(key, &d, ALL));
+    push(&mut ss, &r);
+    if ss.len() > MAX_SCRIPT_SIG {
+        return Err(format!("the record is too long for one transaction ({} of {MAX_SCRIPT_SIG} script bytes)", ss.len()));
+    }
+    Ok(legacy::serialize(&shape, &[ss]))
+}
+
+/// The P2SH lock a chunked envelope's commit pays.
+pub fn chunked_lock(pk: &PublicKey, ctype: &str, body: &[u8]) -> Vec<u8> {
+    let r = redeem(pk, chunked(ctype.as_bytes(), body).len());
+    arcade_ledger::address::p2sh_script(&arcade_ledger::address::hash160(&r))
+}
+
+/// The size a chunked reveal will have (for its fee before it is signed).
+pub fn chunked_reveal_size(ctype: &str, body: &[u8], outputs: &[(u64, Vec<u8>)]) -> usize {
+    let env = chunked(ctype.as_bytes(), body);
+    let script: usize = env.iter().map(|i| i.len() + if i.len() < 76 { 1 } else if i.len() < 256 { 2 } else { 3 }).sum::<usize>() + 74 + 36 + env.len();
+    10 + 41 + 3 + script + outputs.iter().map(|(_, s)| 9 + s.len()).sum::<usize>()
+}
+
+#[cfg(test)]
+mod chunked_tests {
+    use super::*;
+
+    /// A D:// reader reads a long chunked reveal back whole.
+    #[test]
+    fn a_long_body_reads_back_whole() {
+        let p = &arcade_chain::params::DOGECOIN_MAIN;
+        let key = SecretKey::from_slice(&[5; 32]).unwrap();
+        let body = format!(r#"{{"p":"D://","v":1,"b":{{"text":"{}"}}}}"#, "w".repeat(800));
+        let out = vec![(100_000u64, vec![0x76, 0xa9, 0x14, 1, 2, 3])];
+        let raw = reveal_chunked(p, &key, OutPoint { txid: arcade_chain::Hash256([6; 32]), vout: 0 }, "application/json", body.as_bytes(), out.clone(), 0).unwrap();
+        let tx = Tx::parse_with(&raw, &p.format).unwrap();
+        let (ct, got) = arcade_ledger::dproto::envelope_body(&tx.inputs[0].script_sig).unwrap();
+        assert_eq!((ct.as_slice(), got.as_slice()), (b"application/json".as_slice(), body.as_bytes()));
+        assert!((raw.len() as i64 - chunked_reveal_size("application/json", body.as_bytes(), &out) as i64).abs() < 8);
+        let too_long = "z".repeat(2000);
+        assert!(reveal_chunked(p, &key, OutPoint { txid: arcade_chain::Hash256([6; 32]), vout: 0 }, "application/json", too_long.as_bytes(), out, 0).is_err());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

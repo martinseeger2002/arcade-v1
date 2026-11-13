@@ -18,6 +18,7 @@
     ["maps", "Maps", "block maps: <block>.pepemap, .dogemap, .bitmap (needs ord)", true, "ord"],
     ["tokens", "Tokens", "PRC-20 on Pepecoin, DRC-20 on Dogecoin: deploys, mints, transfers, balances (needs ord)", true, "ord"],
     ["collections", "Collections", "NFT collections published on the chain, and Sub 1K (needs ord; read from it, no rebuild)", true, "ord"],
+    ["dogefeed", "DogeFeed", "D:// social posts, comments, quotes, likes, follows and tips (DogeFeed and arcades as registrars); serves the D:// indexer API", true, "dogefeed"],
     ["runes", "Runes", "coming: Bitcoin's fungible tokens", false, "runes"],
     ["dunes", "Dunes", "coming: Dogecoin's runes-style tokens", false, "dunes"],
   ];
@@ -161,7 +162,7 @@
     }));
     const noIdx = mode === "chain";
     // Runes only on Bitcoin, dunes only on Dogecoin: other chains don't list them.
-    $("c-idx").replaceChildren(...INDEXES.filter(([, , , , needs]) => (needs !== "runes" || c.runes) && (needs !== "dunes" || c.dunes)).map(([k, t, d, ok, needs]) => {
+    $("c-idx").replaceChildren(...INDEXES.filter(([, , , , needs]) => (needs !== "runes" || c.runes) && (needs !== "dunes" || c.dunes) && (needs !== "dogefeed" || c.dogefeed)).map(([k, t, d, ok, needs]) => {
       const can = ok && (!noIdx || k === "addresses") && (needs !== "ord" || c.ord) && (k !== "tokens" || c.tokens);
       const l = document.createElement("label");
       l.className = can ? "" : "off";
@@ -333,7 +334,7 @@
     const can = st.arcade ? [] : st.mode === "chain" ? INDEXES.filter(([k]) => k === "addresses" && !have.includes(k))
       : st.mode === "full" || st.mode === "shared"
       ? INDEXES.filter(([k, , , ok, needs]) => ok && !have.includes(k) && (needs !== "ord" || info.ord) && (k !== "tokens" || info.tokens)
-          && (needs !== "runes" || info.runes) && (needs !== "dunes" || info.dunes)) : [];
+          && (needs !== "runes" || info.runes) && (needs !== "dunes" || info.dunes) && (needs !== "dogefeed" || info.dogefeed)) : [];
     add.replaceChildren(...(can.length ? [Object.assign(document.createElement("h3"), { textContent: `Indexes you can add to ${st.name}` })] : []),
       ...can.map(([k, t, d]) => {
         const row = document.createElement("div"); row.className = "addrow";

@@ -5,12 +5,12 @@
   const coinEl = (c) => coinLogo(c.key, c.name, "span", "coin");
   const SECTIONS = [
     ["home", "Overview"], ["blocks", "Blocks"], ["mempool", "Mempool"], ["inscriptions", "Inscriptions", "ord"],
-    ["collections", "Collections", "collections"], ["tokens", "Tokens", "tokens"], ["names", "Names", "names"], ["maps", "Maps", "maps"], ["ledger", "Arcade ledger", "ledger"],
+    ["collections", "Collections", "collections"], ["tokens", "Tokens", "tokens"], ["names", "Names", "names"], ["maps", "Maps", "maps"], ["dogefeed", "DogeFeed", "dogefeed"], ["ledger", "Arcade ledger", "ledger"],
     // Runes and dunes join here (with their index keys) when those indexes exist.
   ];
   // Pages and the index each needs; a page comes online only when its index is on the chain.
-  const NEEDS = { collections: "collections", collection: "collections", inscriptions: "ord", inscription: "ord", tokens: "tokens", token: "tokens", names: "names", name: "names", maps: "maps", map: "maps", ledger: "ledger", ltokens: "ledger", linscs: "ledger", ltoken: "ledger", linsc: "ledger" };
-  const DETAIL_PARENT = { collection: "collections", block: "blocks", tx: "blocks", address: "home", inscription: "inscriptions", token: "tokens", name: "names", map: "maps", ltokens: "ledger", linscs: "ledger", ltoken: "ledger", linsc: "ledger", tag: "home", results: "home" };
+  const NEEDS = { collections: "collections", collection: "collections", inscriptions: "ord", inscription: "ord", tokens: "tokens", token: "tokens", names: "names", name: "names", maps: "maps", map: "maps", dogefeed: "dogefeed", dfpost: "dogefeed", dfaddr: "dogefeed", ledger: "ledger", ltokens: "ledger", linscs: "ledger", ltoken: "ledger", linsc: "ledger" };
+  const DETAIL_PARENT = { collection: "collections", block: "blocks", tx: "blocks", address: "home", inscription: "inscriptions", token: "tokens", name: "names", map: "maps", dfpost: "dogefeed", dfaddr: "dogefeed", ltokens: "ledger", linscs: "ledger", ltoken: "ledger", linsc: "ledger", tag: "home", results: "home" };
 
   let chains = [], chain = null, sum = null, page = "home", arg = null, seq = 0;
 
@@ -585,7 +585,125 @@
     return h("div", {}, crumbs(link("Maps", "maps"), m.claim), head(m.claim),
       kv([["Winning inscription", link(`#${fmt(m.number)}`, "inscription", m.id)], ["Holder", m.owner ? addrLink(m.owner, m.owner_tag) : "—"], ["Block", link(m.claim.split(".")[0], "block", m.claim.split(".")[0])]]));
   }
-  const VIEWS = { collections: vCollections, collection: vCollection, home: vHome, blocks: vBlocks, mempool: vMempool, inscriptions: vInscriptions, tokens: vTokens, names: vNames, maps: vMaps, ledger: vLedger,
+
+  // ---------- DogeFeed (D://) ----------
+  // Every D:// record (DogeFeed's social protocol on Dogecoin) as the dogefeed index reads and checks it: posts,
+  // comments and quotes with their counts, likes, branches, follows, tips, and who stamped each (the registrar).
+  const DF_OPS = ["all", "post", "comment", "quote", "like", "branch", "follow", "tip", "reveal", "delete", "edit", "keylink", "keyrevoke"];
+  const DF_PLURAL = { all: "All", branch: "Branches", reveal: "Reveals", keylink: "Key links", keyrevoke: "Key revokes" };
+  const dfDoge = (k) => coinNum(k || 0, "en-US") + " DOGE";
+  const dfWhen = (ev) => ev.ts ? new Date(ev.ts).toLocaleString() : "";
+  const contentUrl = (id) => (httpBase || "") + "/content/" + id;
+  const dfShort = (a) => short(a || "", 6, 4);
+  // An address shown by its DogeFeed handle (a .dogefeed name it holds) when it has one.
+  const dfWho = (a, handle, cls) => link(handle ? "@" + handle : dfShort(a), "dfaddr", a, cls || (handle ? "df-h" : "mono df-h"));
+  const dfAvatar = (a) => { let x = 0; for (const c of a || "") x = (x * 31 + c.charCodeAt(0)) % 360; return h("span", { class: "df-av", style: `background:hsl(${x} 45% 45%)` }, (a || "?").slice(1, 2).toUpperCase()); };
+  const dfStamp = (r) => r ? h("span", { class: "chip df-reg", title: `${r.kid} · ${r.address}` }, (r.source === "dogefeed" ? "DogeFeed" : r.source === "this arcade" ? "this arcade" : r.name || r.kid) + " · " + r.kid) : "";
+  const dfText = (t) => {
+    const out = [];
+    String(t || "").split(/(#[\w]+|@[\w.]+)/g).forEach((p) => out.push(/^[#@]/.test(p) ? h("b", { class: "df-tag" }, p) : p));
+    return h("div", { class: "df-text" }, ...out);
+  };
+  const dfTarget = (ev) => {
+    const t = ev.target;
+    if (!t) return "";
+    const isPost = /i\d+$/.test(t);
+    const verb = { comment: "↳ replying to", quote: "❝ quoting", like: "♥ liked", branch: "↻ branched", tip: "🪙 tipped", reveal: "🔓 revealed", delete: "✕ deleted", edit: "✎ edited", follow: "+ followed", keylink: "🔑 linked key", keyrevoke: "🔑 revoked key" }[ev.type] || "→";
+    return h("div", { class: "df-ref" }, verb, " ", isPost ? link(short(t, 8, 6), "dfpost", t, "mono") : dfWho(t, ev.target_handle || (ev.type === "follow" ? null : ev.recipient_handle), "mono"));
+  };
+  function dfCard(ev) {
+    const media = (ev.media || []).length ? h("div", { class: "df-media" }, ...(ev.media || []).map((m) => h("img", { src: contentUrl(m), loading: "lazy", alt: "" }))) : "";
+    const c = ev.counts;
+    const foot = h("div", { class: "df-foot" },
+      c ? h("span", {}, "♥ ", h("b", {}, fmt(c.likes)), "  💬 ", h("b", {}, fmt(c.comments)), "  ❝ ", h("b", {}, fmt(c.quotes)), c.tips && c.tips.n ? ["  🪙 ", h("b", {}, c.tips.doge)] : "") : "",
+      ev.valid ? h("span", { class: "df-ok" }, "✓ valid") : h("span", { class: "df-bad", title: ev.reason || "" }, "✕ " + (ev.reason || "invalid")),
+      dfStamp(ev.registrar),
+      ev.amount ? h("span", {}, dfDoge(ev.amount), " to ", ev.recipient_handle ? "@" + ev.recipient_handle : dfShort(ev.recipient)) : "",
+      ev.status === "pending" ? h("span", { class: "chip" }, `pending · ${ev.confirmations} conf`) : "");
+    return h("div", { class: "df-card" + (ev.valid ? "" : " bad"), onclick: () => go(ev.inscription ? "dfpost" : "dfpost", ev.inscription || ev.txid) },
+      h("div", { class: "df-who" }, dfAvatar(ev.account || ev.author), dfWho(ev.account || ev.author, ev.account_handle || ev.handle),
+        (ev.account_handle || ev.handle) ? h("span", { class: "mono faint df-a" }, dfShort(ev.account || ev.author)) : "",
+        h("span", { class: "df-op " + ev.type }, ev.type), h("span", { class: "df-t" }, `#${fmt(ev.height)}`, ev.deleted ? " · deleted" : "")),
+      dfTarget(ev), ev.text ? dfText(ev.text) : "", media,
+      (ev.tags || []).length ? h("div", { class: "df-tags" }, ...(ev.tags || []).map((t) => h("b", { class: "df-tag" }, "#" + t))) : "", foot);
+  }
+  let dfMore = null;
+  async function dfPage(cmd, args, into, empty) {
+    const r = await xapi(cmd, args);
+    const list = r.activity || r;
+    const box = into || h("div", { class: "df-feed" });
+    (list.items || []).forEach((ev) => box.append(dfCard(ev)));
+    if (!(list.items || []).length && !into) box.append(h("div", { class: "x-empty" }, empty));
+    const more = list.next ? h("div", { class: "row" }, h("button", { onclick: async (e) => { e.target.disabled = true; e.target.textContent = "Loading…"; const m = await dfPage(cmd, { ...args, cursor: list.next }, box); e.target.parentNode.replaceWith(m.more || ""); } }, "Load more")) : "";
+    return { box, more, r };
+  }
+  async function vDogeFeed() {
+    await imgArgs();
+    const type = DF_OPS.includes(arg) ? arg : "all";
+    const keys = await xapi("explorer.dogefeed_keys", { chain: chain.key }).catch(() => ({ registrars: [] }));
+    const chips = h("div", { class: "df-chips" }, ...DF_OPS.map((o) => h("button", { class: "df-chip" + (o === type ? " on" : ""), onclick: () => go("dogefeed", o === "all" ? null : o) }, DF_PLURAL[o] || o[0].toUpperCase() + o.slice(1) + "s")));
+    const { box, more } = await dfPage("explorer.dogefeed", { chain: chain.key, limit: 30, ...(type === "all" ? {} : { type }) }, null, "No D:// records yet.");
+    const regs = (keys.registrars || []).map((r) => h("span", { class: "chip df-reg", title: r.address }, (r.source === "dogefeed" ? "DogeFeed" : r.source === "this arcade" ? "This arcade" : r.name || r.kid) + " · " + r.kid));
+    return h("div", {},
+      sect("DogeFeed", null, h("div", {},
+        h("p", { class: "x-note" }, "D://, DogeFeed's social protocol on Dogecoin, checked here as DogeFeed's guide says: the author's signature, a registrar's stamp, and the fees. Registrars counted here: ", ...regs),
+        chips, box, more)));
+  }
+  async function vDfPost() {
+    await imgArgs();
+    const id = String(arg || "");
+    const isInsc = /i\d+$/.test(id);
+    const ev = isInsc ? await xapi("explorer.dogefeed_inscription", { chain: chain.key, id, activity: true, limit: 50 })
+      : await xapi("explorer.dogefeed_tx", { chain: chain.key, txid: id });
+    const title = { post: "Post", comment: "Comment", quote: "Quote", edit: "Edit", keylink: "Key link" }[ev.type] || (ev.type || "Record")[0].toUpperCase() + (ev.type || "record").slice(1);
+    const c = ev.counts;
+    const pays = [ev.fee != null && ["Registrar fee", dfDoge(ev.fee)], ev.amount && [ev.type === "comment" || ev.type === "quote" ? "Paid to the parent's author" : "Paid to " + (ev.type === "follow" ? "the followed account" : "the author"), h("span", {}, dfDoge(ev.amount), " → ", ev.recipient ? dfWho(ev.recipient, ev.recipient_handle, "mono") : "")]].filter(Boolean);
+    const rows = [
+      ["Status", ev.valid ? h("span", { class: "df-ok" }, "✓ valid D:// record") : h("span", { class: "df-bad" }, "✕ not a valid D:// record: " + (ev.reason || ""))],
+      ["Author", h("span", {}, ev.handle ? [link("@" + ev.handle, "dfaddr", ev.author), " "] : "", link(ev.author || "", "dfaddr", ev.author, "mono"), ev.account && ev.account !== ev.author ? [" for ", link(ev.account_handle ? "@" + ev.account_handle : ev.account, "dfaddr", ev.account, "mono")] : "")],
+      ev.registrar && ["Stamped by", h("span", {}, dfStamp(ev.registrar), " ", h("span", { class: "mono faint" }, ev.registrar.address))],
+      ["Block", h("span", {}, link(fmt(ev.height), "block", String(ev.height)), ` · ${fmt(ev.confirmations)} confirmations (${ev.status})`)],
+      ["Transaction", link(ev.txid, "tx", ev.txid, "mono")],
+      ev.inscription && ["Inscription", link(ev.inscription, "inscription", ev.inscription, "mono")],
+      ev.ts && ["Signed at", dfWhen(ev)],
+      ev.target && ["Target", dfTarget(ev)],
+      ...pays,
+      c && ["Counts", h("span", {}, `♥ ${fmt(c.likes)} · ↻ ${fmt(c.branches)} · ❝ ${fmt(c.quotes)} · 💬 ${fmt(c.comments)} · 🪙 ${fmt(c.tips.n)} (${c.tips.doge} DOGE) · 🔓 ${fmt(c.reveals.n)}`)],
+      ev.deleted && ["Deleted", "by its author (the bytes stay on chain)"],
+      ev.latestEdit && ["Latest edit", link(ev.latestEdit, "dfpost", ev.latestEdit, "mono")],
+    ];
+    const long = ev.bytes > 240 ? h("div", { class: "df-warn" }, h("b", {}, "Stored past its declared content. "), `DogeFeed's envelope declares one piece, so standard Doginals readers (and the Inscriptions tab) show the first 240 bytes; this index joins every chunk: ${fmt(ev.bytes)} bytes.`) : "";
+    const body = [crumbs(link("DogeFeed", "dogefeed"), title), head(title, h("span", { class: "df-op " + ev.type }, ev.type)),
+      h("div", { class: "df-card df-big" }, h("div", { class: "df-who" }, dfAvatar(ev.account || ev.author), dfWho(ev.account || ev.author, ev.account_handle || ev.handle), h("span", { class: "df-t" }, dfWhen(ev))),
+        dfTarget(ev), ev.text ? dfText(ev.text) : "", (ev.media || []).length ? h("div", { class: "df-media" }, ...(ev.media || []).map((m) => h("img", { src: contentUrl(m), alt: "" }))) : ""),
+      kv(rows), long];
+    if (ev.activity) {
+      const box = h("div", { class: "df-feed" });
+      (ev.activity.items || []).forEach((x) => box.append(dfCard(x)));
+      body.push(sect(`Activity on it`, null, (ev.activity.items || []).length ? box : h("div", { class: "x-empty" }, "No likes, replies or tips yet.")));
+    }
+    if (ev.record) body.push(sect("Record (all chunks joined)", null, h("pre", { class: "df-json" }, JSON.stringify(ev.record, null, 1))));
+    return h("div", {}, ...body);
+  }
+  async function vDfAddr() {
+    await imgArgs();
+    const a = String(arg || "");
+    const dir = (location.hash.includes("dir=in")) ? "in" : "out";
+    const r = await xapi("explorer.dogefeed_address", { chain: chain.key, address: a, limit: 30 });
+    const c = r.counts || {};
+    const stat = (k, v) => h("div", { class: "df-stat" }, h("small", {}, k), h("b", {}, v));
+    const stats = h("div", { class: "df-stats" }, stat("Posts", fmt(c.posts)), stat("Comments", fmt(c.comments)), stat("Quotes", fmt(c.quotes)),
+      stat("Followers", fmt(c.followers)), stat("Following", fmt(c.following)), stat("Likes given", fmt(c.likes_given)), stat("Likes received", fmt(c.likes_received)),
+      stat("Tips sent", (c.tips_sent || "0") + " DOGE"), stat("Tips received", (c.tips_received || "0") + " DOGE"));
+    const { box, more } = await dfPage("explorer.dogefeed_address", { chain: chain.key, address: a, counts: false, limit: 30 }, null, "Nothing on D:// from this address yet.");
+    const inBtn = h("button", { class: "df-chip", onclick: async (e) => { const m = await dfPage("explorer.dogefeed_address", { chain: chain.key, address: a, counts: false, direction: "in", limit: 30 }, null, "Nothing on D:// paid this address yet."); e.target.closest(".x-sect").querySelector(".df-feed").replaceWith(m.box); } }, "What paid it");
+    const name = r.handle ? "@" + r.handle : dfShort(a);
+    return h("div", {}, crumbs(link("DogeFeed", "dogefeed"), name), head(name, link("Address page", "address", a)),
+      h("p", { class: "mono x-note" }, a), stats,
+      (c.linked_keys || []).length ? sect("Linked keys", null, kv(c.linked_keys.map((k) => [k.label || "key", h("span", { class: "mono" }, k.key, " · ", (k.ops || []).join(", "))]))) : "",
+      sect("Activity", null, h("div", {}, h("div", { class: "df-chips" }, h("button", { class: "df-chip on" }, "What it did"), inBtn), box, more)));
+  }
+  const VIEWS = { collections: vCollections, collection: vCollection, home: vHome, blocks: vBlocks, mempool: vMempool, inscriptions: vInscriptions, tokens: vTokens, names: vNames, maps: vMaps, dogefeed: vDogeFeed, dfpost: vDfPost, dfaddr: vDfAddr, ledger: vLedger,
     block: vBlock, tx: vTx, address: vAddress, inscription: vInscription, token: vToken, name: vName, map: vMap,
     ltokens: vLTokens, linscs: vLInscs, ltoken: vLToken, linsc: vLInsc, tag: vTag, results: vResults };
 

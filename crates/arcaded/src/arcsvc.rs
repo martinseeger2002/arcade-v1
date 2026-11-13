@@ -1511,7 +1511,7 @@ pub fn row(node: &Node) -> Option<Value> {
     let key = defined()?.key;
     let st = crate::chains::status(node, key).ok()?;
     let mut row = json!({
-        "ord": false, "tokens": Value::Null, "dunes": false, "runes": false, "sizes": Value::Null,
+        "ord": false, "tokens": Value::Null, "dunes": false, "dogefeed": false, "runes": false, "sizes": Value::Null,
         "offers": node.offers_for(key).len(), "borrowed": st["borrowed"] == true, "queued": Value::Null,
     });
     for k in ["key", "name", "installed", "home", "arcade", "local", "mode", "indexes", "overall", "state", "tip", "waiting", "lenders", "floor", "mismatch"] {
