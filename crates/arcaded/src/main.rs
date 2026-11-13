@@ -6,6 +6,7 @@
 //!           [--http-port N|0] [--http-bind ADDR] [--site DIR] [--stun-port N|0]
 
 mod accountsvc;
+mod rulecheck;
 mod handlegate;
 mod addrsvc;
 mod collsvc;
