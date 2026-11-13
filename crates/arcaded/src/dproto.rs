@@ -673,7 +673,7 @@ pub fn refresh_handles(node: &Node) {
 
 /// An address's DogeFeed handle as the chain says it: the one winning `.dogefeed` name it holds. An address holding
 /// several (a wallet keeping names for others) names none: nothing on chain says which is its own. Handles DogeFeed
-/// keeps off chain aren't known here. Needs the ord and names indexes on Dogecoin; the map is rebuilt hourly.
+/// keeps off chain aren't known here. Needs the ord and names indexes on Dogecoin; the map is rebuilt every half hour.
 pub fn handle_of(_node: &Node, address: &str) -> Option<String> {
     one_name(HANDLES.lock().unwrap().as_ref()?, address)
 }
