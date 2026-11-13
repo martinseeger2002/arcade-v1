@@ -1,0 +1,6 @@
+# Bitcoin Core's consensus library (crate bitcoinconsensus, used for script checks) builds
+# secp256k1 statically, but on MSVC its header declares the functions as DLL imports unless
+# SECP256K1_STATIC is defined (link errors __imp_secp256k1_*). Windows builds only.
+[env]
+CFLAGS_x86_64_pc_windows_msvc = "/DSECP256K1_STATIC"
+CXXFLAGS_x86_64_pc_windows_msvc = "/DSECP256K1_STATIC"
