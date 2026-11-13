@@ -10,6 +10,39 @@ use crate::hash::Hash256;
 use crate::header::Header;
 use crate::pow::{meets_target, target_from_bits, try_pow_hash, work_from_bits, PowAlgo, PowRule, U256};
 
+/// Dogecoin 1.14's AuxPoW header rules, as Dogecoin, Pepecoin, Shibacoin, Luckycoin and Flopcoin
+/// Core apply them (CheckAuxPowProofOfWork and ContextualCheckBlockHeader):
+/// - before `start`, a block with the AuxPoW flag is refused (early-auxpow-block);
+/// - from `start` on, a legacy block is refused (late-legacy-block);
+/// - with `strict_chain_id`, a block that is not legacy must carry the chain's id
+///   ([`ChainParams::auxpow_chain_id`]) in its version, at any height.
+///
+/// "Legacy" is these Cores' `IsLegacy()`: version 1, or version 2 with chain id 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuxpowRules {
+    pub start: u32,
+    pub strict_chain_id: bool,
+}
+
+/// The coin rules Core checks when it connects a block, for chains where they are known
+/// exactly (taken from that chain's Core and run over its whole history): every input spends
+/// a matured coin, a transaction pays out no more than it spends, no amount leaves
+/// MoneyRange, and the coinbase pays at most the subsidy plus the fees. None = not checked.
+#[derive(Clone, Copy, Debug)]
+pub struct ValueRules {
+    /// MAX_MONEY, in the chain's smallest unit.
+    pub max_money: u64,
+    /// The subsidy of the block at `height`, whose parent is `prev`.
+    pub subsidy: fn(u32, &Hash256) -> u64,
+    /// The blocks a coinbase made at `height` must wait before it can be spent.
+    pub maturity: fn(u32) -> u32,
+}
+
+/// `CPureBlockHeader::IsLegacy()` in the Dogecoin 1.14 family.
+pub fn is_legacy(h: &Header) -> bool {
+    h.version == 1 || (h.version == 2 && h.chain_id() == 0)
+}
+
 #[derive(Clone, Debug)]
 pub struct ChainParams {
     /// Short key, as Arcade V1.0 names the coin everywhere people see it and in its own
@@ -47,6 +80,11 @@ pub struct ChainParams {
     /// AuxPoW chain id to check in merge-mined headers; None = not checked.
     pub auxpow_chain_id: Option<u32>,
     pub auxpow_strict_chain_id: bool,
+    /// The header rules Dogecoin 1.14's AuxPoW code puts on every block of the chain (see
+    /// [`AuxpowRules`]); None = not checked here (chains on other AuxPoW code: Bells, Junkcoin).
+    pub auxpow_rules: Option<AuxpowRules>,
+    /// Coin rules checked when a block is connected ([`ValueRules`]).
+    pub value_rules: Option<ValueRules>,
     pub bech32_hrp: Option<&'static str>,
     pub p2pkh_version: u8,
     pub p2sh_version: u8,
@@ -146,6 +184,33 @@ pub enum HeaderError {
     TimeTooNew,
     #[error("bits are not the chain's next difficulty")]
     BadDifficulty,
+    #[error("legacy block after merge mining started (late-legacy-block)")]
+    LateLegacy,
+    #[error("merge-mined block before merge mining started (early-auxpow-block)")]
+    EarlyAuxpow,
+    #[error("block does not carry the chain's AuxPoW chain id (got {got}, expected {want})")]
+    WrongChainId { got: u32, want: u32 },
+}
+
+/// The [`AuxpowRules`] for a header at `height` (nothing to check where the chain has none).
+pub fn check_auxpow_rules(params: &ChainParams, h: &Header, height: u32) -> Result<(), HeaderError> {
+    let Some(rules) = params.auxpow_rules else { return Ok(()) };
+    let legacy = is_legacy(h);
+    if rules.strict_chain_id && !legacy {
+        if let Some(want) = params.auxpow_chain_id {
+            if h.chain_id() != want {
+                return Err(HeaderError::WrongChainId { got: h.chain_id(), want });
+            }
+        }
+    }
+    if height >= rules.start {
+        if legacy {
+            return Err(HeaderError::LateLegacy);
+        }
+    } else if h.is_auxpow() {
+        return Err(HeaderError::EarlyAuxpow);
+    }
+    Ok(())
 }
 
 pub fn too_easy(params: &ChainParams, bits: u32, parent_bits: u32) -> bool {
@@ -205,6 +270,7 @@ pub fn check_header(
     if t == U256::ZERO {
         return Err(HeaderError::BadBits);
     }
+    check_auxpow_rules(params, h, height)?;
     let algo = params.pow.algo(h.version, height).ok_or(HeaderError::UnknownAlgo)?;
     if params.max_easier && too_easy(params, h.bits, parent.bits) {
         return Err(HeaderError::TooEasy);
@@ -268,6 +334,21 @@ pub fn check_context(params: &ChainParams, h: &Header, height: u32, below: &[Hea
     Ok(())
 }
 
+/// Pepecoin's coin rules (Pepecoin Core 4fb5a0cd9: GetPepecoinBlockSubsidy with
+/// fSimplifiedRewards, nCoinbaseMaturity 30 then 240 from Digishield, MAX_MONEY 10 billion).
+pub const PEPECOIN_VALUE_RULES: ValueRules = ValueRules {
+    max_money: crate::pepecoin::MAX_MONEY,
+    subsidy: |h, _| crate::pepecoin::subsidy(h),
+    maturity: crate::pepecoin::maturity,
+};
+
+/// Pepecoin regtest: halving every 150 blocks, maturity 60.
+pub const PEPECOIN_REGTEST_VALUE_RULES: ValueRules = ValueRules {
+    max_money: crate::pepecoin::MAX_MONEY,
+    subsidy: |h, _| crate::pepecoin::subsidy_every(h, 150),
+    maturity: |_| 60,
+};
+
 pub static PEPECOIN_TEST: ChainParams = ChainParams {
     key: "peptest",
     net: "test",
@@ -286,6 +367,9 @@ pub static PEPECOIN_TEST: ChainParams = ChainParams {
     digishield_from: Some(2),
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
+    // Pepecoin Core chainparams.cpp: auxpowConsensus from 42,000; testnet fStrictChainId false.
+    auxpow_rules: Some(AuxpowRules { start: 42000, strict_chain_id: false }),
+    value_rules: Some(PEPECOIN_VALUE_RULES),
     bech32_hrp: None,
     p2pkh_version: 0x71,
     p2sh_version: 0xc4,
@@ -329,7 +413,10 @@ pub static PEPECOIN_MAIN: ChainParams = ChainParams {
     // gives the bits of every mainnet header from 1 to 1,288,000.
     digishield_from: Some(2),
     auxpow_chain_id: Some(0x3f),
-    auxpow_strict_chain_id: false,
+    auxpow_strict_chain_id: true,
+    // Pepecoin Core chainparams.cpp: auxpowConsensus from 42,000; mainnet fStrictChainId true (chain id 63).
+    auxpow_rules: Some(AuxpowRules { start: 42000, strict_chain_id: true }),
+    value_rules: Some(PEPECOIN_VALUE_RULES),
     bech32_hrp: None,
     p2pkh_version: 56,
     p2sh_version: 22,
@@ -377,6 +464,8 @@ pub static DIGIBYTE_MAIN: ChainParams = ChainParams {
     digishield_from: None,
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
+    auxpow_rules: None,
+    value_rules: None,
     bech32_hrp: Some("dgb"),
     p2pkh_version: 30,
     p2sh_version: 63,
@@ -417,6 +506,8 @@ pub static DIGIBYTE_TEST: ChainParams = ChainParams {
     digishield_from: None,
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
+    auxpow_rules: None,
+    value_rules: None,
     bech32_hrp: Some("dgbt"),
     p2pkh_version: 126,
     p2sh_version: 140,
@@ -452,6 +543,8 @@ pub static KOTIA_MAIN: ChainParams = ChainParams {
     digishield_from: None,
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
+    auxpow_rules: None,
+    value_rules: None,
     bech32_hrp: None,
     p2pkh_version: 46,
     p2sh_version: 45,
@@ -487,6 +580,9 @@ pub static FLOPCOIN_MAIN: ChainParams = ChainParams {
     digishield_from: None,
     auxpow_chain_id: Some(0xa3),
     auxpow_strict_chain_id: true,
+    // Flopcoin Core chainparams.cpp: auxpowConsensus from AUXPOWHeight 110,000; fStrictChainId true (chain id 163).
+    auxpow_rules: Some(AuxpowRules { start: 110000, strict_chain_id: true }),
+    value_rules: None,
     bech32_hrp: None,
     p2pkh_version: 35,
     p2sh_version: 22,
@@ -518,6 +614,8 @@ pub static LITECOIN_MAIN: ChainParams = ChainParams {
     digishield_from: None,
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
+    auxpow_rules: None,
+    value_rules: None,
     bech32_hrp: Some("ltc"),
     p2pkh_version: 48,
     p2sh_version: 50, // legacy 5 ("3...") also decodes
@@ -550,6 +648,8 @@ pub static LITECOIN_TEST: ChainParams = ChainParams {
     digishield_from: None,
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
+    auxpow_rules: None,
+    value_rules: None,
     bech32_hrp: Some("tltc"),
     p2pkh_version: 111,
     p2sh_version: 58, // legacy 196 ("2...") also decodes
@@ -586,6 +686,9 @@ pub static DOGECOIN_MAIN: ChainParams = ChainParams {
     digishield_from: None,
     auxpow_chain_id: Some(0x62),
     auxpow_strict_chain_id: true,
+    // Dogecoin Core chainparams.cpp: auxpowConsensus from 371,337; fStrictChainId true (chain id 98).
+    auxpow_rules: Some(AuxpowRules { start: 371337, strict_chain_id: true }),
+    value_rules: None,
     bech32_hrp: None,
     p2pkh_version: 30,
     p2sh_version: 22,
@@ -624,6 +727,8 @@ pub static BITCOIN_MAIN: ChainParams = ChainParams {
     digishield_from: None,
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
+    auxpow_rules: None,
+    value_rules: None,
     bech32_hrp: Some("bc"),
     p2pkh_version: 0,
     p2sh_version: 5,
@@ -661,6 +766,8 @@ pub static WOJAKCOIN_MAIN: ChainParams = ChainParams {
     digishield_from: None,
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
+    auxpow_rules: None,
+    value_rules: None,
     bech32_hrp: Some("wj"),
     p2pkh_version: 73,
     p2sh_version: 5,
@@ -701,6 +808,9 @@ pub static SHIBACOIN_MAIN: ChainParams = ChainParams {
     digishield_from: None,
     auxpow_chain_id: Some(0x4a),
     auxpow_strict_chain_id: true,
+    // Shibacoin Core chainparams.cpp: auxpowConsensus from 24,000; fStrictChainId true (chain id 74).
+    auxpow_rules: Some(AuxpowRules { start: 24000, strict_chain_id: true }),
+    value_rules: None,
     bech32_hrp: None,
     p2pkh_version: 63,
     p2sh_version: 22,
@@ -749,6 +859,8 @@ pub static BELLSCOIN_MAIN: ChainParams = ChainParams {
     digishield_from: None,
     auxpow_chain_id: Some(16),
     auxpow_strict_chain_id: true,
+    auxpow_rules: None,
+    value_rules: None,
     bech32_hrp: Some("bel"),
     p2pkh_version: 25,
     p2sh_version: 30,
@@ -798,6 +910,9 @@ pub static LUCKYCOIN_MAIN: ChainParams = ChainParams {
     digishield_from: None,
     auxpow_chain_id: Some(0x2013),
     auxpow_strict_chain_id: true,
+    // Luckycoin Core chainparams.cpp: auxpowConsensus from 176,000; fStrictChainId true (chain id 0x2013).
+    auxpow_rules: Some(AuxpowRules { start: 176000, strict_chain_id: true }),
+    value_rules: None,
     bech32_hrp: None,
     p2pkh_version: 47,
     p2sh_version: 5,
@@ -842,6 +957,8 @@ pub static JUNKCOIN_MAIN: ChainParams = ChainParams {
     digishield_from: None,
     auxpow_chain_id: Some(0x2020),
     auxpow_strict_chain_id: true,
+    auxpow_rules: None,
+    value_rules: None,
     bech32_hrp: Some("jc"),
     p2pkh_version: 16,
     p2sh_version: 5,
@@ -864,6 +981,45 @@ pub static JUNKCOIN_MAIN: ChainParams = ChainParams {
     coinbase_maturity: 70,
     // No original-arcade floor: indexes start near the tip when it was added (2026-11-11, tip 1,215,059).
     index_start: 1_215_000,
+};
+
+/// Pepecoin regtest, for the consensus harness (tests/regtest): V1 and a real Pepecoin Core in
+/// -regtest are given the same blocks and must end on the same tip. Not in [`ALL_CHAINS`]: no
+/// arcade ever offers it. From Pepecoin Core chainparams.cpp (CRegTestParams, 4fb5a0cd9):
+/// powLimit 0x207fffff with no retargeting, AuxPoW (chain id 63, strict) from block 20,
+/// coinbase maturity 60.
+pub static PEPECOIN_REGTEST: ChainParams = ChainParams {
+    key: "pepregtest",
+    net: "regtest",
+    chain_no: 900,
+    name: "Pepecoin regtest",
+    magic: [0xfa, 0xbf, 0xb5, 0xda],
+    p2p_port: 18444,
+    genesis: "770975b0f98319520694563de107ff94fd501c0d1c16f3a405868faf36b51c28",
+    // Fetched from the source and checked against `genesis`.
+    genesis_header: "",
+    format: Format::AUXPOW,
+    pow: PowRule::Single(PowAlgo::Scrypt),
+    max_easier: true,
+    pow_limit_bits: 0x207fffff,
+    min_difficulty_blocks: true,
+    // fPowNoRetargeting: every block keeps powLimit; not the Digishield rule.
+    digishield_from: None,
+    auxpow_chain_id: Some(0x3f),
+    auxpow_strict_chain_id: true,
+    auxpow_rules: Some(AuxpowRules { start: 20, strict_chain_id: true }),
+    value_rules: Some(PEPECOIN_REGTEST_VALUE_RULES),
+    bech32_hrp: None,
+    p2pkh_version: 111,
+    p2sh_version: 196,
+    wif_version: 239,
+    bip44_coin_type: 1,
+    protocol_version: 70016,
+    dns_seeds: &[],
+    fixed_peers: &[],
+    checkpoints: &[(0, "770975b0f98319520694563de107ff94fd501c0d1c16f3a405868faf36b51c28")],
+    coinbase_maturity: 60,
+    index_start: 0,
 };
 
 pub static ALL_CHAINS: &[&ChainParams] =
@@ -930,6 +1086,29 @@ fn by_key_exact(key: &str) -> Option<&'static ChainParams> {
 mod tests {
     use super::*;
     use crate::pow::{bits_from_target, pow_hash};
+
+    /// Dogecoin 1.14's AuxPoW header rules, on Pepecoin mainnet (merge mining from 42,000,
+    /// strict chain id 63) and testnet (not strict).
+    #[test]
+    fn auxpow_header_rules() {
+        let h = |version: i32| Header { version, prev: Hash256::ZERO, merkle_root: Hash256::ZERO, time: 0, bits: 0, nonce: 0 };
+        let (main, test) = (&PEPECOIN_MAIN, &PEPECOIN_TEST);
+        let aux = (0x3f << 16) | 0x104;
+        assert_eq!(check_auxpow_rules(main, &h(aux), 42_000), Ok(()));
+        assert_eq!(check_auxpow_rules(main, &h(aux), 41_999), Err(HeaderError::EarlyAuxpow));
+        assert_eq!(check_auxpow_rules(main, &h(1), 41_999), Ok(()));
+        assert_eq!(check_auxpow_rules(main, &h(1), 42_000), Err(HeaderError::LateLegacy));
+        // Version 2 with chain id 0 is legacy too (IsLegacy).
+        assert_eq!(check_auxpow_rules(main, &h(2), 42_000), Err(HeaderError::LateLegacy));
+        // Not merge-mined but carrying our chain id: fine after the start.
+        assert_eq!(check_auxpow_rules(main, &h((0x3f << 16) | 4), 50_000), Ok(()));
+        // Another chain's id: refused on strict mainnet, at any height; testnet doesn't check.
+        assert_eq!(check_auxpow_rules(main, &h((0x40 << 16) | 0x104), 50_000), Err(HeaderError::WrongChainId { got: 0x40, want: 0x3f }));
+        assert_eq!(check_auxpow_rules(main, &h((0x40 << 16) | 4), 10), Err(HeaderError::WrongChainId { got: 0x40, want: 0x3f }));
+        assert_eq!(check_auxpow_rules(test, &h((0x40 << 16) | 0x104), 50_000), Ok(()));
+        // A chain without these rules checks nothing.
+        assert_eq!(check_auxpow_rules(&BITCOIN_MAIN, &h(1), 900_000), Ok(()));
+    }
 
     /// Every chain must have somewhere to find P2P nodes: a DNS seed or a fixed node (Pepecoin
     /// mainnet once had neither, so it could only follow through other arcades' Core nodes).

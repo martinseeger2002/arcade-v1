@@ -150,7 +150,29 @@ Everything else reads. libmdbx reads are lock-free and memory-mapped.
    A crash or power cut leaves the store at the last fully indexed block — the index can never be ahead of the chain.
 5. Reorgs: each block keeps an undo record; disconnecting a block replays it backwards in one commit.
    Window: 1,000 blocks; deeper reorgs stop the chain and report.
-6. Not checked: scripts and signatures (same trust as today's borrowed-chain mode and light wallets).
+6. Checked as Core checks them, on every chain:
+   - every header's link, work and AuxPoW;
+   - difficulty, time and checkpoints;
+   - the Dogecoin-family AuxPoW header rules (early-auxpow, late-legacy, strict chain id);
+   - that a block is the one its header commits to: merkle root, no repeated transactions
+     (CVE-2012-2459) and the witness commitment;
+   - Core's structural rules (one coinbase of 2-100 script bytes, no empty inputs or outputs,
+     no null or repeated inputs);
+   - every input spends a coin that exists.
+
+   Where a chain's coin rules are known exactly (`ChainParams::value_rules`; Pepecoin's three
+   networks so far), also: coinbase maturity, inputs covering outputs, MoneyRange, and a
+   coinbase paying at most the subsidy plus the fees.
+
+   A block that breaks a rule is marked invalid, with everything built on it, and the sync goes
+   back to the best valid chain. A damaged copy (one that doesn't match its header) is only
+   refused, since another copy may be good.
+
+   **Not checked yet:** scripts and signatures (step 3, above an "assume valid" point per
+   chain, as Core does), and the coin rules on chains other than Pepecoin. A block breaking
+   those could only come from someone mining it.
+
+   `tests/regtest` runs V1 against a real Pepecoin Core, block for block.
 
 Testnet size today: ~1.6 M transactions, ~1.3 GB of blocks.
 

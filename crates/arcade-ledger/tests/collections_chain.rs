@@ -99,7 +99,8 @@ impl Chain {
         let mut all = vec![tx(None, 0, self.nonce)];
         all.extend(txs);
         let b = block(self.tip, all, self.nonce);
-        self.db.connect_blocks(self.p, &[b.clone()]).unwrap();
+        // Made-up transactions (null inputs): connected without Block::check, which would refuse them.
+        self.db.connect_blocks_checked(self.p, &[b.clone()], false).unwrap();
         self.tip = b.hash();
         self.height += 1;
     }

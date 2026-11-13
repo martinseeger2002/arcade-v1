@@ -48,6 +48,8 @@ pub fn chain_params(net: &Net, genesis: &Hash256) -> &'static ChainParams {
         digishield_from: None,
         auxpow_chain_id: None,
         auxpow_strict_chain_id: false,
+        auxpow_rules: None,
+        value_rules: None,
         bech32_hrp: None,
         p2pkh_version: net.p2pkh_version,
         p2sh_version: net.p2sh_version,
