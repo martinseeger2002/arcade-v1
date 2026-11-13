@@ -626,6 +626,66 @@ fn judge_action(rows: &Rows, regs: &[Registrar], rec: &Value) -> Value {
     bad(ev, why)
 }
 
+// ---------------- handles ----------------
+
+/// An address's DogeFeed handle as the chain says it: the one `.dogefeed` name it holds whose inscription is that
+/// name's winning claim (DogeFeed's rule: the earliest valid name inscription wins). An address holding several
+/// (a wallet keeping names for others) names none: nothing on chain says which is its own. Handles DogeFeed keeps
+/// off chain (most of them) aren't known here. Needs the ord and names indexes on Dogecoin; kept 10 minutes.
+pub fn handle_of(node: &Node, address: &str) -> Option<String> {
+    static CACHE: Mutex<Option<HashMap<String, (Instant, Option<String>)>>> = Mutex::new(None);
+    if let Some((t, v)) = CACHE.lock().unwrap().get_or_insert_with(HashMap::new).get(address) {
+        if t.elapsed() < Duration::from_secs(600) {
+            return v.clone();
+        }
+    }
+    let p = doge();
+    let found = (|| {
+        let script = arcade_ledger::address::script_for_address(p, address)?;
+        let ids = arcade_ledger::ord::held_by(&node.chain, p, &script).ok()?;
+        let mut won: Vec<String> = Vec::new();
+        for id in ids.iter().take(5000) {
+            let Some(meta) = arcade_ledger::ord::inscription(&node.chain, p, id) else { continue };
+            if meta["size"].as_u64().is_none_or(|n| n > 64) || !meta["ct"].as_str().is_some_and(|c| c.starts_with("text/")) {
+                continue;
+            }
+            let Ok((_, body)) = arcade_ledger::ord::content(&node.chain, p, id) else { continue };
+            let name = String::from_utf8_lossy(&body).trim().to_lowercase();
+            if !name.ends_with(".dogefeed") || name.len() <= ".dogefeed".len() {
+                continue;
+            }
+            if arcade_ledger::names::lookup(&node.chain, p.chain_no, &name).iter().any(|(_, _, w)| w == id) && !won.contains(&name) {
+                won.push(name);
+                if won.len() > 1 {
+                    return None;
+                }
+            }
+        }
+        won.pop()
+    })();
+    let mut c = CACHE.lock().unwrap();
+    let m = c.get_or_insert_with(HashMap::new);
+    if m.len() > 50_000 {
+        m.clear();
+    }
+    m.insert(address.to_string(), (Instant::now(), found.clone()));
+    found
+}
+
+/// Handles beside the addresses a record names (author, account, recipient, a followed target).
+fn with_handles(node: &Node, ev: &mut Value) {
+    for (k, h) in [("author", "handle"), ("account", "account_handle"), ("recipient", "recipient_handle")] {
+        if let Some(a) = ev[k].as_str().map(String::from) {
+            ev[h] = json!(handle_of(node, &a));
+        }
+    }
+    if ev["type"] == "follow" {
+        if let Some(a) = ev["target"].as_str().map(String::from) {
+            ev["target_handle"] = json!(handle_of(node, &a));
+        }
+    }
+}
+
 // ---------------- the reads ----------------
 
 fn types_of(req: &Value) -> Option<Vec<String>> {
@@ -657,6 +717,8 @@ fn page(node: &Node, rows: &Rows, table: &str, prefix: &[u8], req: &Value, keep:
             let Some(rec) = rows.rec_at(&a) else { continue };
             let ev = judge(node, &rec);
             if (all || ev["valid"] == true) && want.as_ref().is_none_or(|w| w.iter().any(|t| ev["type"] == t.as_str())) && keep(&ev) {
+                let mut ev = ev;
+                with_handles(node, &mut ev);
                 items.push(ev);
                 if items.len() >= limit {
                     next = dp::at_of(&a).map(|(h, p)| format!("{h}:{p}"));
@@ -749,13 +811,16 @@ pub fn answer(node: &Node, cmd: &str, req: &Value) -> Result<Value, String> {
         "explorer.dogefeed_tx" => {
             let txid = req["txid"].as_str().ok_or("give a txid")?.trim().to_lowercase();
             let rec = rows.by_txid(&txid).ok_or("that transaction holds no D:// record")?;
-            Ok(judge(node, &rec))
+            let mut v = judge(node, &rec);
+            with_handles(node, &mut v);
+            Ok(v)
         }
         "explorer.dogefeed_inscription" => {
             let id = req["id"].as_str().ok_or("give an inscription id")?.trim().to_lowercase();
             let (t, _) = dp::parse_iid(&id).ok_or("that is no inscription id")?;
             let rec = rows.by_txid(&hex::encode(t)).ok_or("that inscription is no D:// record")?;
             let mut v = judge(node, &rec);
+            with_handles(node, &mut v);
             let c = counts(node, &rows, &id);
             v["counts"] = c["counts"].clone();
             v["deleted"] = c["deleted"].clone();
@@ -773,7 +838,7 @@ pub fn answer(node: &Node, cmd: &str, req: &Value) -> Result<Value, String> {
             let dir = req["direction"].as_str().unwrap_or("out");
             let table = if dir == "in" { dp::BY_PAID } else { dp::BY_AUTHOR };
             let prefix = KeyBuf::new().var(a.as_bytes()).done();
-            let mut v = json!({"address": a});
+            let mut v = json!({"address": a, "handle": handle_of(node, &a)});
             if req["counts"] != false {
                 v["counts"] = address_counts(node, &rows, &a);
             }

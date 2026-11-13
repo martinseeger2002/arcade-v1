@@ -595,6 +595,8 @@
   const dfWhen = (ev) => ev.ts ? new Date(ev.ts).toLocaleString() : "";
   const contentUrl = (id) => (httpBase || "") + "/content/" + id;
   const dfShort = (a) => short(a || "", 6, 4);
+  // An address shown by its DogeFeed handle (a .dogefeed name it holds) when it has one.
+  const dfWho = (a, handle, cls) => link(handle ? "@" + handle : dfShort(a), "dfaddr", a, cls || (handle ? "df-h" : "mono df-h"));
   const dfAvatar = (a) => { let x = 0; for (const c of a || "") x = (x * 31 + c.charCodeAt(0)) % 360; return h("span", { class: "df-av", style: `background:hsl(${x} 45% 45%)` }, (a || "?").slice(1, 2).toUpperCase()); };
   const dfStamp = (r) => r ? h("span", { class: "chip df-reg", title: `${r.kid} · ${r.address}` }, (r.source === "dogefeed" ? "DogeFeed" : r.source === "this arcade" ? "this arcade" : r.name || r.kid) + " · " + r.kid) : "";
   const dfText = (t) => {
@@ -606,8 +608,8 @@
     const t = ev.target;
     if (!t) return "";
     const isPost = /i\d+$/.test(t);
-    const verb = { comment: "↳ replying to", quote: "❝ quoting", like: "♥ liked", branch: "⑂ branched", tip: "🪙 tipped", reveal: "🔓 revealed", delete: "✕ deleted", edit: "✎ edited", follow: "+ followed", keylink: "🔑 linked key", keyrevoke: "🔑 revoked key" }[ev.type] || "→";
-    return h("div", { class: "df-ref" }, verb, " ", isPost ? link(short(t, 8, 6), "dfpost", t, "mono") : link(dfShort(t), "dfaddr", t, "mono"));
+    const verb = { comment: "↳ replying to", quote: "❝ quoting", like: "♥ liked", branch: "↻ branched", tip: "🪙 tipped", reveal: "🔓 revealed", delete: "✕ deleted", edit: "✎ edited", follow: "+ followed", keylink: "🔑 linked key", keyrevoke: "🔑 revoked key" }[ev.type] || "→";
+    return h("div", { class: "df-ref" }, verb, " ", isPost ? link(short(t, 8, 6), "dfpost", t, "mono") : dfWho(t, ev.target_handle || (ev.type === "follow" ? null : ev.recipient_handle), "mono"));
   };
   function dfCard(ev) {
     const media = (ev.media || []).length ? h("div", { class: "df-media" }, ...(ev.media || []).map((m) => h("img", { src: contentUrl(m), loading: "lazy", alt: "" }))) : "";
@@ -616,10 +618,11 @@
       c ? h("span", {}, "♥ ", h("b", {}, fmt(c.likes)), "  💬 ", h("b", {}, fmt(c.comments)), "  ❝ ", h("b", {}, fmt(c.quotes)), c.tips && c.tips.n ? ["  🪙 ", h("b", {}, c.tips.doge)] : "") : "",
       ev.valid ? h("span", { class: "df-ok" }, "✓ valid") : h("span", { class: "df-bad", title: ev.reason || "" }, "✕ " + (ev.reason || "invalid")),
       dfStamp(ev.registrar),
-      ev.amount ? h("span", {}, dfDoge(ev.amount), " to ", dfShort(ev.recipient)) : "",
+      ev.amount ? h("span", {}, dfDoge(ev.amount), " to ", ev.recipient_handle ? "@" + ev.recipient_handle : dfShort(ev.recipient)) : "",
       ev.status === "pending" ? h("span", { class: "chip" }, `pending · ${ev.confirmations} conf`) : "");
     return h("div", { class: "df-card" + (ev.valid ? "" : " bad"), onclick: () => go(ev.inscription ? "dfpost" : "dfpost", ev.inscription || ev.txid) },
-      h("div", { class: "df-who" }, dfAvatar(ev.account || ev.author), link(dfShort(ev.account || ev.author), "dfaddr", ev.account || ev.author, "mono df-h"),
+      h("div", { class: "df-who" }, dfAvatar(ev.account || ev.author), dfWho(ev.account || ev.author, ev.account_handle || ev.handle),
+        (ev.account_handle || ev.handle) ? h("span", { class: "mono faint df-a" }, dfShort(ev.account || ev.author)) : "",
         h("span", { class: "df-op " + ev.type }, ev.type), h("span", { class: "df-t" }, `#${fmt(ev.height)}`, ev.deleted ? " · deleted" : "")),
       dfTarget(ev), ev.text ? dfText(ev.text) : "", media,
       (ev.tags || []).length ? h("div", { class: "df-tags" }, ...(ev.tags || []).map((t) => h("b", { class: "df-tag" }, "#" + t))) : "", foot);
@@ -654,10 +657,10 @@
       : await xapi("explorer.dogefeed_tx", { chain: chain.key, txid: id });
     const title = { post: "Post", comment: "Comment", quote: "Quote", edit: "Edit", keylink: "Key link" }[ev.type] || (ev.type || "Record")[0].toUpperCase() + (ev.type || "record").slice(1);
     const c = ev.counts;
-    const pays = [ev.fee != null && ["Registrar fee", dfDoge(ev.fee)], ev.amount && [ev.type === "comment" || ev.type === "quote" ? "Paid to the parent's author" : "Paid to " + (ev.type === "follow" ? "the followed account" : "the author"), h("span", {}, dfDoge(ev.amount), " → ", ev.recipient ? link(dfShort(ev.recipient), "dfaddr", ev.recipient, "mono") : "")]].filter(Boolean);
+    const pays = [ev.fee != null && ["Registrar fee", dfDoge(ev.fee)], ev.amount && [ev.type === "comment" || ev.type === "quote" ? "Paid to the parent's author" : "Paid to " + (ev.type === "follow" ? "the followed account" : "the author"), h("span", {}, dfDoge(ev.amount), " → ", ev.recipient ? dfWho(ev.recipient, ev.recipient_handle, "mono") : "")]].filter(Boolean);
     const rows = [
       ["Status", ev.valid ? h("span", { class: "df-ok" }, "✓ valid D:// record") : h("span", { class: "df-bad" }, "✕ not a valid D:// record: " + (ev.reason || ""))],
-      ["Author", h("span", {}, link(ev.author || "", "dfaddr", ev.author, "mono"), ev.account && ev.account !== ev.author ? [" for ", link(ev.account, "dfaddr", ev.account, "mono")] : "")],
+      ["Author", h("span", {}, ev.handle ? [link("@" + ev.handle, "dfaddr", ev.author), " "] : "", link(ev.author || "", "dfaddr", ev.author, "mono"), ev.account && ev.account !== ev.author ? [" for ", link(ev.account_handle ? "@" + ev.account_handle : ev.account, "dfaddr", ev.account, "mono")] : "")],
       ev.registrar && ["Stamped by", h("span", {}, dfStamp(ev.registrar), " ", h("span", { class: "mono faint" }, ev.registrar.address))],
       ["Block", h("span", {}, link(fmt(ev.height), "block", String(ev.height)), ` · ${fmt(ev.confirmations)} confirmations (${ev.status})`)],
       ["Transaction", link(ev.txid, "tx", ev.txid, "mono")],
@@ -665,13 +668,13 @@
       ev.ts && ["Signed at", dfWhen(ev)],
       ev.target && ["Target", dfTarget(ev)],
       ...pays,
-      c && ["Counts", h("span", {}, `♥ ${fmt(c.likes)} · ⑂ ${fmt(c.branches)} · ❝ ${fmt(c.quotes)} · 💬 ${fmt(c.comments)} · 🪙 ${fmt(c.tips.n)} (${c.tips.doge} DOGE) · 🔓 ${fmt(c.reveals.n)}`)],
+      c && ["Counts", h("span", {}, `♥ ${fmt(c.likes)} · ↻ ${fmt(c.branches)} · ❝ ${fmt(c.quotes)} · 💬 ${fmt(c.comments)} · 🪙 ${fmt(c.tips.n)} (${c.tips.doge} DOGE) · 🔓 ${fmt(c.reveals.n)}`)],
       ev.deleted && ["Deleted", "by its author (the bytes stay on chain)"],
       ev.latestEdit && ["Latest edit", link(ev.latestEdit, "dfpost", ev.latestEdit, "mono")],
     ];
     const long = ev.bytes > 240 ? h("div", { class: "df-warn" }, h("b", {}, "Stored past its declared content. "), `DogeFeed's envelope declares one piece, so standard Doginals readers (and the Inscriptions tab) show the first 240 bytes; this index joins every chunk: ${fmt(ev.bytes)} bytes.`) : "";
     const body = [crumbs(link("DogeFeed", "dogefeed"), title), head(title, h("span", { class: "df-op " + ev.type }, ev.type)),
-      h("div", { class: "df-card df-big" }, h("div", { class: "df-who" }, dfAvatar(ev.account || ev.author), link(dfShort(ev.account || ev.author), "dfaddr", ev.account || ev.author, "mono df-h"), h("span", { class: "df-t" }, dfWhen(ev))),
+      h("div", { class: "df-card df-big" }, h("div", { class: "df-who" }, dfAvatar(ev.account || ev.author), dfWho(ev.account || ev.author, ev.account_handle || ev.handle), h("span", { class: "df-t" }, dfWhen(ev))),
         dfTarget(ev), ev.text ? dfText(ev.text) : "", (ev.media || []).length ? h("div", { class: "df-media" }, ...(ev.media || []).map((m) => h("img", { src: contentUrl(m), alt: "" }))) : ""),
       kv(rows), long];
     if (ev.activity) {
@@ -694,7 +697,8 @@
       stat("Tips sent", (c.tips_sent || "0") + " DOGE"), stat("Tips received", (c.tips_received || "0") + " DOGE"));
     const { box, more } = await dfPage("explorer.dogefeed_address", { chain: chain.key, address: a, counts: false, limit: 30 }, null, "Nothing on D:// from this address yet.");
     const inBtn = h("button", { class: "df-chip", onclick: async (e) => { const m = await dfPage("explorer.dogefeed_address", { chain: chain.key, address: a, counts: false, direction: "in", limit: 30 }, null, "Nothing on D:// paid this address yet."); e.target.closest(".x-sect").querySelector(".df-feed").replaceWith(m.box); } }, "What paid it");
-    return h("div", {}, crumbs(link("DogeFeed", "dogefeed"), dfShort(a)), head(dfShort(a), link("Address page", "address", a)),
+    const name = r.handle ? "@" + r.handle : dfShort(a);
+    return h("div", {}, crumbs(link("DogeFeed", "dogefeed"), name), head(name, link("Address page", "address", a)),
       h("p", { class: "mono x-note" }, a), stats,
       (c.linked_keys || []).length ? sect("Linked keys", null, kv(c.linked_keys.map((k) => [k.label || "key", h("span", { class: "mono" }, k.key, " · ", (k.ops || []).join(", "))]))) : "",
       sect("Activity", null, h("div", {}, h("div", { class: "df-chips" }, h("button", { class: "df-chip on" }, "What it did"), inBtn), box, more)));
