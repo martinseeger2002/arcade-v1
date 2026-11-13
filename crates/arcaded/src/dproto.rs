@@ -530,9 +530,10 @@ fn judge_action(rows: &Rows, regs: &[Registrar], rec: &Value) -> Value {
     match op {
         1 | 2 | 4 | 5 | 6 => {
             for p in rows.posts_with_prefix(&t11[..10]) {
-                // The earliest matching inscription, wherever the action sits: an action spends nothing of the post, so
-                // a miner may place it before the post in the same block (DogeFeed counts those).
-                if t11[10] != 0 || !matches!(p["body"]["map"]["type"].as_str(), Some("post" | "comment" | "quote")) {
+                // The earliest matching inscription mined no later than the action's block. Inside that block the order
+                // doesn't matter: an action spends nothing of the post, so a miner may place it first (DogeFeed counts those).
+                if t11[10] != 0 || p["h"].as_u64() > rec["h"].as_u64()
+                    || !matches!(p["body"]["map"]["type"].as_str(), Some("post" | "comment" | "quote")) {
                     continue;
                 }
                 let tid = p["txid"].as_str().unwrap_or("").to_string();
@@ -1083,23 +1084,36 @@ mod tests {
             }
             arcade_chain::Block::parse(&raw).unwrap()
         };
-        let connect = |h: u32, hex_: &str, author: Option<&str>| {
+        // One block per call: `before` puts that many coinbase-like fillers ahead of the transaction (its position).
+        let connect_at = |h: u32, hex_: &str, author: Option<&str>, before: usize| {
             let tx = arcade_chain::Tx::parse(&hex::decode(hex_).unwrap()).unwrap();
             let script = author.map(|a| arcade_ledger::address::script_for_address(p, a).unwrap()).unwrap_or_default();
-            let pv = vec![tx.inputs.iter().map(|_| Prevout { value: 1, script: script.clone() }).collect::<Vec<_>>()];
-            let b = block_of(vec![tx]);
+            let mut txs = Vec::new();
+            let mut pv = Vec::new();
+            for _ in 0..before {
+                txs.push(tx.clone());
+                pv.push(Vec::new());
+            }
+            pv.push(tx.inputs.iter().map(|_| Prevout { value: 1, script: script.clone() }).collect::<Vec<_>>());
+            txs.push(tx);
+            let b = block_of(txs);
             store.write(|w| {
                 let l = arcade_chaindb::undo::Logged::new(w);
                 dp::DprotoIndexer.connect(&BlockCtx { l: &l, params: p, block: &b, height: h, prevouts: &pv })
             }).unwrap();
         };
-        // The posts first (earlier blocks), then the records about them, each at its own height; but the liked post
-        // AFTER its like (a miner may order them so in one block): the like still finds it.
+        let connect = |h: u32, hex_: &str, author: Option<&str>| connect_at(h, hex_, author, 0);
+        // The posts first (earlier blocks), then the records about them, each at its own height; but the liked post IN
+        // the like's block, AFTER it (a miner may order them so): the like still finds it.
         let liked_txid = f["like"]["target"].as_str().unwrap()[..64].to_string();
+        let like_h = f["like"]["height"].as_u64().unwrap() as u32;
         let mut h = 6_448_000;
         for (k, v) in f["_parents"].as_object().unwrap() {
-            let at = if *k == liked_txid { 6_460_000 } else { h };
-            connect(at, v["hex"].as_str().unwrap(), None);
+            if *k == liked_txid {
+                connect_at(like_h, v["hex"].as_str().unwrap(), None, 5); // position 5; the like sits at 0
+            } else {
+                connect(h, v["hex"].as_str().unwrap(), None);
+            }
             h += 1;
         }
         let kinds = ["post", "comment", "quote", "like", "branch", "follow", "tip"];
@@ -1124,6 +1138,11 @@ mod tests {
         let (t, i) = dp::parse_iid(liked).unwrap();
         let prefix = [&[b'p'][..], &dp::post_target(&t, i)[..]].concat();
         assert!(rows.list(dp::BY_TARGET, &prefix, None, 10).iter().filter_map(|a| rows.rec_at(a)).any(|r| r["txid"] == f["like"]["txid"]));
+        // A post inscribed in a LATER block than the like is no target for it.
+        let later = rows.by_txid(f["like"]["txid"].as_str().unwrap()).unwrap();
+        let mut early = later.clone();
+        early["h"] = json!(like_h - 1);
+        assert_eq!(judge_with(&rows, &regs, &early)["valid"], false, "a like before its post's block");
         // Without DogeFeed's key nothing is valid: a record counts only with a registrar known here.
         let rec = rows.by_txid(f["like"]["txid"].as_str().unwrap()).unwrap();
         assert_eq!(judge_with(&rows, &[], &rec)["valid"], false);
