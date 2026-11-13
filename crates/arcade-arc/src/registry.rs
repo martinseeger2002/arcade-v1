@@ -1099,6 +1099,33 @@ impl Registry {
 
     /// The weight a key earns with (genesis weight and its replicas' shares, but those whose last audit failed), as the
     /// pot is shared; the writer draw counts less (weight(): replicas only from DRAW_WEIGHT_WAIT after an audit).
+    /// An owner's own weight: its replicas' shares (no genesis bytes), 0 when punished. What its owner
+    /// earner is paid by (the genesis bytes are paid to the genesis earner, [`Registry::genesis_earners`]).
+    pub fn owner_pay_weight(&self, key: &Key) -> u64 {
+        if self.punished.contains(key) {
+            return 0;
+        }
+        self.owner_weight(key)
+    }
+
+    /// The genesis earners as epochs pay them: per payout, the genesis bytes behind it (punished keys
+    /// left out), the keys holding them, and what it has accrued.
+    pub fn genesis_earners(&self) -> Vec<(Payout, u64, Vec<Key>, u64)> {
+        let mut g: BTreeMap<Payout, (u64, Vec<Key>)> = BTreeMap::new();
+        for (key, (bytes, pay)) in &self.genesis {
+            let e = g.entry(*pay).or_default();
+            e.1.push(*key);
+            if !self.punished.contains(key) {
+                e.0 += *bytes;
+            }
+        }
+        g.into_iter().map(|(pay, (w, mut keys))| {
+            keys.sort();
+            let accrued = self.accrued_of(&Earner::Genesis(pay));
+            (pay, w, keys, accrued)
+        }).collect()
+    }
+
     pub fn pay_weight(&self, key: &Key) -> u64 {
         if self.punished.contains(key) {
             return 0;
@@ -1626,6 +1653,13 @@ mod tests {
         let all_paid: u64 = paid.values().flatten().map(|x| x.1).sum();
         let accrued: u64 = r.accrued.values().sum();
         assert_eq!(all_paid + accrued + r.pot, end * params::BLOCK_REWARD);
+        // The status's view (genesis earners apart from owners) adds up to the same accrued pay.
+        let shown: u64 = r.genesis_earners().iter().map(|g| g.3).sum::<u64>()
+            + r.owners().iter().map(|o| r.accrued_of(&Earner::Owner(*o))).sum::<u64>();
+        assert_eq!(shown, accrued);
+        for (_, w, keys, _) in r.genesis_earners() {
+            assert!(w > 0 && !keys.is_empty());
+        }
         // A block taken back leaves the registry as it was.
         let was = format!("{r:?}");
         let mut h = end + 1;
