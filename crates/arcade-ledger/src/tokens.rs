@@ -319,7 +319,8 @@ pub fn balances(db: &ChainDb, c: u16, owner: &str) -> Vec<(String, String, Strin
 }
 
 pub fn tick_count(db: &ChainDb, c: u16) -> u64 {
-    db.store(c).read(|r| r.scan_prefix(TICK, &KeyBuf::new().u16(c).done())).map(|v| v.len() as u64).unwrap_or(0)
+    // Counted with the cursor alone: no row is copied out.
+    db.store(c).read(|r| r.sum_prefix(TICK, &KeyBuf::new().u16(c).done(), None, usize::MAX)).map(|(n, _, _)| n).unwrap_or(0)
 }
 
 #[cfg(test)]

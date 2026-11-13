@@ -655,7 +655,7 @@ fn handle_here(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
             x.need("names")?;
             // Offset paging (names in alphabetical order) with the total, as tokens.
             let pre = KeyBuf::new().u16(x.c()).u8(0).done();
-            let counts = names::counts(&x.node.chain, x.c());
+            let counts = tip_counts(&x, tip(&x)).0;
             let (off, want) = (req["offset"].as_u64().unwrap_or(0) as usize, n(50, 200) as usize);
             let rows = match s("after") {
                 Some(a) => scan_after(&x, names::WIN, pre.clone(), Some(a), want),
@@ -1010,6 +1010,24 @@ fn waiting(x: &Ctx) -> Result<Vec<(u64, Vec<u8>)>, String> {
     x.node.chain.mempool(x.c()).map_err(e)
 }
 
+/// Counts that change only with a block (names per reading, token ticks), kept per chain until its tip moves: the
+/// overview asks for them on every visit, and Dogecoin's names are over a million rows to count.
+fn tip_counts(x: &Ctx, t: u32) -> ([u64; 3], u64) {
+    type Kept = std::collections::HashMap<u16, (u32, [u64; 3], u64)>;
+    static KEPT: std::sync::OnceLock<std::sync::Mutex<Kept>> = std::sync::OnceLock::new();
+    let c = x.c();
+    let kept = KEPT.get_or_init(Default::default);
+    if let Some((at, n, k)) = kept.lock().unwrap().get(&c) {
+        if *at == t {
+            return (*n, *k);
+        }
+    }
+    let n = if x.has("names") { names::counts(&x.node.chain, c) } else { [0; 3] };
+    let k = if x.has("tokens") { tokens::tick_count(&x.node.chain, c) } else { 0 };
+    kept.lock().unwrap().insert(c, (t, n, k));
+    (n, k)
+}
+
 fn summary(x: &Ctx) -> R {
     let c = x.c();
     let t = tip(x);
@@ -1027,7 +1045,7 @@ fn summary(x: &Ctx) -> R {
         v["latest"] = json!(latest(x, total, 12));
     }
     if x.has("tokens") {
-        v["ticks"] = json!(tokens::tick_count(&x.node.chain, c));
+        v["ticks"] = json!(tip_counts(x, t).1);
         v["protocol"] = json!(tokens::protocol(x.p).map(|t| t.0));
         let rows = scan_after(x, tokens::TICK, KeyBuf::new().u16(c).done(), None, 6);
         v["tokens"] = json!(rows.into_iter().filter_map(|(k, b)| {
@@ -1038,7 +1056,7 @@ fn summary(x: &Ctx) -> R {
     }
     if x.has("names") {
         let pre = KeyBuf::new().u16(c).u8(0).done();
-        v["names"] = json!(names::counts(&x.node.chain, c));
+        v["names"] = json!(tip_counts(x, t).0);
         v["name_rows"] = json!(scan_after(x, names::WIN, pre.clone(), None, 6).iter().map(|(k, b)| name_row(pre.len(), k, b)).collect::<Vec<_>>());
     }
     if x.has("maps") {
