@@ -570,6 +570,8 @@ fn run_writer_on(node: Arc<Node>, svc: Arc<Svc>, wrote: &mut VecDeque<Hash256>, 
     let mut written: Option<Block> = None;
     // The VDF's proof of time for this tip's ticket, made in the background: (tip, its proof when done).
     let proving: Arc<Mutex<Option<(Hash256, Option<TimeProof>)>>> = Arc::new(Mutex::new(None));
+    // The threads still running a proof (a VDF can't be stopped midway), by thread id.
+    let running: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
     loop {
         std::thread::sleep(Duration::from_millis(100));
         if svc.stop.load(Ordering::Relaxed) {
@@ -604,9 +606,17 @@ fn run_writer_on(node: Arc<Node>, svc: Arc<Svc>, wrote: &mut VecDeque<Hash256>, 
                         Some((at, None)) if *at == tip => continue,
                         _ => {
                             *p = Some((tip, None));
-                            let (job, challenge, steps) = (proving.clone(), t.challenge, t.steps);
+                            // Proofs for an older tip are thrown away when done: they only get spare CPU from now on
+                            // (each takes a core, and several piled up starved chain sync on a 4-core machine).
+                            for tid in running.lock().unwrap().iter() {
+                                crate::rulecheck::lowest_priority_of(*tid);
+                            }
+                            let (job, challenge, steps, running) = (proving.clone(), t.challenge, t.steps, running.clone());
                             let _ = std::thread::Builder::new().name("arc proof of time".into()).spawn(move || {
+                                let me = crate::rulecheck::thread_id();
+                                running.lock().unwrap().push(me);
                                 let proof = Clock::Vdf.prove(&challenge, steps);
+                                running.lock().unwrap().retain(|t| *t != me);
                                 let mut j = job.lock().unwrap();
                                 if j.as_ref().is_some_and(|x| x.0 == tip) {
                                     *j = proof.map(|pr| (tip, Some(pr)));
@@ -1642,6 +1652,7 @@ pub fn seal(node: &Arc<Node>, req: &Value) -> Result<Value, String> {
     std::thread::Builder::new()
         .name("arc sealing".into())
         .spawn(move || {
+            crate::rulecheck::lowest_priority();
             let t0 = Instant::now();
             match crate::arcseal::seal(&n, &net, p, e.family, id, e.first, e.last, e.bytes, e.root) {
                 Ok(r) => eprintln!("arc: sealed {} {}..={} ({} leaves) in {:.0} s; replica root {}", r.chain, r.first, r.last, r.leaves, t0.elapsed().as_secs_f64(), hex::encode(r.replica_root)),

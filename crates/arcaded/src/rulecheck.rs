@@ -53,15 +53,35 @@ pub fn cancel(key: &str) -> Result<Value, String> {
     Ok(json!({"stopping": key}))
 }
 
-/// The calling thread at the lowest priority: nice 19, and idle disk class (Linux).
-fn lowest_priority() {
+/// The calling thread at the lowest priority: nice 19, and idle disk class (Linux). Threads it
+/// starts afterwards inherit it.
+pub(crate) fn lowest_priority() {
+    lowest_priority_of(thread_id());
+}
+
+/// This thread's id (Linux; 0 elsewhere).
+#[cfg(target_os = "linux")]
+pub(crate) fn thread_id() -> i64 {
+    unsafe { libc::syscall(libc::SYS_gettid) as i64 }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn thread_id() -> i64 {
+    0
+}
+
+/// Thread `tid` of this process at the lowest priority (a no-op for 0 and off Linux).
+pub(crate) fn lowest_priority_of(tid: i64) {
     #[cfg(target_os = "linux")]
-    unsafe {
-        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
-        libc::setpriority(libc::PRIO_PROCESS, tid, 19);
-        // ioprio_set(IOPRIO_WHO_PROCESS, tid, IOPRIO_CLASS_IDLE << 13)
-        libc::syscall(libc::SYS_ioprio_set, 1, tid as libc::c_long, (3 << 13) as libc::c_long);
+    if tid > 0 {
+        unsafe {
+            libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, 19);
+            // ioprio_set(IOPRIO_WHO_PROCESS, tid, IOPRIO_CLASS_IDLE << 13)
+            libc::syscall(libc::SYS_ioprio_set, 1, tid as libc::c_long, (3 << 13) as libc::c_long);
+        }
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = tid;
 }
 
 /// Start checking `key`'s stored blocks `from..=to` (default: 1 to the tip) on `threads` threads
