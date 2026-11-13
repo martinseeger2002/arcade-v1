@@ -155,6 +155,7 @@ version = "0.1.0"
 dependencies = [
  "arcade-chain",
  "arcade-store",
+ "bitcoinconsensus",
  "hex",
  "tempfile",
  "thiserror 1.0.69",
@@ -443,6 +444,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bca4c7abb40c8817d77403c880988cfd484f23ab2365726afb2f798363e2c4a2"
 dependencies = [
  "hex-conservative",
+]
+
+[[package]]
+name = "bitcoinconsensus"
+version = "0.106.0+26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e12cba9cce5043cdda968e07b9df6d05ec6b0b38aa27a9a40bb575cf3e521ae9"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

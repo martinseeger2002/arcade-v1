@@ -25,6 +25,7 @@ mod appsvc;
 mod walletsvc;
 mod coinsend;
 mod ddsvc;
+mod dproto;
 mod commands;
 mod diskfree;
 mod chainsvc;
@@ -467,6 +468,10 @@ fn main() {
     {
         let n = node.clone();
         std::thread::Builder::new().name("known collections".into()).spawn(move || knowncoll::run(n)).unwrap();
+    }
+    {
+        let n = node.clone();
+        std::thread::Builder::new().name("dogefeed keys".into()).spawn(move || dproto::run(n)).unwrap();
     }
     {
         let n = node.clone();

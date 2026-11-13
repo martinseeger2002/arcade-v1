@@ -118,6 +118,7 @@ pub const FORWARDABLE: &[&str] = &[
     "explorer.inscription", "explorer.tokens", "explorer.token", "explorer.names", "explorer.name", "explorer.maps",
     "explorer.map", "explorer.mempool", "explorer.ledger", "explorer.ledger_tokens", "explorer.ledger_token",
     "explorer.ledger_inscriptions", "explorer.ledger_inscription", "explorer.tag", "explorer.search",
+    "explorer.dogefeed", "explorer.dogefeed_tx", "explorer.dogefeed_inscription", "explorer.dogefeed_address",
     "explorer.inscription_types", "explorer.site", "explorer.sites", "explorer.ledger_bytes", "explorer.page", "explorer.app_cards",
     "explorer.ord_outpoints", "explorer.collections", "explorer.collection", "explorer.collection_of", "explorer.held",
 ];
@@ -131,7 +132,8 @@ pub const PAGE_READS: &[&str] = &[
     "explorer.collections", "explorer.collection", "explorer.collection_of", "explorer.held", "explorer.names",
     "explorer.name", "explorer.maps", "explorer.map", "explorer.mempool", "explorer.ledger", "explorer.ledger_tokens",
     "explorer.ledger_token", "explorer.ledger_inscriptions", "explorer.ledger_inscription", "explorer.tag",
-    "explorer.search",
+    "explorer.search", "explorer.dogefeed", "explorer.dogefeed_tx", "explorer.dogefeed_inscription",
+    "explorer.dogefeed_address", "explorer.dogefeed_keys",
 ];
 
 /// GET /r/explorer/<name>?args=<json>: the public read explorer.<name> (/r/explorer/chains: chains.list),
@@ -499,6 +501,15 @@ fn handle_here(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
                 }
             }
             Ok(v)
+        }
+        "explorer.dogefeed" | "explorer.dogefeed_tx" | "explorer.dogefeed_inscription" | "explorer.dogefeed_address" | "explorer.dogefeed_keys" => {
+            if x.p.key != "doge" {
+                return Err("DogeFeed (D://) is on Dogecoin; ask with chain doge".into());
+            }
+            if cmd != "explorer.dogefeed_keys" {
+                x.need("dogefeed")?;
+            }
+            crate::dproto::answer(node, cmd, req)
         }
         "explorer.collection_of" => {
             x.need("collections")?;

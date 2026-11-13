@@ -700,6 +700,49 @@ fn handle(node: &Node, mut s: TcpStream, conf: &Conf) {
             }
             None => respond(&mut s, "404 Not Found", "text/plain", &[], b"no such inscription\n"),
         },
+        // D:// (DogeFeed Protocol): this arcade as a registrar, in DogeFeed's own .well-known format, and the
+        // indexer API of DogeFeed's guide (answered here or by an arcade on the mesh keeping the index).
+        [".well-known", "dogefeed.json"] => respond(&mut s, "200 OK", "application/json",
+            &[("Access-Control-Allow-Origin", "*".into()), ("Cache-Control", "public, max-age=3600".into())],
+            crate::dproto::well_known(node).to_string().as_bytes()),
+        ["v1", "dproto", ..] | ["v1", "inscription", _, "dproto", ..] | ["v1", "wallet", _, "dproto", ..] => {
+            let mut q = query_fields(&r.query);
+            q.insert("chain".into(), json!("doge"));
+            let (cmd, pick): (&str, Option<&str>) = match seg.as_slice() {
+                ["v1", "dproto", "activity"] => ("explorer.dogefeed", None),
+                ["v1", "dproto", "keys"] => ("explorer.dogefeed_keys", None),
+                ["v1", "dproto", "tx", txid] => { q.insert("txid".into(), json!(txid)); ("explorer.dogefeed_tx", None) }
+                ["v1", "inscription", id, "dproto"] => { q.insert("id".into(), json!(id)); ("explorer.dogefeed_inscription", None) }
+                ["v1", "inscription", id, "dproto", "activity"] => {
+                    q.insert("id".into(), json!(id));
+                    q.insert("activity".into(), json!(true));
+                    ("explorer.dogefeed_inscription", Some("activity"))
+                }
+                ["v1", "wallet", a, "dproto"] => {
+                    q.insert("address".into(), json!(a));
+                    q.insert("limit".into(), json!(1));
+                    ("explorer.dogefeed_address", Some("counts"))
+                }
+                ["v1", "wallet", a, "dproto", "activity"] => {
+                    q.insert("address".into(), json!(a));
+                    q.insert("counts".into(), json!(false));
+                    ("explorer.dogefeed_address", Some("activity"))
+                }
+                _ => ("", None),
+            };
+            let cors = [("Access-Control-Allow-Origin", "*".to_string())];
+            if cmd.is_empty() {
+                respond(&mut s, "404 Not Found", "application/json", &cors, br#"{"error":"no such D:// read"}"#)
+            } else {
+                match crate::explorer::handle(node, cmd, &Value::Object(q)) {
+                    Ok(v) => {
+                        let v = pick.map(|k| v[k].clone()).unwrap_or(v);
+                        respond(&mut s, "200 OK", "application/json", &cors, v.to_string().as_bytes())
+                    }
+                    Err(e) => respond(&mut s, "400 Bad Request", "application/json", &cors, json!({"error": e}).to_string().as_bytes()),
+                }
+            }
+        }
         _ => match site {
             Some(dir) => site_file(&mut s, dir, &path, r.method == "HEAD"),
             None => respond(&mut s, "404 Not Found", "text/plain", &[], b"try /content/<txid|number>, /inscription/<txid|number>, or /api/v1/routes from this computer\n"),
