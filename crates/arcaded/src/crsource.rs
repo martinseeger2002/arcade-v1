@@ -96,7 +96,24 @@ pub fn result<'v>(v: &'v Value, what: &str) -> Result<&'v Value, String> {
 /// One coreshare batch on a link: send `calls` ([[method, params], ...]) for `net` as query
 /// `id`, answer pings, hand every other frame to `other` (offers, pushed mempool txs), and
 /// return the answers ([{"r": ..} | {"e": [code, msg]}, ...]).
-pub fn ask(link: &mut Link, addr: &str, net: &str, id: u64, calls: &Value, other: &mut dyn FnMut(&Frame)) -> Result<Vec<Value>, String> {
+/// Where a coreshare batch goes: a link of its own to the lender, or the lender's mesh link
+/// we already have (crvia: for a lender we can't dial, like one behind a NAT linked over UDP).
+pub trait Pipe {
+    fn send(&mut self, f: &Frame) -> Result<(), String>;
+    /// The next frame, or an error once `until` has passed.
+    fn recv(&mut self, until: std::time::Instant) -> Result<Frame, String>;
+}
+
+impl Pipe for Link {
+    fn send(&mut self, f: &Frame) -> Result<(), String> {
+        Link::send(self, f).map_err(|e| e.to_string())
+    }
+    fn recv(&mut self, _until: std::time::Instant) -> Result<Frame, String> {
+        Link::recv(self).map_err(|e| e.to_string())
+    }
+}
+
+pub fn ask(link: &mut dyn Pipe, addr: &str, net: &str, id: u64, calls: &Value, other: &mut dyn FnMut(&Frame)) -> Result<Vec<Value>, String> {
     // Existing arcades take the batch as plain JSON (a zlib body is refused: "not a batch").
     let body = calls.to_string().into_bytes();
     if body.len() > crate::coreshare::MAX_ASKED {
@@ -104,8 +121,7 @@ pub fn ask(link: &mut Link, addr: &str, net: &str, id: u64, calls: &Value, other
     }
     let parts: Vec<&[u8]> = body.chunks(crate::coreshare::CHUNK).collect();
     for (i, part) in parts.iter().enumerate() {
-        link.send(&Frame { head: json!({"t": "cr", "op": "q", "id": id, "net": net, "seq": i, "end": i + 1 == parts.len(), "z": 0}), blob: part.to_vec() })
-            .map_err(|e| e.to_string())?;
+        link.send(&Frame { head: json!({"t": "cr", "op": "q", "id": id, "net": net, "seq": i, "end": i + 1 == parts.len(), "z": 0}), blob: part.to_vec() })?;
     }
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     let mut buf = Vec::new();
@@ -115,9 +131,9 @@ pub fn ask(link: &mut Link, addr: &str, net: &str, id: u64, calls: &Value, other
         if std::time::Instant::now() > deadline {
             return Err(format!("arcade {addr} did not answer in time"));
         }
-        let f = link.recv().map_err(|e| e.to_string())?;
+        let f = link.recv(deadline)?;
         match f.kind() {
-            "ping" => link.send(&Frame::pong(&f)).map_err(|e| e.to_string())?,
+            "ping" => link.send(&Frame::pong(&f))?,
             "cr" if f.head["op"] == "a" && f.head["id"] == id => {
                 if let Some(err) = f.head["err"].as_str() {
                     return Err(format!("arcade {addr}: {err}"));

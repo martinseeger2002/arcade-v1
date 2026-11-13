@@ -222,6 +222,8 @@ struct State {
     scan_at: Mutex<BTreeMap<String, u64>>,
     /// (lender, chain key) -> skip its coin scan until (it doesn't answer it)
     scan_no: Mutex<BTreeMap<(String, String), u64>>,
+    /// lender node id -> the nets we last asked it to push, over its mesh link (crvia)
+    subbed_via: Mutex<BTreeMap<String, BTreeSet<String>>>,
 }
 
 static ST: LazyLock<State> = LazyLock::new(State::default);
@@ -233,6 +235,9 @@ fn recent_fails(addr: &str) -> usize {
 
 /// Arcades lending a chain's Core node: fewest recent failures first, then quickest; a lender
 /// with 3 failures in the last 10 minutes is skipped.
+///
+/// A lender whose mesh link is up is also offered over that link (crvia), after the ones we
+/// can dial: the way to one we can't (behind a NAT, linked over UDP only).
 pub fn lenders(node: &Node, p: &ChainParams) -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
     for (_, addr, kind, _) in node.offers_for(p.key) {
@@ -240,10 +245,17 @@ pub fn lenders(node: &Node, p: &ChainParams) -> Vec<String> {
             v.push(addr);
         }
     }
+    for (id, _) in node.cr_offerers(p.key) {
+        let via = crate::crvia::name(&id);
+        if crate::crvia::linked(&id) && !v.contains(&via) {
+            v.push(via);
+        }
+    }
     let rtts: HashMap<String, u64> = ST.health.lock().unwrap().iter().map(|(a, x)| (a.clone(), if x.rtt_ms == 0 { 5_000 } else { x.rtt_ms })).collect();
     let rtt = |a: &str| rtts.get(a).copied().unwrap_or(5_000);
     v.retain(|a| recent_fails(a) < 3);
-    v.sort_by_key(|a| (recent_fails(a), rtt(a)));
+    // A link of our own first: big answers over a mesh link hold up its other traffic.
+    v.sort_by_key(|a| (recent_fails(a), crate::crvia::peer_of(a).is_some(), rtt(a)));
     v
 }
 
@@ -312,12 +324,23 @@ fn spends_ours(p: &ChainParams, tx: &Tx) -> bool {
     tx.inputs.iter().any(|i| coin(&node, p, &i.prevout).is_some())
 }
 
+/// Mempool pushes and offers a lender sends on its mesh link (to the batches we send there).
+pub fn on_link_push(peer: &str, f: &Frame) {
+    if matches!(f.head["op"].as_str(), Some("offer" | "tx" | "gone")) && ST.subbed_via.lock().unwrap().contains_key(peer) {
+        on_push(&crate::crvia::name(peer), f);
+    }
+}
+
 /// The nets we borrow from a lender (what a sub asks for).
 fn nets_from(node: &Node, addr: &str) -> BTreeSet<String> {
     let runs: Vec<String> = ST.runs.lock().unwrap().keys().cloned().collect();
+    let via = crate::crvia::peer_of(addr);
     runs.iter()
         .filter_map(|k| by_key(k))
-        .filter(|p| node.offers_for(p.key).iter().any(|o| o.2 == "cr" && o.1 == addr))
+        .filter(|p| match via {
+            Some(id) => node.cr_offerers(p.key).iter().any(|o| o.0 == id),
+            None => node.offers_for(p.key).iter().any(|o| o.2 == "cr" && o.1 == addr),
+        })
         .map(|p| p.net.to_string())
         .collect()
 }
@@ -340,6 +363,9 @@ fn call(node: &Node, addr: &str, p: &ChainParams, calls: Value) -> Result<Vec<Va
     if calls.as_array().map(|a| a.len()).unwrap_or(0) > crate::coreshare::MAX_CALLS {
         return Err("too many calls in one batch".into());
     }
+    if let Some(peer) = crate::crvia::peer_of(addr) {
+        return call_via(node, addr, peer, p, calls);
+    }
     let conn = ST.conns.lock().unwrap().entry(addr.to_string()).or_insert_with(|| Arc::new(Mutex::new(Conn { link: None, next_id: 1, subbed: BTreeSet::new() }))).clone();
     let mut c = conn.lock().unwrap();
     let t0 = Instant::now();
@@ -360,7 +386,39 @@ fn call(node: &Node, addr: &str, p: &ChainParams, calls: Value) -> Result<Vec<Va
         let a = addr.to_string();
         crate::crsource::ask(c.link.as_mut().unwrap(), addr, p.net, id, &calls, &mut |f| on_push(&a, f))
     })();
-    match &r {
+    if r.is_err() {
+        c.link = None;
+    }
+    paced(addr, t0, &r);
+    r
+}
+
+/// One batch on a lender over its mesh link (crvia): a lender we can't dial.
+fn call_via(node: &Node, addr: &str, peer: &str, p: &ChainParams, calls: Value) -> Result<Vec<Value>, String> {
+    let t0 = Instant::now();
+    let r = (|| {
+        let want = nets_from(node, addr);
+        let fresh = ST.subbed_via.lock().unwrap().get(peer) != Some(&want);
+        if fresh {
+            let nets: Vec<&String> = want.iter().collect();
+            crate::crvia::send(peer, Frame::new(json!({"t": "cr", "op": "sub", "nets": nets})))?;
+            ST.subbed_via.lock().unwrap().insert(peer.to_string(), want);
+        }
+        let mut via = crate::crvia::Via::open(peer)?;
+        let id = via.id;
+        crate::crsource::ask(&mut via, addr, p.net, id, &calls, &mut |f| on_push(addr, f))
+    })();
+    paced(addr, t0, &r);
+    if r.is_err() {
+        ST.subbed_via.lock().unwrap().remove(peer);
+    }
+    r
+}
+
+/// After a batch: its time kept (or its failure), then paced under the lender's per-borrower
+/// answer limit.
+fn paced(addr: &str, t0: Instant, r: &Result<Vec<Value>, String>) {
+    match r {
         Ok(a) => {
             let ms = t0.elapsed().as_millis() as u64;
             {
@@ -375,12 +433,8 @@ fn call(node: &Node, addr: &str, p: &ChainParams, calls: Value) -> Result<Vec<Va
                 std::thread::sleep(rest);
             }
         }
-        Err(x) => {
-            c.link = None;
-            fail(addr, x);
-        }
+        Err(x) => fail(addr, x),
     }
-    r
 }
 
 /// Drain frames lenders pushed while we were idle (mempool txs, offers, pings).
@@ -1383,8 +1437,24 @@ pub fn broadcast_tx(node: &Node, p: &'static ChainParams, tx: &Tx) -> Result<Val
     let hx = hex::encode(&tx.raw);
     let mut answers = Vec::new();
     let mut ok = false;
-    let mut all: Vec<String> = node.offers_for(p.key).into_iter().filter(|o| o.2 == "cr").map(|o| o.1).collect();
-    all.dedup();
+    // Each lender once: dialed, or over its mesh link when its address fails lately or it
+    // has none (a dial that times out would hold the send up for half a minute each).
+    let mut all: Vec<String> = Vec::new();
+    let addrs: BTreeMap<String, String> = node.offers.lock().unwrap().iter().map(|(id, o)| (id.clone(), o.addr.clone())).collect();
+    for (id, _) in node.cr_offerers(p.key) {
+        let addr = addrs.get(&id).cloned().unwrap_or_default();
+        let dialable = !addr.is_empty() && !addr.ends_with(":0");
+        let way = if crate::crvia::linked(&id) && (!dialable || recent_fails(&addr) > 0) {
+            crate::crvia::name(&id)
+        } else if dialable {
+            addr
+        } else {
+            continue;
+        };
+        if !all.contains(&way) {
+            all.push(way);
+        }
+    }
     for a in &all {
         match call(node, a, p, json!([["sendrawtransaction", [hx]]])) {
             Ok(v) => match r(&v[0]) {
@@ -1442,6 +1512,15 @@ pub fn status(node: &Node, key: &str) -> Option<Value> {
     let told = ST.tips.lock().unwrap().get(p.key).cloned().unwrap_or_default();
     let mut seen = BTreeSet::new();
     let mut fresh: Vec<(u64, u64)> = Vec::new();
+    // Lenders over their mesh links, when those are up (crvia).
+    for (id, h) in node.cr_offerers(p.key) {
+        let via = crate::crvia::name(&id);
+        if crate::crvia::linked(&id) && seen.insert(via.clone()) {
+            let t = told.get(&via).map(|x| x.0).unwrap_or(h);
+            let (rtt, last) = ST.health.lock().unwrap().get(&via).map(|x| (Some(x.rtt_ms), Some(x.last_err.clone()).filter(|s| !s.is_empty()))).unwrap_or((None, None));
+            lenders_v.push(json!({"node": &id[..id.len().min(16)], "addr": format!("mesh link to {}", &id[..id.len().min(16)]), "via": true, "tip": t, "rtt_ms": rtt, "fails": recent_fails(&via), "last_error": last}));
+        }
+    }
     for (id, addr, kind, h) in offers {
         if kind != "cr" || !seen.insert(addr.clone()) {
             continue;
@@ -1489,7 +1568,7 @@ pub fn status_all(node: &Node) -> Value {
             let mut v = status(node, p.key).unwrap_or_else(|| json!({"key": p.key, "name": p.name, "borrowed": false}));
             v["on"] = json!(chain_on(&c, p.key));
             v["installed"] = json!(installed.contains(p.key) || crate::arcsvc::runs(p));
-            v["lendable"] = json!(node.offers_for(p.key).iter().any(|o| o.2 == "cr"));
+            v["lendable"] = json!(!node.cr_offerers(p.key).is_empty());
             v
         })
         .collect();

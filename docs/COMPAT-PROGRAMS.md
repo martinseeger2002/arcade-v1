@@ -58,6 +58,14 @@ chain included) answers the Core JSON-RPC at the same address (`POST /` for the 
 | `decoderawtransaction`, `validateaddress`, `importaddress` | answered here (nothing needs watching) |
 | `listtransactions` | `[]` (nothing is watched for a program) |
 
+**Lenders that can't be dialed.** Borrowing opens a link of its own to a lender's mesh port. A lender
+whose port can't be reached (behind a NAT with no port forward, linked to us over UDP only; or
+sharing its public address with another arcade, whose port forward goes to that one) is asked over
+the mesh link it already has with us instead: the same coreshare batches, answered there by their
+id. Lenders we can dial come first; `borrow.status` lists a lender reached this way as
+"mesh link to <node id>". A send goes to each lender once, over its mesh link when its address
+fails lately or it has none.
+
 A call the borrowed side doesn't answer falls back to the copy kept here, when there is one.
 `tx.fee`, `tx.coins`, `tx.broadcast` and the explorer's addresses work the same way on a borrowed
 chain; `tx.activity` (history) still needs the chain kept here.

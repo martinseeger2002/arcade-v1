@@ -486,6 +486,8 @@ pub fn serve(node: &Node, link: &mut Link, addr: &str) -> Result<(), LinkError> 
     let conn = crate::realtime::link_up(node, &peer);
     // UDP beside this link (docs/compat/UDP.md); nothing changes while it is off.
     crate::udpsvc::link_up(node, link);
+    // Borrowers here may send their batches over this link (a lender they can't dial).
+    crate::crvia::up(&peer);
     let mut last_me = std::time::Instant::now();
     let mut last_offer = crate::coreshare::offer(node).map(|o| o.head["nets"].clone()).unwrap_or(Value::Null);
     // Core-style calls over this link (coreshare) are answered for this peer: the addresses
@@ -493,6 +495,7 @@ pub fn serve(node: &Node, link: &mut Link, addr: &str) -> Result<(), LinkError> 
     let r = crate::rpc::as_caller(&peer, || {
         serve_loop(node, link, addr, &peer, conn, &mut cr_reqs, &mut last_ping, &mut sent_outbox, &mut last_sz, &mut last_hold, &mut last_me, &mut last_offer)
     });
+    crate::crvia::down(&peer);
     crate::udpsvc::link_down(&peer);
     crate::realtime::link_down(&peer, conn);
     r
@@ -536,6 +539,7 @@ fn serve_loop(
         crate::arcsvc::tick(node, link)?;
         crate::shares::tick(link)?;
         crate::mempoolshare::tick(node, peer, link)?;
+        crate::crvia::tick(peer, link)?;
         #[cfg(feature = "oldimport")]
         crate::lxfetch::tick(link)?;
         #[cfg(feature = "oldimport")]
@@ -626,6 +630,11 @@ fn serve_loop(
                 if f.head["op"] == "offer" {
                     note_offer(node, &link.peer_id, addr, "cr", &f.head["nets"]);
                 }
+                // An answer to a batch we sent over this link, as a borrower (crvia).
+                if crate::crvia::on_answer(peer, &f) {
+                    continue;
+                }
+                crate::borrow::on_link_push(peer, &f);
                 crate::coreshare::handle(node, link, cr_reqs, &f)?
             }
             _ => {} // unknown kinds are ignored, as the existing arcade does

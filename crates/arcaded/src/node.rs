@@ -251,6 +251,17 @@ impl Node {
         v
     }
 
+    /// Node ids offering `key` over coreshare lately, with or without an address to dial
+    /// (an arcade not listening is still reached over the mesh link it opened: crvia).
+    pub fn cr_offerers(&self, key: &str) -> Vec<(String, u64)> {
+        let key = arcade_chain::params::by_key(key).map(|p| p.net).unwrap_or(key);
+        let cutoff = arcade_app::now().saturating_sub(3 * 3600);
+        let mut v: Vec<(String, u64)> =
+            self.offers.lock().unwrap().iter().filter(|(_, o)| o.at >= cutoff).filter_map(|(id, o)| o.cr.get(key).map(|h| (id.clone(), *h))).collect();
+        v.sort_by(|x, y| y.1.cmp(&x.1));
+        v
+    }
+
     pub fn self_arc(&self) -> std::sync::Arc<Node> {
         self.me.get().and_then(|w| w.upgrade()).expect("node is running")
     }
