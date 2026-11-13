@@ -26,7 +26,7 @@ fn free_bytes(p: &Path) -> u64 {
 }
 
 /// The parts of a chain that are copied, each on its own (Martin: every part optional).
-pub const FAMILIES: &[&str] = &["blocks", "coins", "ord", "tokens", "names", "maps", "ledger", "profiles", "messages"];
+pub const FAMILIES: &[&str] = &["blocks", "coins", "ord", "tokens", "names", "maps", "ledger", "profiles", "messages", "dogefeed"];
 
 /// The indexer whose progress (`ix:<name>`) is a table family's height.
 fn indexer_of(fam: &str) -> &'static str {
