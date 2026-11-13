@@ -31,6 +31,9 @@ pub fn protocol(p: &ChainParams) -> Option<(&'static str, bool)> {
     match p.net {
         "main" | "test" => Some(("prc-20", false)),
         "doge" => Some(("drc-20", false)),
+        // DGB-20: DigiByte's DRC-20 under its own name ({"p":"dgb-20",...}, the notes on DigiByte since block
+        // 20,673,796: deploys of digi, byte, frog and "digi " and their mints), so DRC-20 rules.
+        "dgb" => Some(("dgb-20", false)),
         "wjk" => Some(("wjk-20", false)),
         // SHC-20: Shibacoin's DRC-20 under its own name (wonky-ord-shibacoin src/drc20/params.rs: PROTOCOL_LITERAL
         // "shc-20"), so DRC-20 rules.
@@ -319,7 +322,8 @@ pub fn balances(db: &ChainDb, c: u16, owner: &str) -> Vec<(String, String, Strin
 }
 
 pub fn tick_count(db: &ChainDb, c: u16) -> u64 {
-    db.store(c).read(|r| r.scan_prefix(TICK, &KeyBuf::new().u16(c).done())).map(|v| v.len() as u64).unwrap_or(0)
+    // Counted with the cursor alone: no row is copied out.
+    db.store(c).read(|r| r.sum_prefix(TICK, &KeyBuf::new().u16(c).done(), None, usize::MAX)).map(|(n, _, _)| n).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -332,6 +336,13 @@ mod tests {
         assert_eq!(num(".5"), None);
         assert_eq!(num("69000000000").unwrap().units(18), Some(69_000_000_000u128 * 10u128.pow(18)));
         assert!(num("18446744073709551616").map(|n| !n.le_int(MAX_SUPPLY)).unwrap());
+        // DGB-20 on DigiByte: real notes from the chain (a mint of "Digi", the deploy of "byte"), read under DRC-20 rules;
+        // a DRC-20 note there is not DigiByte's protocol.
+        let dgb = arcade_chain::params::by_key("dgb").unwrap();
+        assert_eq!(protocol(dgb), Some(("dgb-20", false)));
+        assert!(matches!(token_op("dgb-20", false, "text/plain;charset=utf-8", br#"{"p":"dgb-20","op":"mint","tick":"Digi","amt":"1000"}"#), Some(Op::Mint { .. })));
+        assert!(matches!(token_op("dgb-20", false, "text/plain", br#"{"p":"dgb-20","op":"deploy","tick":"byte","max":"21000000","lim":"1000"}"#), Some(Op::Deploy { .. })));
+        assert!(token_op("dgb-20", false, "text/plain", br#"{"p":"drc-20","op":"mint","tick":"DIGI","amt":"1000"}"#).is_none());
         let body = br#"{"p":"prc-20","op":"deploy","tick":"lord","max":"69","lim":"1"}"#;
         assert!(matches!(token_op("prc-20", false, "text/plain;charset=utf-8", body), Some(Op::Deploy { .. })));
         // WJK-20: ticks of 1 to 16 characters; PRC-20 keeps 4.

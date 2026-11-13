@@ -195,7 +195,8 @@ pub fn lookup(db: &ChainDb, c: u16, name: &str) -> Vec<(String, u64, String)> {
 pub fn counts(db: &ChainDb, c: u16) -> [u64; 3] {
     let mut out = [0; 3];
     for (i, o) in out.iter_mut().enumerate() {
-        *o = db.store(c).read(|r| r.scan_prefix(WIN, &KeyBuf::new().u16(c).u8(i as u8).done())).map(|v| v.len() as u64).unwrap_or(0);
+        // Counted with the cursor alone: no row is copied out (Dogecoin holds over a million).
+        *o = db.store(c).read(|r| r.sum_prefix(WIN, &KeyBuf::new().u16(c).u8(i as u8).done(), None, usize::MAX)).map(|(n, _, _)| n).unwrap_or(0);
     }
     out
 }

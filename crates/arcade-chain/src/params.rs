@@ -36,6 +36,19 @@ pub struct ValueRules {
     pub subsidy: fn(u32, &Hash256) -> u64,
     /// The blocks a coinbase made at `height` must wait before it can be spent.
     pub maturity: fn(u32) -> u32,
+    /// Checked when a block is connected. False until a replay of the chain's whole history
+    /// (chains.check_rules) found no real block breaking them; the replay checks them either way.
+    pub enforced: bool,
+}
+
+/// [`Block::check`], except for the chain's genesis block: Core never checks that one (it is built
+/// in), and some chains' genesis breaks rules every later block keeps (Luckycoin's coinbase script
+/// is over 100 bytes). The genesis is known by its hash, checked against the params.
+pub fn check_block_body(params: &ChainParams, b: &crate::block::Block) -> Result<(), crate::block::BlockError> {
+    if b.hash() == params.genesis_hash() {
+        return Ok(());
+    }
+    b.check()
 }
 
 /// Script flags, as libbitcoinconsensus (and Core's interpreter) number them.
@@ -61,6 +74,8 @@ pub struct BlockRules {
     pub max_block_size: usize,
     /// Most signature operations in a block (legacy, plus P2SH redeem scripts).
     pub max_sigops: u32,
+    /// Checked when a block is connected (see [`ValueRules::enforced`]).
+    pub enforced: bool,
 }
 
 /// `CPureBlockHeader::IsLegacy()` in the Dogecoin 1.14 family.
@@ -300,7 +315,7 @@ pub fn check_header(
         return Err(HeaderError::BadBits);
     }
     check_auxpow_rules(params, h, height)?;
-    if let Some(br) = params.block_rules {
+    if let Some(br) = params.block_rules.filter(|b| b.enforced) {
         // GetBaseVersion: nVersion % VERSION_AUXPOW (C++ %, which Rust's matches).
         let (got, want) = (h.version % 256, (br.min_version)(height));
         if got < want {
@@ -376,6 +391,7 @@ pub const PEPECOIN_VALUE_RULES: ValueRules = ValueRules {
     max_money: crate::pepecoin::MAX_MONEY,
     subsidy: |h, _| crate::pepecoin::subsidy(h),
     maturity: crate::pepecoin::maturity,
+    enforced: true,
 };
 
 /// Pepecoin's block rules (Pepecoin Core 4fb5a0cd9): P2SH always; DERSIG, CHECKLOCKTIMEVERIFY,
@@ -387,6 +403,7 @@ pub const PEPECOIN_BLOCK_RULES: BlockRules = BlockRules {
     min_version: |h| if h >= 1000 { 4 } else { 0 },
     max_block_size: 1_000_000,
     max_sigops: 20_000,
+    enforced: true,
 };
 
 /// Pepecoin regtest: BIP66 at 1,251, BIP65 at 1,351, BIP34 never.
@@ -396,6 +413,84 @@ pub const PEPECOIN_REGTEST_BLOCK_RULES: BlockRules = BlockRules {
     min_version: |h| if h >= 1351 { 4 } else if h >= 1251 { 3 } else { 0 },
     max_block_size: 1_000_000,
     max_sigops: 20_000,
+    enforced: true,
+};
+
+/// Dogecoin's coin rules (Dogecoin Core 1.14: GetDogecoinBlockSubsidy, random before Digishield at
+/// 145,000; maturity 30, then 240; MAX_MONEY 10 billion).
+pub const DOGECOIN_VALUE_RULES: ValueRules = ValueRules {
+    max_money: crate::dogecoin::MAX_MONEY,
+    subsidy: crate::dogecoin::subsidy,
+    maturity: crate::dogecoin::maturity,
+    // Not yet: until the MiniPC's replay of Dogecoin's whole history finds no block breaking them.
+    enforced: false,
+};
+
+/// Dogecoin's block rules (Dogecoin Core 1.14): P2SH since launch; DERSIG, BIP34 and version 3
+/// from 1,034,383 (BIP66Height = BIP34Height); CHECKLOCKTIMEVERIFY and version 4 from 3,464,751;
+/// CSV's window closed (2017) before it could signal and SegWit never activates; 1 MB, 20,000 sigops.
+pub const DOGECOIN_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |h| SCRIPT_P2SH | if h >= 1_034_383 { SCRIPT_DERSIG } else { 0 } | if h >= 3_464_751 { SCRIPT_CHECKLOCKTIMEVERIFY } else { 0 },
+    bip34_height: 1_034_383,
+    min_version: |h| if h >= 3_464_751 { 4 } else if h >= 1_034_383 { 3 } else { 0 },
+    max_block_size: 1_000_000,
+    max_sigops: 20_000,
+    // Not yet: until the MiniPC's replay of Dogecoin's whole history finds no block breaking them.
+    enforced: false,
+};
+
+/// Flopcoin (Flopcoin Core 2.0, on Dogecoin's code): random rewards before Digishield at 145,
+/// maturity 30 then 240; P2SH since launch, BIP34 from 100, DERSIG and version 3 from 101,
+/// CHECKLOCKTIMEVERIFY and version 4 from V3ForkHeight 111,000; CSV's window closed before launch.
+pub const FLOPCOIN_VALUE_RULES: ValueRules = ValueRules {
+    max_money: crate::dogecoin::MAX_MONEY,
+    subsidy: |h, prev| crate::dogecoin::subsidy_from(h, prev, 145, 100_000),
+    maturity: |h| if h < 145 { 30 } else { 240 },
+    // Not yet: until a replay of its whole history finds no block breaking them.
+    enforced: false,
+};
+pub const FLOPCOIN_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |h| SCRIPT_P2SH | if h >= 101 { SCRIPT_DERSIG } else { 0 } | if h >= 111_000 { SCRIPT_CHECKLOCKTIMEVERIFY } else { 0 },
+    bip34_height: 100,
+    min_version: |h| if h >= 111_000 { 4 } else if h >= 101 { 3 } else { 0 },
+    max_block_size: 1_000_000,
+    max_sigops: 20_000,
+    enforced: false,
+};
+
+/// Shibacoin (Shibacoin Core 1.2.1, on Dogecoin's code): the fixed schedule from block 0
+/// (fSimplifiedRewards always), maturity 30 then 240 from Digishield at 1,000; P2SH since launch,
+/// BIP34, DERSIG, CHECKLOCKTIMEVERIFY and version 4 from 1,000.
+pub const SHIBACOIN_VALUE_RULES: ValueRules = ValueRules {
+    max_money: crate::dogecoin::MAX_MONEY,
+    subsidy: |h, prev| crate::dogecoin::subsidy_from(h, prev, 0, 100_000),
+    maturity: |h| if h < 1000 { 30 } else { 240 },
+    enforced: false,
+};
+pub const SHIBACOIN_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |h| SCRIPT_P2SH | if h >= 1000 { SCRIPT_DERSIG | SCRIPT_CHECKLOCKTIMEVERIFY } else { 0 },
+    bip34_height: 1000,
+    min_version: |h| if h >= 1000 { 4 } else { 0 },
+    max_block_size: 1_000_000,
+    max_sigops: 20_000,
+    enforced: false,
+};
+
+/// Luckycoin (Luckycoin Core 5.0.1): see luckycoin.rs; MAX_MONEY 20 million, maturity 70; P2SH
+/// since launch, BIP34, DERSIG, CHECKLOCKTIMEVERIFY and version 4 from 95,551; CSV and SegWit off.
+pub const LUCKYCOIN_VALUE_RULES: ValueRules = ValueRules {
+    max_money: crate::luckycoin::MAX_MONEY,
+    subsidy: crate::luckycoin::subsidy,
+    maturity: crate::luckycoin::maturity,
+    enforced: false,
+};
+pub const LUCKYCOIN_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |h| SCRIPT_P2SH | if h >= 95_551 { SCRIPT_DERSIG | SCRIPT_CHECKLOCKTIMEVERIFY } else { 0 },
+    bip34_height: 95_551,
+    min_version: |h| if h >= 95_551 { 4 } else { 0 },
+    max_block_size: 1_000_000,
+    max_sigops: 20_000,
+    enforced: false,
 };
 
 /// Pepecoin regtest: halving every 150 blocks, maturity 60.
@@ -403,6 +498,7 @@ pub const PEPECOIN_REGTEST_VALUE_RULES: ValueRules = ValueRules {
     max_money: crate::pepecoin::MAX_MONEY,
     subsidy: |h, _| crate::pepecoin::subsidy_every(h, 150),
     maturity: |_| 60,
+    enforced: true,
 };
 
 pub static PEPECOIN_TEST: ChainParams = ChainParams {
@@ -643,8 +739,8 @@ pub static FLOPCOIN_MAIN: ChainParams = ChainParams {
     auxpow_strict_chain_id: true,
     // Flopcoin Core chainparams.cpp: auxpowConsensus from AUXPOWHeight 110,000; fStrictChainId true (chain id 163).
     auxpow_rules: Some(AuxpowRules { start: 110000, strict_chain_id: true }),
-    value_rules: None,
-    block_rules: None,
+    value_rules: Some(FLOPCOIN_VALUE_RULES),
+    block_rules: Some(FLOPCOIN_BLOCK_RULES),
     bech32_hrp: None,
     p2pkh_version: 35,
     p2sh_version: 22,
@@ -752,8 +848,8 @@ pub static DOGECOIN_MAIN: ChainParams = ChainParams {
     auxpow_strict_chain_id: true,
     // Dogecoin Core chainparams.cpp: auxpowConsensus from 371,337; fStrictChainId true (chain id 98).
     auxpow_rules: Some(AuxpowRules { start: 371337, strict_chain_id: true }),
-    value_rules: None,
-    block_rules: None,
+    value_rules: Some(DOGECOIN_VALUE_RULES),
+    block_rules: Some(DOGECOIN_BLOCK_RULES),
     bech32_hrp: None,
     p2pkh_version: 30,
     p2sh_version: 22,
@@ -877,8 +973,8 @@ pub static SHIBACOIN_MAIN: ChainParams = ChainParams {
     auxpow_strict_chain_id: true,
     // Shibacoin Core chainparams.cpp: auxpowConsensus from 24,000; fStrictChainId true (chain id 74).
     auxpow_rules: Some(AuxpowRules { start: 24000, strict_chain_id: true }),
-    value_rules: None,
-    block_rules: None,
+    value_rules: Some(SHIBACOIN_VALUE_RULES),
+    block_rules: Some(SHIBACOIN_BLOCK_RULES),
     bech32_hrp: None,
     p2pkh_version: 63,
     p2sh_version: 22,
@@ -981,8 +1077,8 @@ pub static LUCKYCOIN_MAIN: ChainParams = ChainParams {
     auxpow_strict_chain_id: true,
     // Luckycoin Core chainparams.cpp: auxpowConsensus from 176,000; fStrictChainId true (chain id 0x2013).
     auxpow_rules: Some(AuxpowRules { start: 176000, strict_chain_id: true }),
-    value_rules: None,
-    block_rules: None,
+    value_rules: Some(LUCKYCOIN_VALUE_RULES),
+    block_rules: Some(LUCKYCOIN_BLOCK_RULES),
     bech32_hrp: None,
     p2pkh_version: 47,
     p2sh_version: 5,

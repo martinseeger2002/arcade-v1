@@ -246,7 +246,7 @@ impl ChainDb {
             if b.encode() != *raw {
                 return Err(err(format!("block {} does not rebuild byte-identically", b.hash())));
             }
-            b.check().map_err(|e| err(format!("block {}: {e}", b.hash())))?;
+            arcade_chain::params::check_block_body(params, &b).map_err(|e| err(format!("block {}: {e}", b.hash())))?;
             blocks.push(b);
         }
         self.wstore(c)?.write(|w| {

@@ -76,7 +76,7 @@
     const row = (c) => h("button", { class: c.key === chain?.key ? "on" : "", onclick: () => pick(c) }, coinEl(c), h("span", {}, c.name));
     m.replaceChildren(...chains.filter((c) => c.installed || c.borrowed).map(row));
   }
-  function pick(c) { remember(); chain = c; close(); paintSelector(); sum = null; go("home", null, false); announce(); }
+  function pick(c) { remember(); chain = c; close(); paintSelector(); sum = SUMS[c.key]?.v || null; go("home", null, false); announce(); }
   // Every tab follows the picked chain.
   function announce() { window.dispatchEvent(new CustomEvent("arcade:chain", { detail: chain })); }
   function close() { $("cs-menu").hidden = true; $("cs-btn").setAttribute("aria-expanded", "false"); }
@@ -218,27 +218,35 @@
 
   // ---------- views ----------
   // Overviews kept per coin: switching back shows the last one at once, then the fresh one.
-  const SUMS = {};
-  let fresh = false;
+  // One question per coin at a time: every page that needs the overview waits for the same answer.
+  const SUMS = {}, ASKING = {}, MESH_TRIES = {};
+  function summaryOf(key) {
+    if (!ASKING[key]) {
+      ASKING[key] = xapi("explorer.summary", { chain: key })
+        .then((v) => { SUMS[key] = { v, at: Date.now() }; return v; })
+        .finally(() => { delete ASKING[key]; });
+    }
+    return ASKING[key];
+  }
+  // The kept overview at once, the fresh one in the background (painted if you're still looking at it).
   function refreshHome(key, delay) {
     setTimeout(async () => {
       try {
-        const v = await xapi("explorer.summary", { chain: key });
-        SUMS[key] = { v, at: Date.now() };
-        if (page === "home" && chain && chain.key === key) { fresh = true; render(); }
+        const v = await summaryOf(key);
+        if (chain && chain.key === key) { sum = v; if (page === "home") render(); }
       } catch {}
     }, delay);
   }
   async function vHome() {
     const key = chain.key, kept = SUMS[key];
-    if (fresh || !kept || Date.now() - kept.at > 120000) {
-      if (!fresh) SUMS[key] = { v: await xapi("explorer.summary", { chain: key }), at: Date.now() };
-      fresh = false;
-      // Parts other arcades answer still on their way: ask again shortly.
-      if (SUMS[key].v.mesh_pending) refreshHome(key, 2000);
-    } else {
+    if (!kept) {
+      await summaryOf(key);
+    } else if (Date.now() - kept.at > 15000) {
       refreshHome(key, 0);
     }
+    // Parts other arcades answer still on their way: ask again shortly.
+    if (SUMS[key].v.mesh_pending && Date.now() - SUMS[key].at < 3000 && (MESH_TRIES[key] = (MESH_TRIES[key] || 0) + 1) <= 3) refreshHome(key, 2000);
+    if (!SUMS[key].v.mesh_pending) MESH_TRIES[key] = 0;
     sum = SUMS[key].v;
     const tok = sum.protocol ? sum.protocol.toUpperCase() : "";
     const st = [
@@ -718,13 +726,22 @@
     if (has("tokens")) hint.push("tick");
     $("x-q").placeholder = hint.join(", ") + "…";
   }
+  // What the view shows now (coin, page, argument): a different one is cleared at once, so the last coin's or page's
+  // numbers are never mistaken for the new one's while it loads. A refresh of the same view keeps it until replaced.
+  let showing = "";
   async function render() {
     if (!chain) await loadChains();
     if (!chain) { $("x-view").replaceChildren(h("div", { class: "x-empty" }, "Waiting for arcaded…")); return; }
     const my = ++seq;
     paintNav();
+    const want = `${chain.key}|${page}|${arg ?? ""}`;
+    if (want !== showing) {
+      const label = (SECTIONS.find(([k]) => k === (DETAIL_PARENT[page] || page)) || [, "Overview"])[1];
+      $("x-view").replaceChildren(backBar(), h("div", { class: "x-empty x-loading" }, `Loading ${chain.name} · ${label}…`));
+      showing = want;
+    }
     try {
-      if (!sum || sum.chain !== chain.key) sum = await xapi("explorer.summary", { chain: chain.key });
+      if (!sum || sum.chain !== chain.key) sum = SUMS[chain.key]?.v || await summaryOf(chain.key);
       const sumFrom = sum._mesh || (sum.mesh_parts ? Object.values(sum.mesh_parts)[0] : null);
       // A page whose index is off on this chain isn't available: back to the overview.
       if (NEEDS[page] && !has(NEEDS[page])) { page = "home"; arg = null; }
@@ -759,7 +776,7 @@
     if (!s) return;
     if (s.chain && chain && s.chain !== chain.key) {
       const c = chains.find((x) => x.key === s.chain);
-      if (c) { chain = c; sum = null; paintSelector(); announce(); }
+      if (c) { chain = c; sum = SUMS[c.key]?.v || null; paintSelector(); announce(); }
     }
     page = s.page; arg = s.arg; insType = s.insType; oldKey = "";
     await render();
@@ -782,9 +799,9 @@
     } catch (e) { $("x-view").replaceChildren(h("div", { class: "x-empty" }, `${chain.name}: ${e.message}`)); }
   });
 
-  document.querySelector('nav button[data-tab="explorer"]').addEventListener("click", () => { sum = null; render(); });
+  document.querySelector('nav button[data-tab="explorer"]').addEventListener("click", () => { render(); if (chain) refreshHome(chain.key, 0); });
   // Keep the overview fresh while it is open.
-  setInterval(() => { if ($("explorer").classList.contains("on") && page === "home" && !document.hidden) { sum = null; render(); } }, 30000);
+  setInterval(() => { if ($("explorer").classList.contains("on") && page === "home" && !document.hidden && chain) refreshHome(chain.key, 0); }, 30000);
   setInterval(loadChains, 15000);
   loadChains();
   // #explorer/<page>/<arg> opens that page.

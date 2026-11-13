@@ -1942,13 +1942,6 @@ enum Addr {
 /// are more than DEFER_BEHIND (20,000) deep, far past the UNDO_DEPTH (1,000) a reorg may undo,
 /// and their records would only be deleted again later.
 #[allow(clippy::too_many_arguments)]
-/// ARCADE_VERIFY_ALL_SCRIPTS=1: check scripts under the newest checkpoint too (a full check of
-/// a chain's history, as Core with -assumevalid=0).
-fn verify_all_scripts() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("ARCADE_VERIFY_ALL_SCRIPTS").is_ok_and(|v| v == "1"))
-}
-
 /// Walk the stored headers from height `floor` up (every stored header's parent is stored, so
 /// heights run without gaps). With `spread`, a header whose parent is invalid is marked invalid
 /// too. The valid header with the most work becomes the best header; on a tie, `prefer` (when
@@ -2027,7 +2020,8 @@ fn connect_one(
             0
         }
     };
-    if check {
+    // Not the genesis block (Core never checks it): see check_block_body.
+    if check && height > 0 {
         blk.check().map_err(|e| if e.breaks_rules() { StoreError::InvalidBlock { block: hash.0, why: e.to_string() } } else { other(e) })?;
     }
 
@@ -2074,46 +2068,12 @@ fn connect_one(
         l.put(ADDR_LOG, &k, &v)
     };
     let mut prevouts: Vec<Vec<Prevout>> = Vec::with_capacity(blk.txs.len());
-    // Coin rules (where the chain has them): what the block's transactions leave as fees,
-    // and what its coinbase pays out.
-    let vr = params.value_rules.filter(|_| height > 0);
-    let broke = |tx: &Hash256, why: &str| StoreError::InvalidBlock { block: hash.0, why: format!("height {height}: tx {tx}: {why}") };
-    let (mut fees, mut coinbase_out) = (0u128, 0u128);
-    // Core's remaining block rules (where the chain has them): size, BIP34, finality, sigops,
-    // and every input's script above the newest checkpoint ("assume valid").
-    let br = params.block_rules.filter(|_| height > 0);
-    let script_flags = br.filter(|_| verify_all_scripts() || params.last_checkpoint(u32::MAX).is_none_or(|cp| height > cp)).map(|b| (b.script_flags)(height));
-    let mut sigops = 0u32;
-    if let Some(br) = &br {
-        // Sizes without witness data (Core's SERIALIZE_TRANSACTION_NO_WITNESS): the wire bytes,
-        // re-encoded only for a transaction that has a witness.
-        let stripped = |t: &arcade_chain::Tx| if t.has_witness() { t.encode_legacy().len() } else { t.raw.len() };
-        let mut count = Vec::new();
-        arcade_chain::encode::write_varint(&mut count, blk.txs.len() as u64);
-        let no_witness = 80 + blk.auxpow.as_ref().map_or(0, |a| a.raw.len()) + count.len() + blk.txs.iter().map(stripped).sum::<usize>()
-            + blk.sig.as_ref().map_or(0, |g| { let mut v = Vec::new(); arcade_chain::encode::write_varint(&mut v, g.len() as u64); v.len() + g.len() }) + blk.extra.len();
-        if blk.txs.len() > br.max_block_size || no_witness > br.max_block_size {
-            return Err(broke(&blk.txs[0].txid, &format!("block is {no_witness} bytes, over {} (bad-blk-length)", br.max_block_size)));
-        }
-        if height >= br.bip34_height && !blk.txs[0].inputs[0].script_sig.starts_with(&arcade_chain::sigops::height_push(height)) {
-            return Err(broke(&blk.txs[0].txid, "coinbase doesn't start with the block height (bad-cb-height)"));
-        }
-        for tx in &blk.txs {
-            if stripped(tx) > br.max_block_size {
-                return Err(broke(&tx.txid, "transaction over the size limit (bad-txns-oversize)"));
-            }
-            if !arcade_chain::sigops::is_final(tx, height, blk.header.time) {
-                return Err(broke(&tx.txid, &format!("not final: lock time {} (bad-txns-nonfinal)", tx.lock_time)));
-            }
-            sigops = sigops.saturating_add(arcade_chain::sigops::legacy_sig_ops(tx));
-        }
-        if sigops > br.max_sigops {
-            return Err(broke(&blk.txs[0].txid, &format!("{sigops} signature operations, over {} (bad-blk-sigops)", br.max_sigops)));
-        }
-    }
+    // Per input: the height and coinbase flag of the coin it spends (for rules::check, with
+    // `prevouts`).
+    let mut spent_meta: Vec<Vec<(u32, bool)>> = Vec::with_capacity(blk.txs.len());
     for (p, tx) in blk.txs.iter().enumerate() {
         let mut pv = Vec::new();
-        let mut value_in = 0u128;
+        let mut meta = Vec::new();
         let p = p as u32;
         let t12 = tx.txid.t12();
         settle_mempool(w, params, tx)?;
@@ -2148,17 +2108,7 @@ fn connect_one(
                         ((pb, pp), k_pos(c, pb, pp, inp.prevout.vout), coin)
                     }
                 };
-                if let Some(vr) = &vr {
-                    value_in += coin.value as u128;
-                    if coin.value > vr.max_money || value_in > vr.max_money as u128 {
-                        return Err(broke(&tx.txid, "input values out of range (bad-txns-inputvalues-outofrange)"));
-                    }
-                    let need = (vr.maturity)(coin.height);
-                    if coin.coinbase && height.saturating_sub(coin.height) < need {
-                        return Err(broke(&tx.txid, &format!(
-                            "spends a coinbase from height {} before it matures ({need} blocks) (bad-txns-premature-spend-of-coinbase)", coin.height)));
-                    }
-                }
+                meta.push((coin.height, coin.coinbase));
                 let sid = script_id(&coin.script);
                 pv.push(Prevout { value: coin.value, script: coin.script.clone() });
                 match cache.as_deref_mut() {
@@ -2195,45 +2145,8 @@ fn connect_one(
             }
         }
         tadd(4, t_sp);
-        if let (Some(br), false) = (&br, tx.is_coinbase()) {
-            // P2SH redeem scripts' signature operations (GetP2SHSigOpCount), then the scripts.
-            for (inp, prev) in tx.inputs.iter().zip(&pv) {
-                if arcade_chain::sigops::is_p2sh(&prev.script) {
-                    sigops = sigops.saturating_add(arcade_chain::sigops::p2sh_sig_op_count(&inp.script_sig));
-                }
-            }
-            if sigops > br.max_sigops {
-                return Err(broke(&tx.txid, &format!("{sigops} signature operations, over {} (bad-blk-sigops)", br.max_sigops)));
-            }
-            if let Some(flags) = script_flags {
-                for (i, prev) in pv.iter().enumerate() {
-                    if let Err(e) = bitcoinconsensus::verify_with_flags(&prev.script, prev.value, &tx.raw, None, i, flags) {
-                        return Err(broke(&tx.txid, &format!("input {i}: script check failed ({e:?}) (mandatory-script-verify-flag-failed)")));
-                    }
-                }
-            }
-        }
-        if let Some(vr) = &vr {
-            let mut out = 0u128;
-            for o in &tx.outputs {
-                out += o.value as u128;
-                if o.value > vr.max_money || out > vr.max_money as u128 {
-                    return Err(broke(&tx.txid, "output values out of range (bad-txns-vout-toolarge)"));
-                }
-            }
-            if tx.is_coinbase() {
-                coinbase_out = out;
-            } else if !tx.is_coinstake() && !tx.hogex {
-                if value_in < out {
-                    return Err(broke(&tx.txid, &format!("pays out {out} but spends {value_in} (bad-txns-in-belowout)")));
-                }
-                fees += value_in - out;
-                if fees > vr.max_money as u128 {
-                    return Err(broke(&tx.txid, "fees out of range (bad-txns-fee-outofrange)"));
-                }
-            }
-        }
         prevouts.push(pv);
+        spent_meta.push(meta);
         let t_out = std::time::Instant::now();
         // Block 0's outputs are never coins (Bitcoin-family rule).
         if height == 0 {
@@ -2267,10 +2180,16 @@ fn connect_one(
         tadd(5, t_out);
     }
 
-    if let Some(vr) = &vr {
-        let limit = (vr.subsidy)(height, &blk.header.prev) as u128 + fees;
-        if coinbase_out > limit {
-            return Err(broke(&blk.txs[0].txid, &format!("coinbase pays {coinbase_out}, more than the subsidy and fees ({limit}) (bad-cb-amount)")));
+    // The chain's rules that need the spent coins (rules.rs): broken, nothing of the block is kept.
+    let spent: Vec<Vec<crate::rules::Spent>> = prevouts.iter().zip(&spent_meta).map(|(pv, m)| {
+        pv.iter().zip(m).map(|(p, &(h, cb))| crate::rules::Spent { value: p.value, script: &p.script, height: h, coinbase: cb }).collect()
+    }).collect();
+    // Only the rules switched on for the chain (a replay checks the rest).
+    if params.value_rules.is_some_and(|v| v.enforced) || params.block_rules.is_some_and(|b| b.enforced) {
+        let ep = crate::rules::enforced_only(params);
+        let flags = crate::rules::script_flags(&ep, height, crate::rules::verify_all_scripts());
+        if let Err(b) = crate::rules::check(&ep, blk, height, &spent, flags) {
+            return Err(StoreError::InvalidBlock { block: hash.0, why: format!("height {height}: tx {}: {}", b.tx, b.why) });
         }
     }
 
