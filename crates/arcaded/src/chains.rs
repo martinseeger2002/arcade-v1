@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const MODES: &[&str] = &["light", "chain", "index", "full", "shared"];
-pub const INDEXES: &[&str] = &["addresses", "messages", "ledger", "profiles", "ord", "names", "maps", "tokens", "collections", "runes", "dunes"];
+pub const INDEXES: &[&str] = &["addresses", "messages", "ledger", "profiles", "ord", "names", "maps", "tokens", "collections", "dogefeed", "runes", "dunes"];
 pub const COMING: &[&str] = &["runes", "dunes"];
 const HOME_DEFAULT: &[&str] = &["ledger", "profiles"];
 
@@ -51,6 +51,7 @@ pub fn indexer_name(index: &str) -> &'static str {
         "profiles" => "profiles.v1",
         "messages" => "messages.v1",
         "ord" | "names" | "maps" | "tokens" => "ord.v1",
+        "dogefeed" => "dproto.v1",
         _ => "",
     }
 }
@@ -71,6 +72,7 @@ pub(crate) fn tables_of(index: &str) -> Vec<String> {
         "maps" => s(&[arcade_ledger::maps::MAP]),
         "tokens" => s(&[arcade_ledger::tokens::TICK, arcade_ledger::tokens::BAL, arcade_ledger::tokens::HOLDER, arcade_ledger::tokens::XFER]),
         "collections" => s(arcade_ledger::collreg::TABLES),
+        "dogefeed" => s(&arcade_ledger::dproto::tables()),
         _ => vec![],
     }
 }
@@ -92,6 +94,10 @@ fn normalize(p: &ChainParams, indexes: &[String], home: bool) -> Result<Vec<Stri
         }
         if ix == "dunes" && p.key != "doge" {
             return Err("dunes are a Dogecoin protocol; they aren't on ".to_string() + p.name);
+        }
+        // D:// (the DogeFeed Protocol) is written on Dogecoin.
+        if ix == "dogefeed" && p.key != "doge" {
+            return Err("DogeFeed (D://) is a Dogecoin protocol; it isn't on ".to_string() + p.name);
         }
         if COMING.contains(&ix.as_str()) {
             return Err(format!("the {ix} index is coming; it is not available yet"));
@@ -119,6 +125,7 @@ fn register_shared(node: &Node, p: &'static ChainParams, indexes: &[String], sha
             "ledger" => node.chain.add_indexer(c, Arc::new(arcade_ledger::engine::LedgerIndexer)),
             "profiles" => node.chain.add_indexer(c, Arc::new(arcade_ledger::index::ProfileIndexer)),
             "messages" => node.chain.add_indexer(c, Arc::new(arcade_ledger::messages::MessageIndexer)),
+            "dogefeed" => node.chain.add_indexer(c, Arc::new(arcade_ledger::dproto::DprotoIndexer)),
             "ord" => {
                 let riders: Vec<&str> = indexes.iter().map(|s| s.as_str()).filter(|i| is_rider(i)).collect();
                 node.chain.remove_indexer(c, "ord.v1");
@@ -683,6 +690,7 @@ fn label(p: &ChainParams, ix: &str) -> String {
         "maps" => "Maps".into(),
         "tokens" => format!("{} tokens", arcade_ledger::tokens::protocol(p).map(|x| x.0).unwrap_or("Token").to_uppercase()),
         "collections" => "Collections".into(),
+        "dogefeed" => "DogeFeed".into(),
         _ => ix.into(),
     }
 }
@@ -810,6 +818,7 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
         let start = match ix.as_str() {
             "ledger" => arcade_ledger::engine::gates(p).activation as u64,
             "profiles" | "messages" => p.index_start as u64,
+            "dogefeed" => arcade_ledger::dproto::START_DOGE as u64,
             _ => ord_start(p).unwrap_or(0) as u64,
         };
         let running = node.chain.indexers_for(c).contains(&name);
@@ -914,7 +923,7 @@ pub fn list(node: &Node) -> Value {
             json!({"key": p.key, "name": p.name, "installed": st["installed"], "home": st["home"], "mode": st["mode"],
                    "indexes": st["indexes"], "overall": st["overall"], "state": st["state"],
                    "ord": ord_start(p).is_some(), "tokens": arcade_ledger::tokens::protocol(p).map(|x| x.0.to_uppercase()),
-                   "dunes": p.key == "doge", "runes": p.key == "btc", "sizes": crate::sizes::for_chain(node, p.key),
+                   "dunes": p.key == "doge", "dogefeed": p.key == "doge", "runes": p.key == "btc", "sizes": crate::sizes::for_chain(node, p.key),
                    "offers": node.offers_for(p.key).len(),
                    "borrowed": st["borrowed"] == true, "lenders": st["lenders"], "tip": st["tip"], "floor": st["floor"], "mismatch": st["mismatch"],
                    "queued": queued_at(node, p.key)})

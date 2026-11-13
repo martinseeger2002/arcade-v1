@@ -288,6 +288,8 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "referee.get" => Ok(crate::refereesvc::setting(node)),
         "referee.set" => crate::refereesvc::set(node, &s("url").unwrap_or_default()),
         "collections.known_get" => Ok(serde_json::json!({"known": crate::knowncoll::enabled(node)})),
+        "dogefeed.registrar" => crate::dproto::registrar(node, req),
+        "dogefeed.registrars_add" | "dogefeed.registrars_remove" => crate::dproto::registrars_edit(node, req["cmd"].as_str().unwrap_or(""), req),
         "collections.known_set" => crate::knowncoll::set(node, req["on"] == true),
         "realtime.lanes" => crate::realtime::fast::lanes(node, &s("token").ok_or("token required")?),
         "ring.send" => crate::ringsvc::send(node, &s("page").ok_or("page required")?, &s("to").unwrap_or_default(), &s("line").unwrap_or_default(), &s("link").unwrap_or_default()),

@@ -8,6 +8,7 @@ pub mod collreg;
 pub mod cards;
 pub mod content;
 pub mod digidollar;
+pub mod dproto;
 pub mod engine;
 pub mod extract;
 pub mod index;
