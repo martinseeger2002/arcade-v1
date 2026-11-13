@@ -125,19 +125,28 @@ pub fn on(node: &Node) -> bool {
     node.extra.lock().unwrap().get("doge").is_some_and(|r| r.indexes.iter().any(|i| i == "dogefeed"))
 }
 
+static WELL_KNOWN_TRIED: Mutex<Option<Instant>> = Mutex::new(None);
+
 /// DogeFeed's .well-known, fetched once a day while the dogefeed index is on (its keys rotate by new kids).
 pub fn run(node: std::sync::Arc<Node>) {
+    let mut handles_at: Option<Instant> = None;
     loop {
         let kept: Value = meta_get(&node, META_WELL_KNOWN).and_then(|v| serde_json::from_slice(&v).ok()).unwrap_or(Value::Null);
         let age = arcade_app::now().saturating_sub(kept["at"].as_u64().unwrap_or(0));
-        if on(&node) && age > 86_400 {
+        // Handles: as soon as the index is on after a start, then every half hour (one pass over ~730k winning names).
+        if on(&node) && handles_at.is_none_or(|t| t.elapsed() > Duration::from_secs(1800)) {
+            refresh_handles(&node);
+            handles_at = Some(Instant::now());
+        }
+        if on(&node) && age > 86_400 && WELL_KNOWN_TRIED.lock().unwrap().is_none_or(|t| t.elapsed() > Duration::from_secs(3600)) {
+            *WELL_KNOWN_TRIED.lock().unwrap() = Some(Instant::now());
             let got = ureq::get(WELL_KNOWN).timeout(Duration::from_secs(20)).set("user-agent", "arcade/1.0").call()
                 .ok().and_then(|r| r.into_json::<Value>().ok());
             if let Some(doc) = got.filter(|d| d["dproto"]["registrar_keys"].is_array()) {
                 let _ = meta_put(&node, META_WELL_KNOWN, json!({"at": arcade_app::now(), "doc": doc}).to_string().as_bytes());
             }
         }
-        std::thread::sleep(Duration::from_secs(3600));
+        std::thread::sleep(Duration::from_secs(60));
     }
 }
 
@@ -635,49 +644,46 @@ fn judge_action(rows: &Rows, regs: &[Registrar], rec: &Value) -> Value {
 
 // ---------------- handles ----------------
 
-/// An address's DogeFeed handle as the chain says it: the one `.dogefeed` name it holds whose inscription is that
-/// name's winning claim (DogeFeed's rule: the earliest valid name inscription wins). An address holding several
-/// (a wallet keeping names for others) names none: nothing on chain says which is its own. Handles DogeFeed keeps
-/// off chain (most of them) aren't known here. Needs the ord and names indexes on Dogecoin; kept 10 minutes.
-pub fn handle_of(node: &Node, address: &str) -> Option<String> {
-    static CACHE: Mutex<Option<HashMap<String, (Instant, Option<String>)>>> = Mutex::new(None);
-    if let Some((t, v)) = CACHE.lock().unwrap().get_or_insert_with(HashMap::new).get(address) {
-        if t.elapsed() < Duration::from_secs(600) {
-            return v.clone();
-        }
-    }
+/// Every winning `.dogefeed` name (the names index's "spec" reading: the earliest valid name inscription wins) by
+/// its holder now, read in one pass in the background ([`refresh_handles`]); lookups only read this map.
+static HANDLES: Mutex<Option<HashMap<String, Vec<String>>>> = Mutex::new(None);
+
+/// One pass over the names index's winning claims: the `.dogefeed` names and who holds each now.
+pub fn refresh_handles(node: &Node) {
     let p = doge();
-    let found = (|| {
-        let script = arcade_ledger::address::script_for_address(p, address)?;
-        let ids = arcade_ledger::ord::held_by(&node.chain, p, &script).ok()?;
-        let mut won: Vec<String> = Vec::new();
-        // Every inscription it holds (a collector holds tens of thousands; the answer is kept 10 minutes).
-        for id in ids.iter().take(100_000) {
-            let Some(meta) = arcade_ledger::ord::inscription(&node.chain, p, id) else { continue };
-            if meta["size"].as_u64().is_none_or(|n| n > 64) || !meta["ct"].as_str().is_some_and(|c| c.starts_with("text/")) {
-                continue;
-            }
-            let Ok((_, body)) = arcade_ledger::ord::content(&node.chain, p, id) else { continue };
-            let name = String::from_utf8_lossy(&body).trim().to_lowercase();
-            if !name.ends_with(".dogefeed") || name.len() <= ".dogefeed".len() {
-                continue;
-            }
-            if arcade_ledger::names::lookup(&node.chain, p.chain_no, &name).iter().any(|(_, _, w)| w == id) && !won.contains(&name) {
-                won.push(name);
-                if won.len() > 1 {
-                    return None;
-                }
+    let c = p.chain_no;
+    let mut wins: Vec<(String, String)> = Vec::new();
+    let prefix = KeyBuf::new().u16(c).u8(0).done(); // reading 0: "spec"
+    let _ = node.chain.store(c).read(|r| r.for_each_prefix(arcade_ledger::names::WIN, &prefix, |k, v| {
+        if let Ok(name) = std::str::from_utf8(&k[prefix.len()..]) {
+            if name.ends_with(".dogefeed") && name.len() > ".dogefeed".len() && v.len() == 44 {
+                wins.push((name.to_string(), arcade_ledger::ord::iid_str(&v[8..])));
             }
         }
-        won.pop()
-    })();
-    let mut c = CACHE.lock().unwrap();
-    let m = c.get_or_insert_with(HashMap::new);
-    if m.len() > 50_000 {
-        m.clear();
+        Ok(true)
+    }));
+    let mut by_holder: HashMap<String, Vec<String>> = HashMap::new();
+    for (name, iid) in wins {
+        if let Some(owner) = arcade_ledger::ord::inscription(&node.chain, p, &iid).and_then(|m| m["owner"].as_str().map(String::from)) {
+            by_holder.entry(owner).or_default().push(name);
+        }
     }
-    m.insert(address.to_string(), (Instant::now(), found.clone()));
-    found
+    *HANDLES.lock().unwrap() = Some(by_holder);
+}
+
+/// An address's DogeFeed handle as the chain says it: the one winning `.dogefeed` name it holds. An address holding
+/// several (a wallet keeping names for others) names none: nothing on chain says which is its own. Handles DogeFeed
+/// keeps off chain aren't known here. Needs the ord and names indexes on Dogecoin; the map is rebuilt hourly.
+pub fn handle_of(_node: &Node, address: &str) -> Option<String> {
+    one_name(HANDLES.lock().unwrap().as_ref()?, address)
+}
+
+/// The handle rule: exactly one winning name held.
+fn one_name(by_holder: &HashMap<String, Vec<String>>, address: &str) -> Option<String> {
+    match by_holder.get(address).map(|v| v.as_slice()) {
+        Some([one]) => Some(one.clone()),
+        _ => None,
+    }
 }
 
 /// Handles beside the addresses a record names (author, account, recipient, a followed target).
@@ -1147,6 +1153,17 @@ mod tests {
         // Without DogeFeed's key nothing is valid: a record counts only with a registrar known here.
         let rec = rows.by_txid(f["like"]["txid"].as_str().unwrap()).unwrap();
         assert_eq!(judge_with(&rows, &[], &rec)["valid"], false);
+    }
+
+    #[test]
+    fn a_handle_is_the_one_name_an_address_holds() {
+        let mut m = HashMap::new();
+        m.insert("DOne".to_string(), vec!["billy.dogefeed".to_string()]);
+        m.insert("DMany".to_string(), vec!["a.dogefeed".to_string(), "b.dogefeed".to_string()]);
+        let pick = |a: &str| one_name(&m, a);
+        assert_eq!(pick("DOne").as_deref(), Some("billy.dogefeed"));
+        assert_eq!(pick("DMany"), None, "a wallet keeping names for others names none");
+        assert_eq!(pick("DNone"), None);
     }
 
     #[test]
