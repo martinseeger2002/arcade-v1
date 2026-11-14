@@ -145,8 +145,9 @@ pub fn check_info(params: &ChainParams, blk: &Block, height: u32, spent: &[Vec<S
                 return Err(broke(&tx.txid, format!("{sigops} signature operations, over {} (bad-blk-sigops)", br.max_sigops)));
             }
             if let Some(flags) = scripts {
+                let prefix = (br.sighash_prefix)(height);
                 for (i, s) in sp.iter().enumerate() {
-                    if let Err(e) = bitcoinconsensus::verify_with_flags(s.script, s.value, &tx.raw, None, i, flags) {
+                    if let Err(e) = bitcoinconsensus::verify_with_flags_and_sighash_prefix(s.script, s.value, &tx.raw, None, i, flags, prefix) {
                         return Err(broke(&tx.txid, format!("input {i}: script check failed ({e:?}) (mandatory-script-verify-flag-failed)")));
                     }
                 }
@@ -335,4 +336,28 @@ pub fn replay(db: &crate::ChainDb, params: &ChainParams, from: u32, to: u32, thr
         r.done_to = to;
     }
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use arcade_chain::luckycoin;
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// A real Luckycoin spend in block 277,183 (c4be8c68…): its signature hashes CHAIN_ID first,
+    /// so it verifies with the revival prefix and fails with Bitcoin's plain hashing.
+    #[test]
+    fn luckycoin_revival_signature() {
+        let tx = hex("0100000001311e348956d0df7c0b9fbeaa9b0c7b352f5382f6a9d31839475acdfc4b08b267010000006b483045022100c166f400d8bcf8390bd7723a5c3b746a7f3f3c7fe102503b7f1ad74efcf606600220238965a438e895f495dc1d3a0109b86de38bd41466661c553bd34864022713eb012102492e72af081d094531669200bdee2645732d89f777a8ad4f635f82c9c2c5eaf3feffffff02439bed08000000001976a914de809a4f6437ccb90a54688fd572d058958d01d488acad600803000000001976a9148c35ba800b58a0da61198fa873fe72fbfc6a6a2588acbd3a0400");
+        let spk = hex("76a914242503a312dbc8cc3b6d10fc4cd242c1a8d11b9c88ac");
+        let flags = arcade_chain::params::SCRIPT_P2SH | arcade_chain::params::SCRIPT_DERSIG;
+        let prefix = luckycoin::sighash_prefix(277_183);
+        assert!(prefix.is_some() && luckycoin::sighash_prefix(276_499).is_none());
+        assert!(bitcoinconsensus::verify_with_flags_and_sighash_prefix(&spk, 0, &tx, None, 0, flags, prefix).is_ok());
+        assert!(bitcoinconsensus::verify_with_flags_and_sighash_prefix(&spk, 0, &tx, None, 0, flags, None).is_err());
+        // The prefix lasts for one call only.
+        assert!(bitcoinconsensus::verify_with_flags(&spk, 0, &tx, None, 0, flags).is_err());
+    }
 }
