@@ -299,6 +299,12 @@ pub fn hold_frame(node: &Node) -> Frame {
         } else {
             json!({"mode": mode, "h": h, "blocks": "all", "ord": "all", "tok": "all", "ix": ix})
         };
+        // What connecting the chain here found against its rules not switched on (evidence for
+        // switching them on; chains.rule_reports gathers the mesh's).
+        let mut v = v;
+        if let Some(w) = node.chain.rule_watch(p.chain_no).ok().flatten() {
+            v["rw"] = crate::rulecheck::watch_json(&w);
+        }
         chains.insert(p.net.into(), v);
     }
     // o/at/sig: whose hold this is and when, signed, so it can be passed on across the mesh
@@ -733,7 +739,11 @@ pub fn on_hold(node: &Node, from: &str, h: &Value) {
     for (k, v) in c.iter().take(32) {
         if arcade_chain::params::by_net(k).is_some() {
             let ix: Vec<Value> = v["ix"].as_array().map(|a| a.iter().take(16).filter(|x| x.as_str().is_some_and(|s| s.len() <= 16)).cloned().collect()).unwrap_or_default();
-            clean.insert(k.clone(), json!({"mode": v["mode"], "h": v["h"], "blocks": v["blocks"], "ord": v["ord"], "tok": v["tok"], "lane": v["lane"], "pos": v["pos"], "ix": ix}));
+            let mut e = json!({"mode": v["mode"], "h": v["h"], "blocks": v["blocks"], "ord": v["ord"], "tok": v["tok"], "lane": v["lane"], "pos": v["pos"], "ix": ix});
+            if let Some(rw) = crate::rulecheck::clean_watch(&v["rw"]) {
+                e["rw"] = rw;
+            }
+            clean.insert(k.clone(), e);
         }
     }
     if at > 0 {

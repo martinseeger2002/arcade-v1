@@ -58,3 +58,48 @@ blocks, and V1 must follow Core's chain.
 
 On `main` before step 1, the first 16 scenarios gave 6 match, 3 gaps and 7 FAIL. With steps 1
 to 3, all 38 match: no gaps.
+
+# The SegWit-era harness: V1 against a real Litecoin Core
+
+`ltcnet.py` does the same against Litecoin Core 0.21 in `-regtest`, for the rules Bitcoin Core
+0.13 and later chains add. V1 follows with `regtest_follow ... ltcregtest`.
+
+```sh
+cargo build --release -p arcade-chaindb --example regtest_follow
+unshare -Urn sh -c 'ip link set lo up; python3 tests/regtest/ltcnet.py'
+```
+
+- **What it needs:** `litecoind` (0.21.x) on `PATH` or in `~/.local/bin`, and Python 3 with the
+  `cryptography` package. Schnorr signatures (BIP340) are made by a small pure-Python secp256k1.
+- **Options:** `--litecoind PATH`, `--follow PATH`, `--keep`, `--only a|b`.
+- **Two runs:** A keeps MWEB off (`-vbparams`) and gives both hand-built good and bad blocks. B
+  lets MWEB activate and has Core's wallet peg in, move coins inside MWEB and peg out. Once MWEB
+  is on, every block needs a real extension block, so bad blocks are built in run A only.
+- **Each scenario states Core's verdict** ("both take it", or "Core: <reason>"). If Core's
+  answer differs, the scenario is marked BUILD and fails the run: the block wasn't what the
+  scenario meant, so it proves nothing about V1.
+
+| Run A scenario | Core | V1 must |
+|---|---|---|
+| A version-4 block once SegWit is on | bad-version (whole nVersion under 0x20000000) | refuse |
+| P2WSH OP_TRUE spend; signed P2WSH spend (BIP143) | takes them | take them |
+| Witness spend with no commitment; wrong commitment with and without witness data | unexpected-witness; bad-witness-merkle-match | refuse |
+| Witness data on a non-witness spend | script check fails | refuse |
+| P2WSH signed over the wrong amount | script check fails | refuse |
+| Witness CHECKMULTISIG with a non-empty dummy; then an empty one | NULLDUMMY fails; takes it | the same |
+| Taproot key-path spend with a broken signature; then a good one | fails; takes it | the same |
+| 90,000 witness signature operations | bad-blk-sigops | refuse |
+| A block of weight over 4,000,000 | bad-blk-weight | refuse |
+| Version-2 spend with a 10-block relative lock, 5 and then 10 blocks in | bad-txns-nonfinal; takes it | the same |
+| The same sequence on a version-1 transaction | takes it | take it |
+| 512-second relative lock, at once and then later | bad-txns-nonfinal; takes it | the same |
+| Lock time between the median time past and the block's time (BIP113) | bad-txns-nonfinal | refuse |
+| `<10> CHECKSEQUENCEVERIFY` spent with sequence 5, then 10 | fails; takes it | the same |
+| Coinbase one unit over a halved subsidy; then exact | bad-cb-amount; takes it | the same |
+
+Run B: the first MWEB block (with a peg-in), a transfer inside MWEB (its fee leaves through
+the HogEx), a peg-out, its spend 6 blocks later, and five more mixed blocks. V1 must follow
+every one. MWEB's own rules (kernels, range proofs, the peg-in and peg-out matching) aren't
+checked by V1.
+
+Run A: 26 match. Run B: 5 match.

@@ -63,6 +63,13 @@ impl Tx {
             && self.outputs[0].script_pubkey.is_empty()
     }
 
+    /// Whether serialized transaction bytes are a Litecoin HogEx (the MWEB flag in the extended
+    /// serialization), read without parsing the rest.
+    pub fn raw_is_hogex(raw: &[u8], fmt: &Format) -> bool {
+        let o = if fmt.tx_time { 8 } else { 4 };
+        fmt.mweb && raw.len() > o + 1 && raw[o] == 0 && raw[o + 1] & FLAG_MWEB != 0
+    }
+
     pub fn has_witness(&self) -> bool {
         self.inputs.iter().any(|i| !i.witness.is_empty())
     }

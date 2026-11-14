@@ -1,7 +1,9 @@
 //! Core's script bookkeeping outside the interpreter, byte for byte as Bitcoin Core 0.14 (and so
 //! Dogecoin / Pepecoin 1.14) has it: signature-operation counts (CScript::GetSigOpCount,
 //! GetLegacySigOpCount, GetP2SHSigOpCount), the BIP34 height push (`CScript() << nHeight`) and
-//! IsFinalTx. Running scripts is libbitcoinconsensus's job (arcade-chaindb).
+//! IsFinalTx; and from Bitcoin Core 0.13 on, witness signature operations (CountWitnessSigOps)
+//! and BIP68 sequence locks (CalculateSequenceLocks). Running scripts is libbitcoinconsensus's
+//! job (arcade-chaindb).
 
 use crate::tx::Tx;
 
@@ -128,6 +130,90 @@ pub fn is_final(tx: &Tx, height: u32, time: u32) -> bool {
         return true;
     }
     tx.inputs.iter().all(|i| i.sequence == u32::MAX)
+}
+
+/// A witness program (`IsWitnessProgram`): a version push (OP_0, OP_1..OP_16) then one push of
+/// 2 to 40 bytes, the whole script 4 to 42 bytes. The version and the program.
+pub fn witness_program(s: &[u8]) -> Option<(u8, &[u8])> {
+    if s.len() < 4 || s.len() > 42 {
+        return None;
+    }
+    if s[0] != OP_0 && !(OP_1..=OP_16).contains(&s[0]) {
+        return None;
+    }
+    if s[1] as usize + 2 != s.len() {
+        return None;
+    }
+    let v = if s[0] == OP_0 { 0 } else { s[0] - OP_1 + 1 };
+    Some((v, &s[2..]))
+}
+
+/// The last item a push-only script pushes (P2SH's redeem script), or None when it isn't push only.
+fn last_push(script_sig: &[u8]) -> Option<&[u8]> {
+    let (mut pc, mut last): (usize, &[u8]) = (0, &[]);
+    while pc < script_sig.len() {
+        let (op, data) = get_op(script_sig, &mut pc)?;
+        if op > OP_16 {
+            return None;
+        }
+        last = data;
+    }
+    Some(last)
+}
+
+fn witness_sig_ops(version: u8, program: &[u8], witness: &[Vec<u8>]) -> u32 {
+    match (version, program.len()) {
+        (0, 20) => 1,
+        (0, 32) => witness.last().map_or(0, |ws| sig_op_count(ws, true)),
+        _ => 0,
+    }
+}
+
+/// CountWitnessSigOps (with SCRIPT_VERIFY_WITNESS on): a native witness program's, or a P2SH-wrapped
+/// one's (`p2sh`: P2SH checked too); 0 for anything else. Version 0 only: P2WPKH counts 1, P2WSH
+/// its witness script's exact count; Taproot spends count none here (they have a budget instead).
+pub fn witness_sig_op_count(script_sig: &[u8], script_pubkey: &[u8], witness: &[Vec<u8>], p2sh: bool) -> u32 {
+    if let Some((v, prog)) = witness_program(script_pubkey) {
+        return witness_sig_ops(v, prog, witness);
+    }
+    if p2sh && is_p2sh(script_pubkey) {
+        // Core: IsPushOnly, then the last push.
+        if let Some((v, prog)) = last_push(script_sig).and_then(witness_program) {
+            return witness_sig_ops(v, prog, witness);
+        }
+    }
+    0
+}
+
+/// BIP68's flags on an input's nSequence.
+pub const SEQUENCE_DISABLE: u32 = 1 << 31;
+pub const SEQUENCE_TYPE_TIME: u32 = 1 << 22;
+pub const SEQUENCE_MASK: u32 = 0x0000_ffff;
+pub const SEQUENCE_GRANULARITY: u32 = 9;
+
+/// CalculateSequenceLocks: the last height and the last median time past at which `tx` may NOT yet
+/// be mined (-1: no lock), given each input's coin height and the median time past of the block
+/// before that coin's (`coin_mtp`, asked only for time locks). Off for a version below 2, compared
+/// unsigned as Core does (a negative version has them on).
+pub fn sequence_locks(tx: &Tx, coin_heights: &[u32], coin_mtp: &mut dyn FnMut(u32) -> Option<i64>) -> Option<(i64, i64)> {
+    let (mut min_height, mut min_time) = (-1i64, -1i64);
+    if (tx.version as u32) < 2 {
+        return Some((min_height, min_time));
+    }
+    for (inp, &ch) in tx.inputs.iter().zip(coin_heights) {
+        if inp.sequence & SEQUENCE_DISABLE != 0 {
+            continue;
+        }
+        let n = (inp.sequence & SEQUENCE_MASK) as i64;
+        if inp.sequence & SEQUENCE_TYPE_TIME != 0 {
+            // Core: the median time past of the block before the coin's, max(height - 1, 0).
+            let t = coin_mtp(ch.saturating_sub(1))?;
+            min_time = min_time.max(t + (n << SEQUENCE_GRANULARITY) - 1);
+        } else {
+            min_height = min_height.max(ch as i64 + n - 1);
+        }
+    }
+    Some((min_height, min_time))
 }
 
 #[cfg(test)]
