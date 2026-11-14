@@ -582,6 +582,11 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "chains.check_rules" => crate::rulecheck::start(node.self_arc(), &s("key").ok_or("key required")?, req["from"].as_u64(), req["to"].as_u64(), req["threads"].as_u64(), req["scripts"] == "assume"),
         "chains.check_rules_status" => Ok(crate::rulecheck::status(s("key").as_deref())),
         "chains.check_rules_cancel" => crate::rulecheck::cancel(&s("key").ok_or("key required")?),
+        "update.status" => Ok(crate::updater::status(node)),
+        "update.set" => crate::updater::set(node, req["on"] == true),
+        "update.check" => crate::updater::check().map(|_| crate::updater::status(node)),
+        "update.now" => crate::updater::update_now(node.self_arc()),
+        "chains.rule_reports" => Ok(crate::rulecheck::reports(node, s("key").as_deref())),
         "chains.copy_verify" => {
             let key = s("key").ok_or("key required")?;
             let p = arcade_chain::params::by_key(&key).ok_or("unknown chain")?;

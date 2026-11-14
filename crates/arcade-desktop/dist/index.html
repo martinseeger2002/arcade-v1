@@ -31,6 +31,7 @@
   <button data-tab="mine">Mine</button>
   <button data-tab="activity">Activity</button>
   <button data-tab="apitab">API</button>
+  <button data-tab="options">Options</button>
 </nav>
 
 <main>
@@ -323,6 +324,21 @@
     </div>
   </section>
 
+  <!-- Options -->
+  <section id="options" class="tab">
+    <h1>Options</h1>
+    <h2>Updates</h2>
+    <div class="grid">
+      <div class="card"><div class="k">This version</div><div class="v" id="o-ver">—</div></div>
+      <div class="card"><div class="k">Newest release</div><div class="v" id="o-new">—</div></div>
+      <div class="card"><div class="k">Last looked</div><div class="v" id="o-last">—</div></div>
+    </div>
+    <div class="row"><label class="sw"><input type="checkbox" id="o-auto"> Update automatically</label></div>
+    <p class="opt">Off unless you turn it on. When on, this arcade looks for a new release every 6 hours and installs it by itself: the download is checked against the release's SHA-256, the old programs are kept beside the new ones (as .prev), and the service restarts cleanly. Your wallet, @handle, messages and chains stay as they are. If the app window is open, open it again after an update to load the new version.</p>
+    <div class="row"><button id="o-check">Check now</button><button class="primary" id="o-now" disabled>Update now</button></div>
+    <p class="msg" id="o-msg"></p>
+  </section>
+
   <!-- Activity -->
   <section id="activity" class="tab">
     <h1>Activity</h1>
@@ -338,5 +354,6 @@
 <script src="apitab.js"></script>
 <script src="apps.js"></script>
 <script src="rings.js"></script>
+<script src="options.js"></script>
 </body>
 </html>

@@ -1,18 +1,20 @@
-//! The V1 side of the consensus harness (tests/regtest): follow a file of raw Pepecoin regtest
-//! blocks with the real `Syncer` (every header and block check it runs on a live chain), as if
-//! peers offered all of them, every branch included. Prints where V1 ends up, as JSON.
-//!   cargo run --release -p arcade-chaindb --example regtest_follow -- <chain.mdbx> <blocks.hex>
+//! The V1 side of the consensus harnesses (tests/regtest): follow a file of raw regtest blocks
+//! (Pepecoin's, or Litecoin's with `ltcregtest`) with the real `Syncer` (every header and block
+//! check it runs on a live chain), as if peers offered all of them, every branch included. Prints
+//! where V1 ends up, as JSON.
+//!   cargo run --release -p arcade-chaindb --example regtest_follow -- <chain.mdbx> <blocks.hex> [pepregtest|ltcregtest]
 //! The store is kept between runs, like a node that stays up while new blocks arrive.
 use arcade_chain::auxpow::AuxPow;
 use arcade_chain::encode::Reader;
 use arcade_chain::p2p::HeaderEntry;
-use arcade_chain::params::PEPECOIN_REGTEST;
+use arcade_chain::params::{regtest_by_key, ChainParams};
 use arcade_chain::{Block, Hash256, Header};
 use arcade_chaindb::sync::{BlockSource, Syncer};
 use arcade_chaindb::ChainDb;
 use std::collections::{HashMap, HashSet};
 
 struct FileSource<'a> {
+    p: &'static ChainParams,
     db: &'a ChainDb,
     order: Vec<Hash256>,
     entries: HashMap<Hash256, (Vec<u8>, HeaderEntry)>,
@@ -27,7 +29,7 @@ impl BlockSource for FileSource<'_> {
     /// The first header V1 doesn't have, in the order blocks were made, whatever the locator:
     /// one at a time, so a refused header is known exactly and nothing behind it is lost.
     fn get_headers(&mut self, _locator: &[Hash256]) -> Result<Vec<HeaderEntry>, String> {
-        let c = PEPECOIN_REGTEST.chain_no;
+        let c = self.p.chain_no;
         self.last = None;
         for h in &self.order {
             if self.refused.contains(h) || self.db.header(c, h).map_err(|e| e.to_string())?.is_some() {
@@ -48,29 +50,29 @@ impl BlockSource for FileSource<'_> {
 
 /// Header (and AuxPoW) of a raw block, even when the transactions don't parse: a block whose
 /// body is broken still has a header a peer can announce.
-fn entry(raw: &[u8]) -> HeaderEntry {
-    if let Ok(b) = Block::parse_with(raw, &PEPECOIN_REGTEST.format) {
+fn entry(p: &ChainParams, raw: &[u8]) -> HeaderEntry {
+    if let Ok(b) = Block::parse_with(raw, &p.format) {
         return HeaderEntry { header: b.header, auxpow: b.auxpow };
     }
     let mut r = Reader::new(raw);
     let header = Header::decode(&mut r).expect("header");
-    let auxpow = if PEPECOIN_REGTEST.format.has_auxpow(&header) { Some(AuxPow::decode(&mut r).expect("auxpow")) } else { None };
+    let auxpow = if p.format.has_auxpow(&header) { Some(AuxPow::decode(&mut r).expect("auxpow")) } else { None };
     HeaderEntry { header, auxpow }
 }
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    let p = &PEPECOIN_REGTEST;
+    let p = regtest_by_key(a.get(3).map_or("pepregtest", |s| s.as_str())).expect("regtest chain");
     let c = p.chain_no;
     let db = ChainDb::open(&a[1]).expect("open");
-    let mut src = FileSource { db: &db, order: Vec::new(), entries: HashMap::new(), refused: HashSet::new(), last: None };
+    let mut src = FileSource { p, db: &db, order: Vec::new(), entries: HashMap::new(), refused: HashSet::new(), last: None };
     for line in std::fs::read_to_string(&a[2]).expect("blocks file").lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         let raw = hex::decode(line).expect("hex");
-        let e = entry(&raw);
+        let e = entry(p, &raw);
         let h = p.block_id(&e.header);
         // A later copy of the same block replaces the earlier one (another peer's copy, after
         // a damaged one).

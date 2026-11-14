@@ -3,7 +3,9 @@
 //!
 //! Nothing here touches storage or the network; it is pure and testable.
 
+pub mod altcoins;
 pub mod auxpow;
+pub mod bitcoin;
 pub mod block;
 pub mod dns;
 pub mod dogecoin;

@@ -243,6 +243,19 @@ impl Rd for WriteTxn<'_> {
     }
 }
 
+/// The median time past of the active chain's block at `height`: the median of its and the 10
+/// before its times (fewer near genesis), as Core's GetMedianTimePast.
+pub(crate) fn mtp_at<R: Rd>(r: &R, c: u16, height: u32) -> Result<Option<u32>> {
+    let mut times = Vec::with_capacity(11);
+    for h in height.saturating_sub(10)..=height {
+        let Some(v) = r.get(HEIGHT, &k_height(c, h))? else { return Ok(None) };
+        let Some(rec) = header_rec(r, c, &Hash256(v[..32].try_into().unwrap()))? else { return Ok(None) };
+        times.push(rec.header.time);
+    }
+    times.sort_unstable();
+    Ok(Some(times[times.len() / 2]))
+}
+
 pub(crate) fn header_rec<R: Rd>(r: &R, c: u16, hash: &Hash256) -> Result<Option<HeaderRec>> {
     let Some(ix) = r.get(HEADERS, &k_header(c, &hash.0))? else { return Ok(None) };
     let (height, b, status) = (be_u32(&ix, 0), be_u32(&ix, 4), ix[8]);
@@ -1071,6 +1084,18 @@ impl ChainDb {
     /// Best known header (most work), which may be ahead of the tip.
     pub fn best_header(&self, c: u16) -> Result<Option<Hash256>> {
         self.store(c).read(|r| Ok(r.get(STATE, &k_state(c, "best"))?.map(|v| Hash256(v[..32].try_into().unwrap()))))
+    }
+
+    /// What connecting this chain's blocks found against its rules not switched on (None: nothing
+    /// connected here under the current rules' revision).
+    pub fn rule_watch(&self, c: u16) -> Result<Option<crate::rules::Watch>> {
+        self.store(c).read(|r| Ok(r.get(STATE, &k_state(c, "rulewatch"))?.and_then(|v| crate::rules::Watch::decode(&v))
+            .filter(|x| x.rev == crate::rules::RULES_REV)))
+    }
+
+    /// The median time past of the active chain's block at `height` (BIP113).
+    pub fn median_time_past(&self, c: u16, height: u32) -> Result<Option<u32>> {
+        self.store(c).read(|r| mtp_at(r, c, height))
     }
 
     pub fn hash_at(&self, c: u16, height: u32) -> Result<Option<Hash256>> {
@@ -2068,9 +2093,9 @@ fn connect_one(
         l.put(ADDR_LOG, &k, &v)
     };
     let mut prevouts: Vec<Vec<Prevout>> = Vec::with_capacity(blk.txs.len());
-    // Per input: the height and coinbase flag of the coin it spends (for rules::check, with
-    // `prevouts`).
-    let mut spent_meta: Vec<Vec<(u32, bool)>> = Vec::with_capacity(blk.txs.len());
+    // Per input: the height, coinbase flag and peg-out flag of the coin it spends (for
+    // rules::check, with `prevouts`).
+    let mut spent_meta: Vec<Vec<(u32, bool, bool)>> = Vec::with_capacity(blk.txs.len());
     for (p, tx) in blk.txs.iter().enumerate() {
         let mut pv = Vec::new();
         let mut meta = Vec::new();
@@ -2108,7 +2133,15 @@ fn connect_one(
                         ((pb, pp), k_pos(c, pb, pp, inp.prevout.vout), coin)
                     }
                 };
-                meta.push((coin.height, coin.coinbase));
+                // A Litecoin MWEB peg-out (a HogEx output after the first) matures in 6 blocks:
+                // only a young coin's transaction is looked at (in this block, or stored).
+                let pegout = params.format.mweb && inp.prevout.vout > 0 && height.saturating_sub(coin.height) < 6 && {
+                    match blk.txs.iter().find(|t| t.txid == inp.prevout.txid) {
+                        Some(t) => t.hogex,
+                        None => w.get(BLOCK_TX, &k_block_tx(c, pb, pp))?.is_some_and(|raw| Tx::raw_is_hogex(&raw, &params.format)),
+                    }
+                };
+                meta.push((coin.height, coin.coinbase, pegout));
                 let sid = script_id(&coin.script);
                 pv.push(Prevout { value: coin.value, script: coin.script.clone() });
                 match cache.as_deref_mut() {
@@ -2182,15 +2215,31 @@ fn connect_one(
 
     // The chain's rules that need the spent coins (rules.rs): broken, nothing of the block is kept.
     let spent: Vec<Vec<crate::rules::Spent>> = prevouts.iter().zip(&spent_meta).map(|(pv, m)| {
-        pv.iter().zip(m).map(|(p, &(h, cb))| crate::rules::Spent { value: p.value, script: &p.script, height: h, coinbase: cb }).collect()
+        pv.iter().zip(m).map(|(p, &(h, cb, pegout))| crate::rules::Spent { value: p.value, script: &p.script, height: h, coinbase: cb, pegout }).collect()
     }).collect();
     // Only the rules switched on for the chain (a replay checks the rest).
     if params.value_rules.is_some_and(|v| v.enforced) || params.block_rules.is_some_and(|b| b.enforced) {
         let ep = crate::rules::enforced_only(params);
         let flags = crate::rules::script_flags(&ep, height, crate::rules::verify_all_scripts());
-        if let Err(b) = crate::rules::check(&ep, blk, height, &spent, flags) {
+        let mtp = |h: u32| mtp_at(w, c, h).ok().flatten();
+        if let Err(b) = crate::rules::check(&ep, blk, height, &spent, flags, &mtp) {
             return Err(StoreError::InvalidBlock { block: hash.0, why: format!("height {height}: tx {}: {}", b.tx, b.why) });
         }
+    }
+
+    // The chain's rules not switched on: checked too, only to write down what they find
+    // (rules::Watch, shared with the mesh as evidence); the block is kept either way. Through the
+    // logged writer, so disconnecting the block takes its count back out.
+    if height > 0 && crate::rules::watched(params) {
+        let mtp = |h: u32| mtp_at(w, c, h).ok().flatten();
+        let flags = crate::rules::script_flags(params, height, crate::rules::verify_all_scripts());
+        let r = crate::rules::check_info(params, blk, height, &spent, flags, &mtp);
+        let k = k_state(c, "rulewatch");
+        let mut wt = w.get(STATE, &k)?.and_then(|v| crate::rules::Watch::decode(&v))
+            .filter(|x| x.rev == crate::rules::RULES_REV)
+            .unwrap_or_else(|| crate::rules::Watch::new(params));
+        wt.add(height, &hash, &r);
+        l.put(STATE, &k, &wt.encode())?;
     }
 
     // Protocol indexes, in the same commit; only those exactly caught up to the parent.

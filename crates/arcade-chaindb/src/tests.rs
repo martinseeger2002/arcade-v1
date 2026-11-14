@@ -964,7 +964,7 @@ fn txs_pending_cleared_when_addresses_removed() {
 fn coin_rules_refuse_what_core_refuses() {
     let f = fixture();
     let mut p = f.p.clone();
-    p.value_rules = Some(arcade_chain::params::ValueRules { max_money: 1_000_000, subsidy: |_, _| 50, maturity: |_| 2, enforced: true });
+    p.value_rules = Some(arcade_chain::params::ValueRules { max_money: 1_000_000, subsidy: |_, _| 50, maturity: |_| 2, pegout_maturity: 0, coinbase_rule: None, stake_reward: None, enforced: true });
     let p: &'static ChainParams = Box::leak(Box::new(p));
     let invalid = |r: arcade_store::Result<Tip>, want: &str| match r {
         Err(arcade_store::StoreError::InvalidBlock { why, .. }) => assert!(why.contains(want), "{why}"),
@@ -988,4 +988,32 @@ fn coin_rules_refuse_what_core_refuses() {
     // Subsidy 50 + fee 1 exactly: fine.
     let tip = f.db.connect_blocks(p, &[block(b2.hash(), vec![tx(&[], &[(51, p2pkh(3))], 3), early], 4)]).unwrap();
     assert_eq!(tip.height, 3);
+}
+
+/// Rules not switched on are watched: a block breaking them is still connected, and the chain's
+/// rule watch report counts it (and takes it back out when the block is disconnected).
+#[test]
+fn rules_not_switched_on_are_watched_not_enforced() {
+    let f = fixture();
+    let mut p = f.p.clone();
+    p.value_rules = Some(arcade_chain::params::ValueRules { max_money: 1_000_000, subsidy: |_, _| 50, maturity: |_| 2, pegout_maturity: 0, coinbase_rule: None, stake_reward: None, enforced: false });
+    let p: &'static ChainParams = Box::leak(Box::new(p));
+    let c = p.chain_no;
+    let b1 = block(f.g.hash(), vec![tx(&[], &[(50, p2pkh(1))], 1)], 2);
+    let b2 = block(b1.hash(), vec![tx(&[], &[(49, p2pkh(2))], 2)], 3);
+    f.db.connect_blocks(p, &[b1.clone(), b2.clone()]).unwrap();
+    let w = f.db.rule_watch(c).unwrap().unwrap();
+    assert_eq!((w.ranges.clone(), w.checked, w.full_reward, w.broken), (vec![(1, 2)], 2, 1, 0));
+    // Over the subsidy: kept (the rule isn't on), written down.
+    let b3 = block(b2.hash(), vec![tx(&[], &[(60, p2pkh(3))], 3)], 4);
+    assert_eq!(f.db.connect_blocks(p, &[b3.clone()]).unwrap().height, 3);
+    let w = f.db.rule_watch(c).unwrap().unwrap();
+    assert_eq!((w.checked, w.broken), (3, 1));
+    assert_eq!(w.first[0].0, 3);
+    assert_eq!(w.first[0].1, b3.hash());
+    assert!(w.first[0].2.contains("bad-cb-amount"), "{:?}", w.first);
+    // Disconnecting it takes the count back out.
+    f.db.disconnect_tip(c).unwrap();
+    let w = f.db.rule_watch(c).unwrap().unwrap();
+    assert_eq!((w.checked, w.broken), (2, 0));
 }

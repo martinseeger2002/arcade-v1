@@ -36,6 +36,15 @@ pub struct ValueRules {
     pub subsidy: fn(u32, &Hash256) -> u64,
     /// The blocks a coinbase made at `height` must wait before it can be spent.
     pub maturity: fn(u32) -> u32,
+    /// The blocks a Litecoin MWEB peg-out (a HogEx output after the first) must wait (Litecoin
+    /// PEGOUT_MATURITY, 6); 0 on chains without MWEB.
+    pub pegout_maturity: u32,
+    /// What else a chain asks of the coinbase, given its height and the block's subsidy (a
+    /// development fund's outputs: Wojakcoin, Junkcoin); the reason when it fails.
+    pub coinbase_rule: Option<fn(u32, &crate::tx::Tx, u64) -> Result<(), String>>,
+    /// Proof of stake (Kotia): a block whose second transaction is a coinstake pays its staker at
+    /// most this plus the block's fees (the coinstake's out less in), and its coinbase nothing.
+    pub stake_reward: Option<fn(u32) -> u64>,
     /// Checked when a block is connected. False until a replay of the chain's whole history
     /// (chains.check_rules) found no real block breaking them; the replay checks them either way.
     pub enforced: bool,
@@ -48,13 +57,22 @@ pub fn check_block_body(params: &ChainParams, b: &crate::block::Block) -> Result
     if b.hash() == params.genesis_hash() {
         return Ok(());
     }
-    b.check()
+    b.check_with(params.coinbase_script_max)
 }
 
 /// Script flags, as libbitcoinconsensus (and Core's interpreter) number them.
 pub const SCRIPT_P2SH: u32 = 1 << 0;
 pub const SCRIPT_DERSIG: u32 = 1 << 2;
+pub const SCRIPT_NULLDUMMY: u32 = 1 << 4;
 pub const SCRIPT_CHECKLOCKTIMEVERIFY: u32 = 1 << 9;
+/// BIP112, and with it BIP68 sequence locks and BIP113 median-time lock times (Core turns all three
+/// on with the CSV deployment).
+pub const SCRIPT_CHECKSEQUENCEVERIFY: u32 = 1 << 10;
+/// SegWit: witness scripts, and with it the block weight, witness signature operations and the
+/// witness commitment rules.
+pub const SCRIPT_WITNESS: u32 = 1 << 11;
+/// Taproot (the check needs every coin the transaction spends).
+pub const SCRIPT_TAPROOT: u32 = 1 << 17;
 
 /// The rest of what Core checks when it connects a block, for chains where it is known exactly
 /// (step 3): every input's script against the coin it spends, with the flags in force at that
@@ -68,15 +86,25 @@ pub struct BlockRules {
     pub script_flags: fn(u32) -> u32,
     /// From this height the coinbase script starts with the height (BIP34).
     pub bip34_height: u32,
-    /// The lowest base version (nVersion % 256) a block at `height` may carry.
+    /// The lowest version a block at `height` may carry: its base version (nVersion % 256) on a
+    /// chain with AuxPoW, the whole nVersion on the others (see [`rule_version`]).
     pub min_version: fn(u32) -> i32,
     /// Most bytes in a block, and in one transaction (witness data not counted).
     pub max_block_size: usize,
-    /// Most signature operations in a block (legacy, plus P2SH redeem scripts).
+    /// Most block weight (base size x 3 + total size, Litecoin's MWEB part not counted).
+    pub max_block_weight: usize,
+    /// Most signature operations in a block, legacy plus P2SH redeem scripts; with SegWit, a quarter
+    /// of the most signature-operation cost (legacy and P2SH count 4 each, witness ones 1).
     pub max_sigops: u32,
     /// 32 bytes a chain hashes ahead of each signature's message from `height` on (None: plain
     /// Bitcoin signature hashing). Luckycoin's "revival" CHAIN_ID, against replays across forks.
     pub sighash_prefix: fn(u32) -> Option<&'static [u8; 32]>,
+    /// A chain's own version rule besides the floor (Bellscoin's base-version mask, Junkcoin's
+    /// version bits), on the whole nVersion at a height; the reason when it fails.
+    pub version_rule: Option<fn(u32, i32) -> Result<(), String>>,
+    /// Whether libbitcoinconsensus can run the chain's scripts (not Kotia's: its transactions
+    /// carry a time, which its signatures hash too).
+    pub scripts: bool,
     /// Checked when a block is connected (see [`ValueRules::enforced`]).
     pub enforced: bool,
 }
@@ -84,6 +112,13 @@ pub struct BlockRules {
 /// No signature-hash prefix at any height.
 pub fn no_sighash_prefix(_: u32) -> Option<&'static [u8; 32]> {
     None
+}
+
+/// The version a block's version floor is checked against: GetBaseVersion (nVersion %
+/// VERSION_AUXPOW, C++ %, which Rust's matches) on chains with AuxPoW, the whole nVersion on the
+/// others (Litecoin's and Bitcoin's bad-version).
+pub fn rule_version(params: &ChainParams, version: i32) -> i32 {
+    if params.format.auxpow { version % 256 } else { version }
 }
 
 /// `CPureBlockHeader::IsLegacy()` in the Dogecoin 1.14 family.
@@ -145,6 +180,8 @@ pub struct ChainParams {
     pub fixed_peers: &'static [&'static str],
     pub checkpoints: &'static [(u32, &'static str)],
     pub coinbase_maturity: u32,
+    /// Most bytes in a coinbase script (Core's bad-cb-length: 2 to 100; Junkcoin allows 110).
+    pub coinbase_script_max: usize,
     /// The arcade's ledger index starts here (activation / index floor).
     pub index_start: u32,
 }
@@ -242,6 +279,8 @@ pub enum HeaderError {
     WrongChainId { got: u32, want: u32 },
     #[error("block version {got} is too old at this height (bad-version, at least {want})")]
     BadVersion { got: i32, want: i32 },
+    #[error("{0} (bad-version)")]
+    VersionRule(String),
 }
 
 /// The [`AuxpowRules`] for a header at `height` (nothing to check where the chain has none).
@@ -324,10 +363,12 @@ pub fn check_header(
     }
     check_auxpow_rules(params, h, height)?;
     if let Some(br) = params.block_rules.filter(|b| b.enforced) {
-        // GetBaseVersion: nVersion % VERSION_AUXPOW (C++ %, which Rust's matches).
-        let (got, want) = (h.version % 256, (br.min_version)(height));
+        let (got, want) = (rule_version(params, h.version), (br.min_version)(height));
         if got < want {
             return Err(HeaderError::BadVersion { got, want });
+        }
+        if let Some(Err(why)) = br.version_rule.map(|f| f(height, h.version)) {
+            return Err(HeaderError::VersionRule(why));
         }
     }
     let algo = params.pow.algo(h.version, height).ok_or(HeaderError::UnknownAlgo)?;
@@ -399,6 +440,9 @@ pub const PEPECOIN_VALUE_RULES: ValueRules = ValueRules {
     max_money: crate::pepecoin::MAX_MONEY,
     subsidy: |h, _| crate::pepecoin::subsidy(h),
     maturity: crate::pepecoin::maturity,
+    pegout_maturity: 0,
+    coinbase_rule: None,
+    stake_reward: None,
     enforced: true,
 };
 
@@ -410,8 +454,11 @@ pub const PEPECOIN_BLOCK_RULES: BlockRules = BlockRules {
     bip34_height: 1000,
     min_version: |h| if h >= 1000 { 4 } else { 0 },
     max_block_size: 1_000_000,
+    max_block_weight: 4_000_000,
     max_sigops: 20_000,
     sighash_prefix: no_sighash_prefix,
+    version_rule: None,
+    scripts: true,
     enforced: true,
 };
 
@@ -421,8 +468,11 @@ pub const PEPECOIN_REGTEST_BLOCK_RULES: BlockRules = BlockRules {
     bip34_height: 100_000_000,
     min_version: |h| if h >= 1351 { 4 } else if h >= 1251 { 3 } else { 0 },
     max_block_size: 1_000_000,
+    max_block_weight: 4_000_000,
     max_sigops: 20_000,
     sighash_prefix: no_sighash_prefix,
+    version_rule: None,
+    scripts: true,
     enforced: true,
 };
 
@@ -433,6 +483,9 @@ pub const DOGECOIN_VALUE_RULES: ValueRules = ValueRules {
     subsidy: crate::dogecoin::subsidy,
     maturity: crate::dogecoin::maturity,
     // Not yet: until the MiniPC's replay of Dogecoin's whole history finds no block breaking them.
+    pegout_maturity: 0,
+    coinbase_rule: None,
+    stake_reward: None,
     enforced: false,
 };
 
@@ -444,9 +497,12 @@ pub const DOGECOIN_BLOCK_RULES: BlockRules = BlockRules {
     bip34_height: 1_034_383,
     min_version: |h| if h >= 3_464_751 { 4 } else if h >= 1_034_383 { 3 } else { 0 },
     max_block_size: 1_000_000,
+    max_block_weight: 4_000_000,
     max_sigops: 20_000,
     // Not yet: until the MiniPC's replay of Dogecoin's whole history finds no block breaking them.
     sighash_prefix: no_sighash_prefix,
+    version_rule: None,
+    scripts: true,
     enforced: false,
 };
 
@@ -458,6 +514,9 @@ pub const FLOPCOIN_VALUE_RULES: ValueRules = ValueRules {
     subsidy: |h, prev| crate::dogecoin::subsidy_from(h, prev, 145, 100_000),
     maturity: |h| if h < 145 { 30 } else { 240 },
     // Not yet: until a replay of its whole history finds no block breaking them.
+    pegout_maturity: 0,
+    coinbase_rule: None,
+    stake_reward: None,
     enforced: false,
 };
 pub const FLOPCOIN_BLOCK_RULES: BlockRules = BlockRules {
@@ -465,8 +524,11 @@ pub const FLOPCOIN_BLOCK_RULES: BlockRules = BlockRules {
     bip34_height: 100,
     min_version: |h| if h >= 111_000 { 4 } else if h >= 101 { 3 } else { 0 },
     max_block_size: 1_000_000,
+    max_block_weight: 4_000_000,
     max_sigops: 20_000,
     sighash_prefix: no_sighash_prefix,
+    version_rule: None,
+    scripts: true,
     enforced: false,
 };
 
@@ -477,6 +539,9 @@ pub const SHIBACOIN_VALUE_RULES: ValueRules = ValueRules {
     max_money: crate::dogecoin::MAX_MONEY,
     subsidy: |h, prev| crate::dogecoin::subsidy_from(h, prev, 0, 100_000),
     maturity: |h| if h < 1000 { 30 } else { 240 },
+    pegout_maturity: 0,
+    coinbase_rule: None,
+    stake_reward: None,
     enforced: false,
 };
 pub const SHIBACOIN_BLOCK_RULES: BlockRules = BlockRules {
@@ -484,8 +549,11 @@ pub const SHIBACOIN_BLOCK_RULES: BlockRules = BlockRules {
     bip34_height: 1000,
     min_version: |h| if h >= 1000 { 4 } else { 0 },
     max_block_size: 1_000_000,
+    max_block_weight: 4_000_000,
     max_sigops: 20_000,
     sighash_prefix: no_sighash_prefix,
+    version_rule: None,
+    scripts: true,
     enforced: false,
 };
 
@@ -497,6 +565,9 @@ pub const LUCKYCOIN_VALUE_RULES: ValueRules = ValueRules {
     max_money: crate::luckycoin::MAX_MONEY,
     subsidy: crate::luckycoin::subsidy,
     maturity: crate::luckycoin::maturity,
+    pegout_maturity: 0,
+    coinbase_rule: None,
+    stake_reward: None,
     enforced: true,
 };
 pub const LUCKYCOIN_BLOCK_RULES: BlockRules = BlockRules {
@@ -504,9 +575,263 @@ pub const LUCKYCOIN_BLOCK_RULES: BlockRules = BlockRules {
     bip34_height: 95_551,
     min_version: |h| if h >= 95_551 { 4 } else { 0 },
     max_block_size: 1_000_000,
+    max_block_weight: 4_000_000,
     max_sigops: 20_000,
     sighash_prefix: crate::luckycoin::sighash_prefix,
+    version_rule: None,
+    scripts: true,
     enforced: true,
+};
+
+/// Bitcoin Core (chainparams.cpp, validation.cpp): 50 BTC halving every 210,000 blocks, MAX_MONEY
+/// 21 million, maturity 100. Rules by the heights they activated at: P2SH 173,805 (the first
+/// block from BIP16's switch time), BIP34 227,931, DERSIG 363,725, CHECKLOCKTIMEVERIFY 388,381,
+/// CSV 419,328, SegWit 481,824, Taproot 709,632. Core today applies P2SH, SegWit and Taproot
+/// scripts from genesis (but for two exception blocks under those heights); history passes
+/// either way, and the witness commitment rules start at SegWit's height in Core too. Versions:
+/// at least 2, 3, 4 from BIP34, DERSIG, CHECKLOCKTIMEVERIFY (no version-bits floor, unlike
+/// Litecoin's). Not checked: BIP30's duplicate-transaction rule (only two historical blocks).
+pub const BITCOIN_VALUE_RULES: ValueRules = ValueRules {
+    max_money: 21_000_000 * crate::bitcoin::COIN,
+    subsidy: |h, _| crate::bitcoin::subsidy(h, 50 * crate::bitcoin::COIN, 210_000),
+    maturity: |_| 100,
+    pegout_maturity: 0,
+    coinbase_rule: None,
+    stake_reward: None,
+    enforced: false,
+};
+pub const BITCOIN_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |h| {
+        let mut f = 0;
+        if h >= 173_805 { f |= SCRIPT_P2SH }
+        if h >= 363_725 { f |= SCRIPT_DERSIG }
+        if h >= 388_381 { f |= SCRIPT_CHECKLOCKTIMEVERIFY }
+        if h >= 419_328 { f |= SCRIPT_CHECKSEQUENCEVERIFY }
+        if h >= 481_824 { f |= SCRIPT_WITNESS | SCRIPT_NULLDUMMY }
+        if h >= 709_632 { f |= SCRIPT_TAPROOT }
+        f
+    },
+    bip34_height: 227_931,
+    min_version: |h| match h {
+        388_381.. => 4,
+        363_725.. => 3,
+        227_931.. => 2,
+        _ => 0,
+    },
+    max_block_size: 1_000_000,
+    max_block_weight: 4_000_000,
+    max_sigops: 20_000,
+    sighash_prefix: no_sighash_prefix,
+    version_rule: None,
+    scripts: true,
+    enforced: false,
+};
+
+/// Wojakcoin 1.21.3.0 (github.com/WojakCoinProj/wojakcore, Bitcoin Core 0.21): 100 WJK halving
+/// every 210,000, maturity 20, MAX_MONEY 21 million (per value; the supply is larger), a
+/// development fund in blocks 180,001 to 1,500,000. P2SH at every height and nothing else: no
+/// DERSIG, CHECKLOCKTIMEVERIFY, CSV or SegWit ever; BIP34 and version 2 from block 1.
+pub const WOJAKCOIN_VALUE_RULES: ValueRules = ValueRules {
+    max_money: 21_000_000 * crate::altcoins::COIN,
+    subsidy: |h, _| crate::altcoins::wojakcoin_subsidy(h),
+    maturity: |_| 20,
+    pegout_maturity: 0,
+    coinbase_rule: Some(crate::altcoins::wojakcoin_coinbase),
+    stake_reward: None,
+    enforced: false,
+};
+pub const WOJAKCOIN_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |_| SCRIPT_P2SH,
+    bip34_height: 0,
+    min_version: |_| 2,
+    version_rule: None,
+    scripts: true,
+    ..BITCOIN_BLOCK_RULES
+};
+
+/// Bellscoin, Bells Core 3.0.0 (github.com/Nintondo/bellscoinV3, Bitcoin Core 26): rewards drawn
+/// by height (altcoins.rs), maturity 30, MAX_MONEY 500 million. BIP34, DERSIG,
+/// CHECKLOCKTIMEVERIFY and CSV from 40,240; SegWit (and NULLDUMMY) from 144,000. Core 26 runs P2SH,
+/// SegWit and Taproot scripts from genesis; here P2SH from genesis and Taproot with SegWit
+/// (nothing earlier can spend a witness program). No version floor; its own version rule after
+/// 144,000.
+pub const BELLSCOIN_VALUE_RULES: ValueRules = ValueRules {
+    max_money: 500_000_000 * crate::altcoins::COIN,
+    subsidy: |h, _| crate::altcoins::bellscoin_subsidy(h),
+    maturity: |_| 30,
+    pegout_maturity: 0,
+    coinbase_rule: None,
+    stake_reward: None,
+    enforced: false,
+};
+pub const BELLSCOIN_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |h| {
+        let mut f = SCRIPT_P2SH;
+        if h >= 40_240 { f |= SCRIPT_DERSIG | SCRIPT_CHECKLOCKTIMEVERIFY | SCRIPT_CHECKSEQUENCEVERIFY }
+        if h >= 144_000 { f |= SCRIPT_WITNESS | SCRIPT_NULLDUMMY | SCRIPT_TAPROOT }
+        f
+    },
+    bip34_height: 40_240,
+    min_version: |_| 0,
+    version_rule: Some(crate::altcoins::bellscoin_version),
+    scripts: true,
+    ..BITCOIN_BLOCK_RULES
+};
+
+/// Junkcoin Core 4.0.3.1 (github.com/Junkcoin-Foundation/junkcoin-core, Litecoin 0.21.4): a reward
+/// table with draws by height, a 20% development fund in 365,001 to 3,547,800, maturity 70, MWEB
+/// peg-outs 6, MAX_MONEY 54 million. BIP34, DERSIG, CHECKLOCKTIMEVERIFY from 8,460; CSV and SegWit
+/// 1,145,000; Taproot 1,155,000; MWEB 1,165,000; coinbase scripts up to 110 bytes. Not run here:
+/// the opcodes it re-enables from 1,155,000 (OP_CAT, OP_MUL and the rest), which
+/// libbitcoinconsensus doesn't have: a script using one fails the check here.
+pub const JUNKCOIN_VALUE_RULES: ValueRules = ValueRules {
+    max_money: 54_000_000 * crate::altcoins::COIN,
+    subsidy: |h, _| crate::altcoins::junkcoin_subsidy(h),
+    maturity: |_| 70,
+    pegout_maturity: 6,
+    coinbase_rule: Some(crate::altcoins::junkcoin_coinbase),
+    stake_reward: None,
+    enforced: false,
+};
+pub const JUNKCOIN_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |h| {
+        let mut f = SCRIPT_P2SH;
+        if h >= 8_460 { f |= SCRIPT_DERSIG | SCRIPT_CHECKLOCKTIMEVERIFY }
+        if h >= 1_145_000 { f |= SCRIPT_CHECKSEQUENCEVERIFY | SCRIPT_WITNESS | SCRIPT_NULLDUMMY }
+        if h >= 1_155_000 { f |= SCRIPT_TAPROOT }
+        f
+    },
+    bip34_height: 8_460,
+    min_version: |_| 0,
+    version_rule: Some(crate::altcoins::junkcoin_version),
+    scripts: true,
+    ..BITCOIN_BLOCK_RULES
+};
+
+/// DigiByte Core 9.26.6 (github.com/DigiByte-Core/digibyte, Bitcoin Core 26.2): the reward eras of
+/// altcoins.rs, maturity 8 for coins made below 145,000 then 100, MAX_MONEY 21 billion. BIP34,
+/// DERSIG, CHECKLOCKTIMEVERIFY, CSV, SegWit and version 4 from 4,394,880; Taproot from 21,168,000
+/// (Core 26 runs P2SH/SegWit/Taproot scripts from genesis; history passes either way); from
+/// 23,808,000 only the algorithms still mined. Not checked: DigiDollar (live from 23,869,440: its
+/// oracle bundles, mint/redeem rules and tapscript opcodes, which stay OP_SUCCESS here).
+pub const DIGIBYTE_VALUE_RULES: ValueRules = ValueRules {
+    max_money: 21_000_000_000 * crate::altcoins::COIN,
+    subsidy: |h, _| crate::altcoins::digibyte_subsidy(h, &crate::altcoins::DGB_MAIN),
+    maturity: |h| if h < 145_000 { 8 } else { 100 },
+    pegout_maturity: 0,
+    coinbase_rule: None,
+    stake_reward: None,
+    enforced: false,
+};
+pub const DIGIBYTE_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |h| {
+        let mut f = SCRIPT_P2SH;
+        if h >= 4_394_880 { f |= SCRIPT_DERSIG | SCRIPT_CHECKLOCKTIMEVERIFY | SCRIPT_CHECKSEQUENCEVERIFY | SCRIPT_WITNESS | SCRIPT_NULLDUMMY }
+        if h >= 21_168_000 { f |= SCRIPT_TAPROOT }
+        f
+    },
+    bip34_height: 4_394_880,
+    min_version: |h| if h >= 4_394_880 { 4 } else { 0 },
+    version_rule: Some(crate::altcoins::digibyte_version),
+    scripts: true,
+    ..BITCOIN_BLOCK_RULES
+};
+/// DigiByte testnet: the same rules with its compressed eras; every soft fork from block 1
+/// (SegWit and Taproot from genesis); no algorithm rule here.
+pub const DIGIBYTE_TEST_VALUE_RULES: ValueRules = ValueRules {
+    subsidy: |h, _| crate::altcoins::digibyte_subsidy(h, &crate::altcoins::DGB_TEST),
+    ..DIGIBYTE_VALUE_RULES
+};
+pub const DIGIBYTE_TEST_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |_| SCRIPT_P2SH | SCRIPT_DERSIG | SCRIPT_CHECKLOCKTIMEVERIFY | SCRIPT_CHECKSEQUENCEVERIFY | SCRIPT_WITNESS | SCRIPT_NULLDUMMY | SCRIPT_TAPROOT,
+    bip34_height: 1,
+    min_version: |_| 4,
+    version_rule: None,
+    ..DIGIBYTE_BLOCK_RULES
+};
+
+/// Kotia 1.0.0 (github.com/eleonoraandrea/kotiacash, Blackcoin 2.13): proof of work pays 100,000
+/// KOT in block 1 then 100; proof of stake 20 plus the block's fees to the staker; MAX_MONEY
+/// i64::MAX; version 7 (whole nVersion) and BIP34 from block 1. Not checked: scripts (its
+/// transactions carry a time, which its signatures hash), transaction times, the stake kernel
+/// and the block signature.
+pub const KOTIA_VALUE_RULES: ValueRules = ValueRules {
+    max_money: i64::MAX as u64,
+    subsidy: |h, _| crate::altcoins::kotia_pow_subsidy(h),
+    maturity: |_| 20,
+    pegout_maturity: 0,
+    coinbase_rule: None,
+    stake_reward: Some(|_| 20 * crate::altcoins::COIN),
+    enforced: false,
+};
+pub const KOTIA_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |_| 0,
+    bip34_height: 1,
+    min_version: |_| 7,
+    max_block_weight: 4_000_000,
+    version_rule: None,
+    scripts: false,
+    ..BITCOIN_BLOCK_RULES
+};
+
+/// Litecoin Core 0.21 (chainparams.cpp, validation.cpp GetBlockScriptFlags and
+/// ContextualCheckBlockHeader): 50 LTC halving every 840,000 blocks, MAX_MONEY 84 million,
+/// maturity 100, MWEB peg-outs 6. Mainnet: P2SH from 218,579, BIP34 710,000, DERSIG 811,879,
+/// CHECKLOCKTIMEVERIFY 918,684, CSV and SegWit 1,201,536 (with them versions from 0x20000000);
+/// Taproot and MWEB are BIP9 deployments, active from 2,257,920 and 2,265,984 (counted from
+/// the real headers' signals, examples/bip9scan).
+pub const LITECOIN_VALUE_RULES: ValueRules = ValueRules {
+    max_money: 84_000_000 * crate::bitcoin::COIN,
+    subsidy: |h, _| crate::bitcoin::subsidy(h, 50 * crate::bitcoin::COIN, 840_000),
+    maturity: |_| 100,
+    pegout_maturity: 6,
+    coinbase_rule: None,
+    stake_reward: None,
+    enforced: false,
+};
+pub const LITECOIN_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |h| {
+        let mut f = 0;
+        if h >= 218_579 { f |= SCRIPT_P2SH }
+        if h >= 811_879 { f |= SCRIPT_DERSIG }
+        if h >= 918_684 { f |= SCRIPT_CHECKLOCKTIMEVERIFY }
+        if h >= 1_201_536 { f |= SCRIPT_CHECKSEQUENCEVERIFY | SCRIPT_WITNESS | SCRIPT_NULLDUMMY }
+        if h >= 2_257_920 { f |= SCRIPT_TAPROOT }
+        f
+    },
+    bip34_height: 710_000,
+    min_version: |h| match h {
+        1_201_536.. => 0x2000_0000,
+        918_684.. => 4,
+        811_879.. => 3,
+        710_000.. => 2,
+        _ => 0,
+    },
+    max_block_size: 1_000_000,
+    max_block_weight: 4_000_000,
+    max_sigops: 20_000,
+    sighash_prefix: no_sighash_prefix,
+    version_rule: None,
+    scripts: true,
+    enforced: false,
+};
+/// Litecoin testnet 4: P2SH always, BIP34, DERSIG and CHECKLOCKTIMEVERIFY from 76, CSV and
+/// SegWit from 6,048; Taproot from 2,241,792 and MWEB from 2,215,584 (bip9scan).
+pub const LITECOIN_TEST_BLOCK_RULES: BlockRules = BlockRules {
+    script_flags: |h| {
+        let mut f = SCRIPT_P2SH;
+        if h >= 76 { f |= SCRIPT_DERSIG | SCRIPT_CHECKLOCKTIMEVERIFY }
+        if h >= 6_048 { f |= SCRIPT_CHECKSEQUENCEVERIFY | SCRIPT_WITNESS | SCRIPT_NULLDUMMY }
+        if h >= 2_241_792 { f |= SCRIPT_TAPROOT }
+        f
+    },
+    bip34_height: 76,
+    min_version: |h| match h {
+        6_048.. => 0x2000_0000,
+        76.. => 4,
+        _ => 0,
+    },
+    ..LITECOIN_BLOCK_RULES
 };
 
 /// Pepecoin regtest: halving every 150 blocks, maturity 60.
@@ -514,6 +839,9 @@ pub const PEPECOIN_REGTEST_VALUE_RULES: ValueRules = ValueRules {
     max_money: crate::pepecoin::MAX_MONEY,
     subsidy: |h, _| crate::pepecoin::subsidy_every(h, 150),
     maturity: |_| 60,
+    pegout_maturity: 0,
+    coinbase_rule: None,
+    stake_reward: None,
     enforced: true,
 };
 
@@ -561,6 +889,7 @@ pub static PEPECOIN_TEST: ChainParams = ChainParams {
         (1_500_000, "283de0ba36bdb5ff9902a8a11119097f8546104f63efc9dade795e95cb4c242b"),
     ],
     coinbase_maturity: 240,
+    coinbase_script_max: 100,
     index_start: 1_496_133,
 };
 
@@ -614,6 +943,7 @@ pub static PEPECOIN_MAIN: ChainParams = ChainParams {
         (1_280_000, "5de45799be38cb26f73876f645f7c4db1f062b897b55186885e0a2a83d15b7df"),
     ],
     coinbase_maturity: 240,
+    coinbase_script_max: 100,
     index_start: 1_208_000,
 };
 
@@ -635,8 +965,8 @@ pub static DIGIBYTE_MAIN: ChainParams = ChainParams {
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
-    value_rules: None,
-    block_rules: None,
+    value_rules: Some(DIGIBYTE_VALUE_RULES),
+    block_rules: Some(DIGIBYTE_BLOCK_RULES),
     bech32_hrp: Some("dgb"),
     p2pkh_version: 30,
     p2sh_version: 63,
@@ -656,6 +986,7 @@ pub static DIGIBYTE_MAIN: ChainParams = ChainParams {
         (24_530_000, "00000000000000069e962e840f14abf41a4fbaaeebd01d9b7815c01635b33409"),
     ],
     coinbase_maturity: 100,
+    coinbase_script_max: 100,
     index_start: 24_450_000,
 };
 
@@ -678,8 +1009,8 @@ pub static DIGIBYTE_TEST: ChainParams = ChainParams {
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
-    value_rules: None,
-    block_rules: None,
+    value_rules: Some(DIGIBYTE_TEST_VALUE_RULES),
+    block_rules: Some(DIGIBYTE_TEST_BLOCK_RULES),
     bech32_hrp: Some("dgbt"),
     p2pkh_version: 126,
     p2sh_version: 140,
@@ -694,6 +1025,7 @@ pub static DIGIBYTE_TEST: ChainParams = ChainParams {
     fixed_peers: &[],
     checkpoints: &[],
     coinbase_maturity: 100,
+    coinbase_script_max: 100,
     index_start: 595_000,
 };
 
@@ -716,8 +1048,8 @@ pub static KOTIA_MAIN: ChainParams = ChainParams {
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
-    value_rules: None,
-    block_rules: None,
+    value_rules: Some(KOTIA_VALUE_RULES),
+    block_rules: Some(KOTIA_BLOCK_RULES),
     bech32_hrp: None,
     p2pkh_version: 46,
     p2sh_version: 45,
@@ -732,6 +1064,7 @@ pub static KOTIA_MAIN: ChainParams = ChainParams {
     fixed_peers: &["94.156.144.178:46174", "156.67.28.112:46174", "[2a02:c207:2367:7616::1]:46174"],
     checkpoints: &[],
     coinbase_maturity: 20,
+    coinbase_script_max: 100,
     index_start: 1_530_000,
 };
 
@@ -767,6 +1100,7 @@ pub static FLOPCOIN_MAIN: ChainParams = ChainParams {
     fixed_peers: &["216.45.61.204:32552", "204.12.227.26:32552", "23.95.140.13:32552"],
     checkpoints: &[],
     coinbase_maturity: 240,
+    coinbase_script_max: 100,
     index_start: 914_000,
 };
 
@@ -789,8 +1123,8 @@ pub static LITECOIN_MAIN: ChainParams = ChainParams {
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
-    value_rules: None,
-    block_rules: None,
+    value_rules: Some(LITECOIN_VALUE_RULES),
+    block_rules: Some(LITECOIN_BLOCK_RULES),
     bech32_hrp: Some("ltc"),
     p2pkh_version: 48,
     p2sh_version: 50, // legacy 5 ("3...") also decodes
@@ -803,6 +1137,7 @@ pub static LITECOIN_MAIN: ChainParams = ChainParams {
         (3_000_000, "ed232cbb31d5b922042e309b15a53168e437ff66467322435080f51d6fdd45fd"),
     ],
     coinbase_maturity: 100,
+    coinbase_script_max: 100,
     index_start: 3_197_300,
 };
 
@@ -824,8 +1159,8 @@ pub static LITECOIN_TEST: ChainParams = ChainParams {
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
-    value_rules: None,
-    block_rules: None,
+    value_rules: Some(LITECOIN_VALUE_RULES),
+    block_rules: Some(LITECOIN_TEST_BLOCK_RULES),
     bech32_hrp: Some("tltc"),
     p2pkh_version: 111,
     p2sh_version: 58, // legacy 196 ("2...") also decodes
@@ -838,6 +1173,7 @@ pub static LITECOIN_TEST: ChainParams = ChainParams {
         (3_200_000, "86169ba8283d09ffde76c21880fe7e22ea294411016f22ca2593295712176fad"),
     ],
     coinbase_maturity: 100,
+    coinbase_script_max: 100,
     index_start: 4_926_300,
 };
 
@@ -883,6 +1219,7 @@ pub static DOGECOIN_MAIN: ChainParams = ChainParams {
         (6_400_000, "d9248a55b06dfa46841ae7fdff2d918c5c1d1434eaa60ba9cca27455903dd393"),
     ],
     coinbase_maturity: 240,
+    coinbase_script_max: 100,
     index_start: 6_415_000,
 };
 
@@ -905,8 +1242,8 @@ pub static BITCOIN_MAIN: ChainParams = ChainParams {
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
-    value_rules: None,
-    block_rules: None,
+    value_rules: Some(BITCOIN_VALUE_RULES),
+    block_rules: Some(BITCOIN_BLOCK_RULES),
     bech32_hrp: Some("bc"),
     p2pkh_version: 0,
     p2sh_version: 5,
@@ -920,6 +1257,7 @@ pub static BITCOIN_MAIN: ChainParams = ChainParams {
     fixed_peers: &[],
     checkpoints: &[],
     coinbase_maturity: 100,
+    coinbase_script_max: 100,
     index_start: 970_000,
 };
 
@@ -945,8 +1283,8 @@ pub static WOJAKCOIN_MAIN: ChainParams = ChainParams {
     auxpow_chain_id: None,
     auxpow_strict_chain_id: false,
     auxpow_rules: None,
-    value_rules: None,
-    block_rules: None,
+    value_rules: Some(WOJAKCOIN_VALUE_RULES),
+    block_rules: Some(WOJAKCOIN_BLOCK_RULES),
     bech32_hrp: Some("wj"),
     p2pkh_version: 73,
     p2sh_version: 5,
@@ -964,6 +1302,7 @@ pub static WOJAKCOIN_MAIN: ChainParams = ChainParams {
         (600, "0000000000000010394cccce3cfd3379c10a2b27a360c52890cbbd02f1a27110"),
     ],
     coinbase_maturity: 20,
+    coinbase_script_max: 100,
     index_start: 228_000,
 };
 
@@ -1015,6 +1354,7 @@ pub static SHIBACOIN_MAIN: ChainParams = ChainParams {
         (25800, "91e9d5d9c4ac1f236c1baf5f62fc8a96cfc0e844ae4739516ea53e0d6bb78f46"),
     ],
     coinbase_maturity: 240,
+    coinbase_script_max: 100,
     index_start: 0,
 };
 
@@ -1040,8 +1380,8 @@ pub static BELLSCOIN_MAIN: ChainParams = ChainParams {
     auxpow_chain_id: Some(16),
     auxpow_strict_chain_id: true,
     auxpow_rules: None,
-    value_rules: None,
-    block_rules: None,
+    value_rules: Some(BELLSCOIN_VALUE_RULES),
+    block_rules: Some(BELLSCOIN_BLOCK_RULES),
     bech32_hrp: Some("bel"),
     p2pkh_version: 25,
     p2sh_version: 30,
@@ -1067,6 +1407,7 @@ pub static BELLSCOIN_MAIN: ChainParams = ChainParams {
     ],
     coinbase_maturity: 30,
     // The original arcade's Bellscoin floor (config.py BEL_MAINNET_FLOOR).
+    coinbase_script_max: 100,
     index_start: 1_289_000,
 };
 
@@ -1114,6 +1455,7 @@ pub static LUCKYCOIN_MAIN: ChainParams = ChainParams {
     ],
     coinbase_maturity: 70,
     // The original arcade's Luckycoin floor (config.py LKY_MAINNET_FLOOR).
+    coinbase_script_max: 100,
     index_start: 1_153_000,
 };
 
@@ -1140,8 +1482,8 @@ pub static JUNKCOIN_MAIN: ChainParams = ChainParams {
     auxpow_chain_id: Some(0x2020),
     auxpow_strict_chain_id: true,
     auxpow_rules: None,
-    value_rules: None,
-    block_rules: None,
+    value_rules: Some(JUNKCOIN_VALUE_RULES),
+    block_rules: Some(JUNKCOIN_BLOCK_RULES),
     bech32_hrp: Some("jc"),
     p2pkh_version: 16,
     p2sh_version: 5,
@@ -1163,6 +1505,7 @@ pub static JUNKCOIN_MAIN: ChainParams = ChainParams {
     ],
     coinbase_maturity: 70,
     // No original-arcade floor: indexes start near the tip when it was added (2026-11-11, tip 1,215,059).
+    coinbase_script_max: 110,
     index_start: 1_215_000,
 };
 
@@ -1203,8 +1546,69 @@ pub static PEPECOIN_REGTEST: ChainParams = ChainParams {
     fixed_peers: &[],
     checkpoints: &[(0, "770975b0f98319520694563de107ff94fd501c0d1c16f3a405868faf36b51c28")],
     coinbase_maturity: 60,
+    coinbase_script_max: 100,
     index_start: 0,
 };
+
+/// Litecoin regtest, for the SegWit-era consensus harness (tests/regtest/ltcnet.py), as
+/// PEPECOIN_REGTEST is for the Dogecoin-era one. Not in [`ALL_CHAINS`]. From Litecoin Core
+/// chainparams.cpp (CRegTestParams, 0.21.5): powLimit 0x207fffff with no retargeting, halving
+/// every 150 blocks; P2SH and SegWit from genesis, Taproot always active, CSV from 432, BIP34 500,
+/// DERSIG 1,251, CHECKLOCKTIMEVERIFY 1,351. MWEB is a time-started BIP9 deployment there.
+pub static LITECOIN_REGTEST: ChainParams = ChainParams {
+    key: "ltcregtest",
+    net: "regtest",
+    chain_no: 901,
+    name: "Litecoin regtest",
+    magic: [0xfa, 0xbf, 0xb5, 0xda],
+    p2p_port: 19444,
+    genesis: "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9",
+    genesis_header: "010000000000000000000000000000000000000000000000000000000000000000000000d9ced4ed1130f7b7faad9be25323ffafa33232a17c3edf6cfd97bee6bafbdd97dae5494dffff7f2000000000",
+    format: Format::LITECOIN,
+    pow: PowRule::Single(PowAlgo::Scrypt),
+    max_easier: true,
+    pow_limit_bits: 0x207fffff,
+    min_difficulty_blocks: true,
+    digishield_from: None,
+    auxpow_chain_id: None,
+    auxpow_strict_chain_id: false,
+    auxpow_rules: None,
+    value_rules: Some(ValueRules {
+        subsidy: |h, _| crate::bitcoin::subsidy(h, 50 * crate::bitcoin::COIN, 150),
+        enforced: true,
+        ..LITECOIN_VALUE_RULES
+    }),
+    block_rules: Some(BlockRules {
+        script_flags: |h| {
+            let mut f = SCRIPT_P2SH | SCRIPT_WITNESS | SCRIPT_NULLDUMMY | SCRIPT_TAPROOT;
+            if h >= 432 { f |= SCRIPT_CHECKSEQUENCEVERIFY }
+            if h >= 1_251 { f |= SCRIPT_DERSIG }
+            if h >= 1_351 { f |= SCRIPT_CHECKLOCKTIMEVERIFY }
+            f
+        },
+        bip34_height: 500,
+        min_version: |_| 0x2000_0000,
+        enforced: true,
+        ..LITECOIN_BLOCK_RULES
+    }),
+    bech32_hrp: Some("rltc"),
+    p2pkh_version: 111,
+    p2sh_version: 58,
+    wif_version: 239,
+    bip44_coin_type: 1,
+    protocol_version: 70017,
+    dns_seeds: &[],
+    fixed_peers: &[],
+    checkpoints: &[(0, "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9")],
+    coinbase_maturity: 100,
+    coinbase_script_max: 100,
+    index_start: 0,
+};
+
+/// The regtest chains of the consensus harnesses, by key.
+pub fn regtest_by_key(key: &str) -> Option<&'static ChainParams> {
+    [&PEPECOIN_REGTEST, &LITECOIN_REGTEST].into_iter().find(|p| p.key == key)
+}
 
 pub static ALL_CHAINS: &[&ChainParams] =
     &[
