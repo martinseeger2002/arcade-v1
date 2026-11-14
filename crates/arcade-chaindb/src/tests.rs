@@ -1017,3 +1017,29 @@ fn rules_not_switched_on_are_watched_not_enforced() {
     let w = f.db.rule_watch(c).unwrap().unwrap();
     assert_eq!((w.checked, w.broken), (2, 0));
 }
+
+/// Only Core's unspendable outputs are left out of the coins (OP_RETURN, or a script over
+/// MAX_SCRIPT_SIZE). 0 coins to an empty script is a coin anyone can spend, and a block spending
+/// it is valid (Bitcoin block 310272 spends one from block 301450).
+#[test]
+fn an_empty_script_with_no_coins_is_still_a_coin() {
+    use crate::db::{is_unspendable, MAX_SCRIPT_SIZE};
+    assert!(!is_unspendable(0, &[]));
+    assert!(!is_unspendable(5, &[]));
+    assert!(is_unspendable(0, &[0x6a, 0x01, 0x00]));
+    assert!(!is_unspendable(0, &vec![0x51; MAX_SCRIPT_SIZE]));
+    assert!(is_unspendable(0, &vec![0x51; MAX_SCRIPT_SIZE + 1]));
+
+    let f = fixture();
+    let cb1 = tx(&[], &[(50, p2pkh(1)), (0, Vec::new()), (0, vec![0x6a, 0x01, 0x07])], 1);
+    let b1 = block(f.g.hash(), vec![cb1.clone()], 2);
+    f.db.connect_blocks(f.p, &[b1.clone()]).unwrap();
+    let op = |vout| arcade_chain::OutPoint { txid: cb1.txid, vout };
+    assert!(f.db.coin(f.p, &op(1)).unwrap().is_some_and(|c| c.value == 0 && c.script.is_empty()), "the empty output is a coin");
+    assert!(f.db.coin(f.p, &op(2)).unwrap().is_none(), "OP_RETURN is no coin");
+
+    let spend = tx(&[(cb1.txid, 1)], &[(0, p2pkh(2))], 0);
+    let b2 = block(b1.hash(), vec![tx(&[], &[(50, p2pkh(3))], 2), spend], 3);
+    assert_eq!(f.db.connect_blocks(f.p, &[b2]).unwrap().height, 2);
+    assert!(f.db.coin(f.p, &op(1)).unwrap().is_none(), "spent");
+}

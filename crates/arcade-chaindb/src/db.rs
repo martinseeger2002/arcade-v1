@@ -64,9 +64,15 @@ pub struct Coin {
     pub script: Vec<u8>,
 }
 
-/// Outputs that can never be spent are not coins.
-pub fn is_unspendable(value: u64, script: &[u8]) -> bool {
-    script.first() == Some(&0x6a) || (value == 0 && script.is_empty())
+/// Core's MAX_SCRIPT_SIZE: a longer output script can never be spent.
+pub const MAX_SCRIPT_SIZE: usize = 10_000;
+
+/// Outputs that can never be spent are not coins: Core's CScript::IsUnspendable, an OP_RETURN
+/// script or one over MAX_SCRIPT_SIZE. Nothing else, not even 0 coins to an empty script: anyone
+/// can spend that (an empty scriptSig leaves nothing false behind), and Bitcoin block 310272 does
+/// (tx ce7d73cb…, spending 87d8ed6a…:0 from block 301450).
+pub fn is_unspendable(_value: u64, script: &[u8]) -> bool {
+    script.first() == Some(&0x6a) || script.len() > MAX_SCRIPT_SIZE
 }
 
 fn other(e: impl std::fmt::Display) -> StoreError {
