@@ -507,8 +507,9 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:defa
   /** Wear an installed theme app (apps.installed / apps.store row). Checks it first; reloads the window. */
   async function use(a) {
     const th = await manifestOf(a);
-    if (!a.installed && !a.id) await api("apps.install", { chain: a.chain, txid: a.txid });
-    const id = a.id || (await installedThemes()).find((x) => x.chain === a.chain && x.card?.name === a.card?.name)?.id || a.txid;
+    // A store row says whether it is installed; an installed row has no such flag. Same id either way.
+    if (a.installed === false) await api("apps.install", { chain: a.chain, txid: a.txid });
+    const id = a.id;
     write(KEY, { id, chain: a.chain, txid: a.txid, name: a.card?.name || th.name });
     write(CACHE, { txid: a.txid, manifest: th });
     location.reload();
