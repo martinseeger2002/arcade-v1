@@ -369,13 +369,19 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:defa
       const w = wins[k]; w.hidden = false; places[k] = { ...(places[k] || {}), open: true, min: false }; save();
       if (!taskOf[k]) {
         const t = el("button", "task"); t.append(iconEl(th, k, "ticn"), el("span", "", label(k)));
-        t.onclick = () => { if (!w.hidden && w.classList.contains("active")) { w.hidden = true; places[k].min = true; save(); t.classList.remove("on"); } else { w.hidden = false; front(k); go(k); } };
+        t.onclick = () => { if (!w.hidden && w.classList.contains("active")) { w.hidden = true; places[k].min = true; save(); t.classList.remove("on"); away(k); } else { w.hidden = false; front(k); go(k); } };
         taskOf[k] = t; tasks.append(t);
       }
       dockOf[k]?.classList.add("open");
       front(k); go(k);
     };
-    const closeWin = (k) => { wins[k].hidden = true; places[k] = { ...(places[k] || {}), open: false }; save(); taskOf[k]?.remove(); delete taskOf[k]; dockOf[k]?.classList.remove("open"); };
+    // A window that goes away (closed, minimized) hands the current screen to the front-most one still shown,
+    // so the watcher below never sees the closed one as current and brings it back.
+    const away = (k) => {
+      const n = Object.entries(wins).filter(([m, w]) => m !== k && !w.hidden).sort((a, b) => (+b[1].style.zIndex || 0) - (+a[1].style.zIndex || 0))[0]?.[0];
+      if (n) { front(n); go(n); }
+    };
+    const closeWin = (k) => { wins[k].hidden = true; places[k] = { ...(places[k] || {}), open: false }; save(); taskOf[k]?.remove(); delete taskOf[k]; dockOf[k]?.classList.remove("open"); away(k); };
     let n = 0;
     for (const [k, l] of TABS) {
       const sec = document.getElementById(k); if (!sec) continue;
@@ -389,7 +395,7 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:defa
       n++;
       const tb = el("div", "titlebar"); const btns = el("div", "tbtns");
       const mk = (cls, txt, f) => { const b = el("button", "tbtn " + cls, txt); b.onclick = (e) => { e.stopPropagation(); f(); }; return b; };
-      const bMin = mk("tmin", "_", () => { w.hidden = true; places[k].min = true; save(); taskOf[k]?.classList.remove("on"); });
+      const bMin = mk("tmin", "_", () => { w.hidden = true; places[k].min = true; save(); taskOf[k]?.classList.remove("on"); away(k); });
       const bMax = mk("tmax", "□", () => { w.classList.toggle("max"); places[k] = { ...(places[k] || {}), max: w.classList.contains("max") }; save(); });
       const bClose = mk("tclose", "×", () => closeWin(k));
       const order = [bMin, bMax, bClose];
@@ -462,7 +468,13 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:defa
     for (const k of (shown.length ? shown : minimized.length ? [] : ["home"])) openWin(k);
     save();
     // A screen opened from elsewhere (a link in another screen, goTab): its window comes up.
-    new MutationObserver(() => { const on = document.querySelector("section.tab.on")?.id; if (on && wins[on] && (wins[on].hidden || !taskOf[on])) openWin(on); })
+    // Only a change of screen counts: any other class change (a status line, a spinner) while a closed window's screen
+    // is still the current one used to bring that window back.
+    let seen = document.querySelector("section.tab.on")?.id;
+    new MutationObserver(() => {
+      const on = document.querySelector("section.tab.on")?.id; if (on === seen) return; seen = on;
+      if (on && wins[on] && (wins[on].hidden || !taskOf[on])) openWin(on);
+    })
       .observe(shell, { subtree: true, attributes: true, attributeFilter: ["class"] });
   }
 
