@@ -621,7 +621,7 @@ pub fn claim(node: &Node, page: &str, m: &Value, send: bool) -> Result<Value, St
         return Err("the claim was refused: that lot was just taken".into());
     }
     crate::claims::mark_spent(node, &tx);
-    node.tx_outbox.lock().unwrap().push(tx.raw.clone());
+    crate::resend::send(node, crate::pagechain::params(node), &tx);
     let _ = node.app.event("wallet", &format!("claimed {what} from prize pool #{} for {me}", p["number"]));
     Ok(json!({"txid": tx.txid.to_hex(), "piece": what, "lot": n}))
 }

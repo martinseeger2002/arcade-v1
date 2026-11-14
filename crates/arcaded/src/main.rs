@@ -34,6 +34,7 @@ mod chainsvc;
 mod chains;
 mod chaindrive;
 mod claims;
+mod resend;
 mod cbimport;
 mod corecoins;
 mod coreboot;

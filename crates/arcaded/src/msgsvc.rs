@@ -586,7 +586,7 @@ pub fn send_payloads_with(node: &Node, payloads: &[Vec<u8>], mut extra: Vec<arca
             });
         }
         crate::claims::mark_spent(node, &tx);
-        node.tx_outbox.lock().unwrap().push(tx.raw.clone());
+        crate::resend::send(node, p, &tx);
         txids.push(tx.txid.to_hex());
     }
     Ok((txids, fees))

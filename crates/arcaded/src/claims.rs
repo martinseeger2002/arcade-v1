@@ -169,7 +169,7 @@ fn advance_one(node: &Node, mut c: Claim) -> Result<Claim, String> {
             match build_claim(p, &tags::claim_payload(&c.tag), &sk, &have, FEE_PER_KB, DUST, arcade_app::now() as u32) {
                 Ok(tx) => {
                     crate::claims::mark_spent(node, &tx);
-                    node.tx_outbox.lock().unwrap().push(tx.raw.clone());
+                    crate::resend::send(node, p, &tx);
                     // While the home chain is borrowed (catching up), its lenders send it now.
                     if crate::borrow::is_borrowed(p.key) {
                         if let Err((why, _)) = crate::borrow::broadcast_tx(node, p, &tx) {

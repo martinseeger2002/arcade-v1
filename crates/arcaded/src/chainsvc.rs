@@ -187,6 +187,8 @@ pub fn run(node: Arc<Node>) {
                     }
                 }
             }
+            // This arcade's own unconfirmed transactions that are due to go again (resend.rs).
+            crate::resend::due(&node, arcade_app::now());
             let txs: Vec<Vec<u8>> = std::mem::take(&mut *node.tx_outbox.lock().unwrap());
             for raw in txs {
                 if let Err(e) = peer.send_tx(&raw) {

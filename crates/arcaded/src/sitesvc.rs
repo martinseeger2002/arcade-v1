@@ -354,6 +354,11 @@ fn send_raw(node: &Node, req: &Value, checked: bool) -> R {
     // waiting transaction. Values add up so the fee can be checked.
     let pooled = pool(node, p);
     if pooled.iter().any(|(_, t)| t.txid == tx.txid) {
+        // Sent again, as a coin node's sendrawtransaction does: whoever resubmits it may know the
+        // coin's peers dropped it (an orphan when it first went out, a link that broke).
+        if p.chain_no == node.params.chain_no {
+            crate::resend::again(node, &raw);
+        }
         return Ok(json!({"txid": tx.txid.to_hex(), "already": true}));
     }
     let mut ins = 0u64;
@@ -391,7 +396,7 @@ fn send_raw(node: &Node, req: &Value, checked: bool) -> R {
         return Err("refused: a waiting transaction already spends one of these coins".into());
     }
     if p.chain_no == node.params.chain_no {
-        node.tx_outbox.lock().unwrap().push(raw);
+        crate::resend::send(node, p, &tx);
     } else {
         // An installed chain: straight to a few of its own P2P peers.
         let peers: Vec<String> = node.coin_candidates(p).into_iter().take(4).collect();
@@ -662,9 +667,10 @@ pub(crate) mod tests {
         assert_eq!(v["fee"], 100);
         assert_eq!(t.node.tx_outbox.lock().unwrap().as_slice(), &[good.raw.clone()]);
         assert_eq!(t.node.chain.mempool(t.p.chain_no).unwrap().len(), 1);
-        // The same again: already known, not sent twice.
+        // The same again: already known, and sent again (its peers may have dropped it).
         assert_eq!(broadcast(&t.node, &json!({"hex": hex::encode(&good.raw)})).unwrap()["already"], true);
-        assert_eq!(t.node.tx_outbox.lock().unwrap().len(), 1);
+        assert_eq!(t.node.tx_outbox.lock().unwrap().len(), 2);
+        t.node.tx_outbox.lock().unwrap().truncate(1);
         // A rival spend of the same coin, signed: refused.
         let rival = sign_keyhash(t.p, 1, &coins[1..], &[TxOutSpec { value: 1200, script: p2pkh(5) }], &key, 0).unwrap();
         assert!(broadcast(&t.node, &json!({"hex": hex::encode(&rival.raw)})).unwrap_err().contains("waiting transaction"));

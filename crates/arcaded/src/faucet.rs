@@ -362,7 +362,7 @@ pub fn pay_asks(node: &Node) {
             return;
         }
         crate::claims::mark_spent(node, &tx); // (pools it, so the mesh hears it at once)
-        node.tx_outbox.lock().unwrap().push(tx.raw.clone());
+        crate::resend::send(node, node.params, &tx);
         let sent = arcade_mesh::welcome::sign(
             serde_json::json!({"a": me, "ask": asker, "at": now, "k": "sent", "tag": ask["tag"], "txid": tx.txid.to_hex()}),
             &node.identity,
