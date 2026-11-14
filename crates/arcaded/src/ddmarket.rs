@@ -298,13 +298,54 @@ fn finish(node: &Node, p: &'static ChainParams, q: &Value) -> Result<Value, Stri
 // ---------------- the taker's side ----------------
 
 /// The DigiDollar book on a chain: this arcade's own orders and every linked arcade's.
+/// Linked arcades' DigiDollar orders as each last answered: (peer, chain) -> (when, orders).
+static PEER_BOOKS: std::sync::LazyLock<std::sync::Mutex<HashMap<(String, &'static str), (u64, Vec<Value>)>>> =
+    std::sync::LazyLock::new(Default::default);
+/// Peers asked now, per chain (an ask waits up to 30 s): never two asks of one peer at once.
+static ASKING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<(String, &'static str)>>> =
+    std::sync::LazyLock::new(Default::default);
+/// How long the book waits for linked arcades before answering with what it has (as swaps::book).
+const BOOK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// A peer's last answer is shown this long while it doesn't answer again.
+const BOOK_KEEP: u64 = 600;
+
+/// The DigiDollar orders here and on every linked arcade. Linked arcades are asked all at once and the book answers
+/// within BOOK_WAIT with each one's newest answer. 2026-11-13: asked one after another, each up to 30 s, the JB20B's
+/// dozen links held this (and with it /r/market/markets, which counts these orders) for minutes, so the Swap app in
+/// the desktop's Apps tab drew nothing at all.
 pub fn book(node: &Node, chain: &str) -> Result<Vec<Value>, String> {
     let p = dd_chain(chain).ok_or("DigiDollar trades on dgb or dgbtest")?;
     let mut all: Vec<Value> = orders(node, Some(p.key), false).iter().map(|o| { let mut v = public(o); v["mine"] = json!(true); v }).collect();
-    for peer in crate::shares::linked_ids(node) {
-        if let Ok(a) = crate::shares::ask_linked(&peer, json!({"what": "mk", "net": p.net, "arg": json!({"op": "book", "chain": p.key}).to_string()})) {
-            for o in a["orders"].as_array().cloned().unwrap_or_default() {
-                let mut o = o;
+    let peers = crate::shares::linked_ids(node);
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let mut asked = 0;
+    for peer in &peers {
+        if !ASKING.lock().unwrap().insert((peer.clone(), p.key)) {
+            continue;
+        }
+        asked += 1;
+        let (peer, tx, net, key) = (peer.clone(), tx.clone(), p.net, p.key);
+        std::thread::spawn(move || {
+            let q = json!({"what": "mk", "net": net, "arg": json!({"op": "book", "chain": key}).to_string()});
+            if let Ok(a) = crate::shares::ask_linked(&peer, q) {
+                PEER_BOOKS.lock().unwrap().insert((peer.clone(), key), (arcade_app::now(), a["orders"].as_array().cloned().unwrap_or_default()));
+            }
+            ASKING.lock().unwrap().remove(&(peer, key));
+            let _ = tx.send(());
+        });
+    }
+    drop(tx);
+    let until = std::time::Instant::now() + BOOK_WAIT;
+    for _ in 0..asked {
+        if rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())).is_err() {
+            break;
+        }
+    }
+    let books = PEER_BOOKS.lock().unwrap();
+    for peer in &peers {
+        if let Some((_, orders)) = books.get(&(peer.clone(), p.key)).filter(|(at, _)| arcade_app::now().saturating_sub(*at) <= BOOK_KEEP) {
+            for o in orders {
+                let mut o = o.clone();
                 o["node"] = json!(peer);
                 all.push(o);
             }
