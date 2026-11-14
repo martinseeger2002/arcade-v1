@@ -243,8 +243,34 @@ fn me(node: &Node) -> String {
     crate::msgsvc::sender_key(node).map(|(a, _, _)| a).unwrap_or_default()
 }
 
-/// The App Store: every app (not removed; flagged only when asked), starred first.
-pub fn store(node: &Node, sort: &str, q: &str, show_flagged: bool) -> Value {
+/// App Store categories: these first, in this order. Any other category a card names shows after
+/// them, so a new kind of app needs no new arcade. (key, label, what it holds)
+pub const CATEGORIES: &[(&str, &str, &str)] = &[
+    ("games", "Games", "Things to play"),
+    ("apps", "Apps", "Tools and everything else"),
+    ("social", "Social", "Chats, groups and feeds"),
+    ("node-modules", "Node modules", "Features for this arcade itself, published and installed like any app"),
+];
+
+/// A category for the store's list: a known one's label, else its name in words.
+fn category_json(key: &str, count: usize) -> Value {
+    match CATEGORIES.iter().find(|c| c.0 == key) {
+        Some((k, l, a)) => json!({"key": k, "label": l, "about": a, "count": count, "known": true}),
+        None => {
+            let label: String = key.split('-').map(|w| { let mut c = w.chars(); c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default() }).collect::<Vec<_>>().join(" ");
+            json!({"key": key, "label": label, "about": "", "count": count, "known": false})
+        }
+    }
+}
+
+/// The categories, for publishing (the known ones).
+pub fn categories() -> Value {
+    Value::Array(CATEGORIES.iter().map(|c| category_json(c.0, 0)).collect())
+}
+
+/// The App Store: every app (not removed; flagged only when asked), starred first. `category`
+/// "" is all of them; the reply counts each category among the apps the search finds.
+pub fn store(node: &Node, sort: &str, q: &str, show_flagged: bool, category: &str) -> Value {
     let apps = gather(node);
     let fl = flags(node, &apps);
     let acts = arcade_ledger::messages::rows(&node.chain, arcade_ledger::messages::ACT, node.params.chain_no).unwrap_or_default();
@@ -260,9 +286,18 @@ pub fn store(node: &Node, sort: &str, q: &str, show_flagged: bool) -> Value {
             let hidden = f.is_some_and(|f| f.starts_with("flagged") || f == "confirmed");
             show_flagged == hidden
         })
-        .filter(|a| q.is_empty() || a.versions[0].card.name.to_lowercase().contains(&q) || a.versions[0].card.genre.to_lowercase().contains(&q) || a.versions[0].card.description.to_lowercase().contains(&q))
+        .filter(|a| q.is_empty() || a.versions[0].card.name.to_lowercase().contains(&q) || a.versions[0].card.genre.to_lowercase().contains(&q) || a.versions[0].card.description.to_lowercase().contains(&q) || a.versions[0].card.category.contains(&q))
         .map(|a| entry(node, a, &acts, &me, fl.get(&a.versions[0].txid), &installed, &starred))
         .collect();
+    let mut counts: BTreeMap<String, usize> = CATEGORIES.iter().map(|c| (c.0.to_string(), 0)).collect();
+    for a in &out {
+        *counts.entry(a["card"]["category"].as_str().unwrap_or("apps").to_string()).or_default() += 1;
+    }
+    let mut cats: Vec<Value> = CATEGORIES.iter().map(|c| category_json(c.0, counts[c.0])).collect();
+    cats.extend(counts.iter().filter(|(k, _)| !CATEGORIES.iter().any(|c| c.0 == k.as_str())).map(|(k, n)| category_json(k, *n)));
+    if !category.is_empty() {
+        out.retain(|a| a["card"]["category"] == category);
+    }
     out.sort_by(|a, b| {
         let st = b["starred"].as_bool().cmp(&a["starred"].as_bool());
         st.then_with(|| if sort == "new" {
@@ -271,7 +306,7 @@ pub fn store(node: &Node, sort: &str, q: &str, show_flagged: bool) -> Value {
             b["social"]["hot"].as_f64().partial_cmp(&a["social"]["hot"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
         })
     });
-    json!({"apps": out, "chains": ledger_chains(node).iter().map(|p| p.key).collect::<Vec<_>>()})
+    json!({"apps": out, "categories": cats, "chains": ledger_chains(node).iter().map(|p| p.key).collect::<Vec<_>>()})
 }
 
 /// The apps installed here, each at its newest version.

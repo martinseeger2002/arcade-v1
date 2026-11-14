@@ -11,6 +11,9 @@ pub struct Card {
     pub version: String,
     pub players: String,
     pub genre: String,
+    /// The App Store category (V1.0; the original has none): a short lowercase name, e.g.
+    /// "games", "node-modules". A card without one is "games" ("game" cards) or "apps".
+    pub category: String,
     pub multiplayer: bool,
     pub wallet: bool,
     pub media: bool,
@@ -59,9 +62,19 @@ fn minimized(v: &Value) -> Option<u64> {
 }
 
 /// The card in an inscription's JSON, or None when it isn't one.
+/// A category name: lowercase letters, digits and inner dashes, up to 24 ("Node Modules" reads as
+/// "node-modules").
+fn category(v: &Value) -> Option<String> {
+    let s = v.as_str()?.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join("-");
+    let ok = (1..=24).contains(&s.len())
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !s.starts_with('-') && !s.ends_with('-') && !s.contains("--");
+    ok.then_some(s)
+}
+
 pub fn parse(json_text: &str) -> Option<Card> {
     let v: Value = serde_json::from_str(json_text).ok()?;
-    let d = ["game", "app"].iter().find_map(|m| v.get(*m).filter(|x| x.is_object()))?;
+    let (top, d) = ["game", "app"].iter().find_map(|m| v.get(*m).filter(|x| x.is_object()).map(|x| (*m, x)))?;
     let name = text(&d["name"], 60);
     if name.is_empty() {
         return None;
@@ -74,6 +87,7 @@ pub fn parse(json_text: &str) -> Option<Card> {
         version: text(&d["version"], 20),
         players: text(&d["players"], 20),
         genre: text(&d["genre"], 24),
+        category: category(&d["category"]).unwrap_or_else(|| if top == "game" { "games".into() } else { "apps".into() }),
         multiplayer: d["multiplayer"] == true,
         wallet: d["wallet"] == true,
         media: d["media"] == true,
@@ -94,7 +108,7 @@ impl Card {
     pub fn to_json(&self) -> Value {
         json!({
             "name": self.name, "description": self.description, "version": self.version, "players": self.players,
-            "genre": self.genre, "multiplayer": self.multiplayer, "wallet": self.wallet, "media": self.media,
+            "genre": self.genre, "category": self.category, "multiplayer": self.multiplayer, "wallet": self.wallet, "media": self.media,
             "pictures": self.pictures, "notify": self.notify, "contacts": self.contacts, "groups": self.groups,
             "family": self.family, "cover": self.cover, "play": self.play, "tdeck": self.tdeck, "tdeck_icon": self.tdeck_icon,
             "minimized_timeout": self.minimized_timeout,
@@ -218,6 +232,13 @@ mod tests {
         let up = "ABCDEF".repeat(10) + "ABCD";
         assert_eq!(parse(&format!(r#"{{"app":{{"name":"x","cover":"{up}"}}}}"#)).unwrap().cover, up.to_lowercase());
         assert_eq!(parse(r#"{"app":{"name":"x","family":"has space"}}"#).unwrap().family, "");
+        assert_eq!(parse(r#"{"game":{"name":"G"}}"#).unwrap().category, "games");
+        assert_eq!(parse(r#"{"app":{"name":"A"}}"#).unwrap().category, "apps");
+        assert_eq!(parse(r#"{"app":{"name":"M","category":"Node Modules"}}"#).unwrap().category, "node-modules");
+        assert_eq!(parse(r#"{"app":{"name":"T","category":"themes"}}"#).unwrap().category, "themes");
+        for bad in [r#""-x""#, r#""a--b""#, r#""<b>""#, r#""abcdefghijklmnopqrstuvwxyz""#, "7", r#""""#] {
+            assert_eq!(parse(&format!(r#"{{"app":{{"name":"B","category":{bad}}}}}"#)).unwrap().category, "apps", "{bad}");
+        }
         let riffs = parse(r#"{"app":{"name":"Riffs","description":"Group chats","version":"2.0","players":"2-20","multiplayer":true,"family":"riffs","genre":"Social","media":true,"groups":true,"notify":true,"pictures":true,"cover":"c1eaa01180715c7829185dc8020a34153045bae05c912874b231bb24934ff32c"}}"#).unwrap();
         assert!(riffs.multiplayer && riffs.media && riffs.groups && riffs.notify && riffs.pictures && !riffs.wallet);
         assert_eq!((riffs.family.as_str(), riffs.version.as_str()), ("riffs", "2.0"));

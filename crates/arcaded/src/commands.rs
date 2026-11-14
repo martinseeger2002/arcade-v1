@@ -237,7 +237,8 @@ cmds! {
     "stake.set" Admin "on" "Turn KOT staking on or off.";
     "stake.check" Read "" "Check our KOT stake rules against the newest blocks.";
     // Apps (app cards)
-    "apps.store" Public "sort?, q?, flagged?" "The App Store: app cards from every chain with the arcade ledger (popular or new; starred first).";
+    "apps.store" Public "sort?, q?, flagged?, category?" "The App Store: app cards from every chain with the arcade ledger (popular or new; starred first), in categories (counts in \"categories\"; category = one of them).";
+    "apps.categories" Public "" "The App Store's known categories (games, apps, social, node modules, themes); a card may name any other.";
     "apps.installed" Read "" "Apps installed on this arcade, each at its newest version.";
     "apps.install" Admin "chain, txid" "Install an app (it follows its author's updates).";
     "apps.uninstall" Admin "id" "Uninstall an app.";
