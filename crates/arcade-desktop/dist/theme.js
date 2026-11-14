@@ -214,7 +214,8 @@ body[data-themed] section.tab{color:var(--ink);font:${th.size}px/1.45 ${FONTS[th
 body[data-themed] :is(button,input,textarea,select,.card,.chain,.arcade,.warn,table,.ap-card,.ap-mine){border-radius:${r}px}
 body[data-themed=desktop] section.tab{display:block}
 body[data-themed] .chainsel .menu{z-index:50}
-body[data-themed][data-bar=bottom] .chainsel .menu{top:auto;bottom:100%}
+body[data-themed] .chainsel .menu{left:auto;right:0;max-height:70vh;overflow:auto}
+body[data-themed][data-chain=bottom] .chainsel .menu{top:auto;bottom:calc(100% + 6px)}
 body[data-themed] #conn{white-space:nowrap}`;
   }
 
@@ -333,6 +334,7 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:defa
 
   function buildWindow(th, frame) {
     frame.classList.add("layout-window");
+    document.body.dataset.chain = "bottom";        // the chain picker sits in the status bar: its menu opens upward
     const bar = el("div", "menubar");
     if (th.brand) bar.append(el("span", "brand", th.brand));
     bar.append(...menus(th));
@@ -352,6 +354,7 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:defa
     const D = th.desktop;
     frame.classList.add("layout-desktop", "bar-" + D.bar);
     document.body.dataset.bar = D.bar;
+    document.body.dataset.chain = D.topbar !== "none" || D.bar === "top" ? "top" : "bottom";
     const places = (() => { try { return JSON.parse(localStorage.getItem(DESK + id) || "{}"); } catch { return {}; } })();
     const save = () => { try { localStorage.setItem(DESK + id, JSON.stringify(places)); } catch {} };
     const desk = el("div", "desk"); const middle = el("div", "middle");
