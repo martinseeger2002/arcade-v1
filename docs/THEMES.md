@@ -69,7 +69,7 @@ worn**, and a theme that fails isn't worn at all (the reason is shown):
   frame's own class names: `frame layout-window layout-desktop menubar mbitem menu mitem msep check
   toolbar tbitem ticon statusbar sync links brand wbody desk icons icon icon-img icon-label win active
   max titlebar title ticn tbtns tbtn tmin tmax tclose bar bar-top bar-bottom start tasks task on tray
-  clock dock dock-left dock-bottom ditem startmenu smhead smitem topbar chain conn selected`, plus
+  clock dock dock-left dock-bottom ditem open startmenu smhead smitem topbar chain conn selected`, plus
   `:hover :active :focus-visible :first-child :last-child :not(.x)`. There are no element, id, attribute,
   `:host` or `::slotted` selectors, and no pseudo-elements.
 - **Properties**: colours, backgrounds, borders, corners, shadows, fonts, spacing, `gap`, `outline`,

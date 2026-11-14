@@ -44,7 +44,7 @@ const THEME = (() => {
     "check", "toolbar", "tbitem", "ticon", "statusbar", "sync", "links", "brand", "wbody", "desk", "icons", "icon",
     "icon-img", "icon-label", "win", "active", "max", "titlebar", "title", "ticn", "tbtns", "tbtn", "tmin", "tmax",
     "tclose", "bar", "bar-top", "bar-bottom", "start", "tasks", "task", "on", "tray", "clock", "dock", "dock-left",
-    "dock-bottom", "ditem", "startmenu", "smhead", "smitem", "topbar", "chain", "conn", "selected"]);
+    "dock-bottom", "ditem", "open", "startmenu", "smhead", "smitem", "topbar", "chain", "conn", "selected"]);
   const SMALL = new Set(["titlebar", "tbtn", "tmin", "tmax", "tclose", "bar", "start", "task", "tray", "clock",
     "menubar", "mbitem", "mitem", "toolbar", "tbitem", "ticon", "statusbar", "dock", "ditem", "icon", "icon-img",
     "ticn", "topbar", "smhead", "smitem", "brand", "msep"]);
@@ -188,9 +188,9 @@ const THEME = (() => {
       buttons: d.buttons === "left" ? "left" : "right",
     };
     const icons = {};
-    for (const [k] of TABS) { const p = pic(t.icons?.[k]); if (p) icons[k] = p; }
+    for (const k of [...TABS.map((x) => x[0]), "start"]) { const p = pic(t.icons?.[k]); if (p) icons[k] = p; }
     const brand = word(t.brand || "", 24);
-    return { layout, light, dark, font, size, radius, desktop, icons, brand, window: { toolbar: t.window?.toolbar !== false },
+    return { layout, light, dark, single: !t.colors?.dark, font, size, radius, desktop, icons, brand, window: { toolbar: t.window?.toolbar !== false },
       chrome: chromeCss(t.chrome || ""), name: word(t.name || "", 40) };
   }
 
@@ -204,8 +204,8 @@ const THEME = (() => {
   function screensCss(th) {
     const vars = (c) => COLOURS.map((k) => `--${k}:${c[k]}`).join(";");
     const r = th.radius;
-    return `:root{${vars(th.light)}}
-@media (prefers-color-scheme: dark){:root{${vars(th.dark)}}}
+    return `:root{${vars(th.light)};color-scheme:${th.single ? "light" : "light dark"}}
+@media (prefers-color-scheme: dark){:root{${vars(th.dark)};color-scheme:${th.single ? "light" : "dark"}}}
 body[data-themed]{font:${th.size}px/1.45 ${FONTS[th.font]};background:var(--bg);color:var(--ink);overflow:hidden}
 body[data-themed]>header,body[data-themed]>nav,body[data-themed]>main{display:none}
 body[data-themed] section.tab{color:var(--ink);font:${th.size}px/1.45 ${FONTS[th.font]};font-style:normal;letter-spacing:normal;
@@ -357,7 +357,7 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:defa
     const desk = el("div", "desk"); const middle = el("div", "middle");
     const wins = {}; let z = 10;
     const tasks = el("div", "tasks");
-    const taskOf = {};
+    const taskOf = {}, dockOf = {};
     const front = (k) => {
       for (const [n, w] of Object.entries(wins)) { w.classList.toggle("active", n === k); taskOf[n]?.classList.toggle("on", n === k && !w.hidden); }
       if (wins[k]) wins[k].style.zIndex = String(++z);
@@ -369,9 +369,10 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:defa
         t.onclick = () => { if (!w.hidden && w.classList.contains("active")) { w.hidden = true; places[k].min = true; save(); t.classList.remove("on"); } else { w.hidden = false; front(k); go(k); } };
         taskOf[k] = t; tasks.append(t);
       }
+      dockOf[k]?.classList.add("open");
       front(k); go(k);
     };
-    const closeWin = (k) => { wins[k].hidden = true; places[k] = { ...(places[k] || {}), open: false }; save(); taskOf[k]?.remove(); delete taskOf[k]; };
+    const closeWin = (k) => { wins[k].hidden = true; places[k] = { ...(places[k] || {}), open: false }; save(); taskOf[k]?.remove(); delete taskOf[k]; dockOf[k]?.classList.remove("open"); };
     let n = 0;
     for (const [k, l] of TABS) {
       const sec = document.getElementById(k); if (!sec) continue;
@@ -385,9 +386,12 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:defa
       n++;
       const tb = el("div", "titlebar"); const btns = el("div", "tbtns");
       const mk = (cls, txt, f) => { const b = el("button", "tbtn " + cls, txt); b.onclick = (e) => { e.stopPropagation(); f(); }; return b; };
-      btns.append(mk("tmin", "_", () => { w.hidden = true; places[k].min = true; save(); taskOf[k]?.classList.remove("on"); }),
-        mk("tmax", "□", () => { w.classList.toggle("max"); places[k] = { ...(places[k] || {}), max: w.classList.contains("max") }; save(); }),
-        mk("tclose", "×", () => closeWin(k)));
+      const bMin = mk("tmin", "_", () => { w.hidden = true; places[k].min = true; save(); taskOf[k]?.classList.remove("on"); });
+      const bMax = mk("tmax", "□", () => { w.classList.toggle("max"); places[k] = { ...(places[k] || {}), max: w.classList.contains("max") }; save(); });
+      const bClose = mk("tclose", "×", () => closeWin(k));
+      const order = [bMin, bMax, bClose];
+      // a Mac's order (close first) when the buttons sit at the left
+      btns.append(...(D.buttons === "left" ? [bClose, bMin, bMax] : order));
       if (D.buttons === "left") tb.append(btns, iconEl(th, k, "ticn"), el("span", "title", l));
       else tb.append(iconEl(th, k, "ticn"), el("span", "title", l), btns);
       const body = el("div", "wbody"); const s = document.createElement("slot"); s.name = "w-" + k; body.append(s);
@@ -435,7 +439,7 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:defa
     }
     if (D.dock !== "none") {
       const dock = el("div", "dock dock-" + D.dock);
-      for (const [k, l] of TABS) { const b = el("button", "ditem"); b.title = l; b.append(iconEl(th, k, "icon-img")); b.onclick = () => openWin(k); dock.append(b); }
+      for (const [k, l] of TABS) { const b = el("button", "ditem"); b.title = l; b.append(iconEl(th, k, "icon-img")); b.onclick = () => openWin(k); dockOf[k] = b; dock.append(b); }
       if (D.dock === "left") { middle.append(dock, desk); } else { middle.append(desk); }
       frame.append(middle);
       if (D.dock === "bottom") frame.append(dock);
