@@ -756,6 +756,18 @@ with its replicas; answered, the demander has no draw weight for an audit period
 copy by themselves; an arcade demands by itself when no holder of a segment whose root isn't its own hands out its
 leaves, and by hand with `arc.reveal {segment, first?, count?}`.
 
+**Serving checks that can reach the owner (2026-11-14):** on the restarted testnet every check ever made said "not
+served": the checker only dialed the address the owner offers its chain at, and most owners sit behind a NAT (one offers its
+port but takes no dial). Owner 257daca3 had 7 "not served" verdicts while, asked by hand,
+it handed out 2,000 sealed blocks in 5 s. Now (`arcserve::check`): over the owner's mesh link when there is one,
+whoever dialed it (the request goes onto the link as borrowing's does, `crvia`, and the link loop hands the `bk`
+answers back by id), else by dialing its offer. **No way to the owner from this checker = no verdict** (`Outcome::
+Unreachable`), since that says where the checker stands, not what the owner does; an owner offline altogether misses
+its storage audits. Reached and refused, wrong blocks, or over 60 s = "not served". `arc.serve_check {owner, chain,
+first, count | hashes}` makes a check by hand (no verdict). Owners need no update; checkers do. Limit, stated plainly:
+an owner that keeps links only to friends is checked only by them; relaying a check through a third arcade would
+close it.
+
 **Index journals** (ord, names, tokens, the coins family) have no fraud proof of their own: proving one wrong means
 re-running the indexer's rules inside a proof. They rest on more than half of the draw weight confirming each root
 (every arcade keeping the index makes the same one) and on reveal demands keeping their data available. A design of

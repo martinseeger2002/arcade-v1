@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 /// The highest block whose draws were worked out, and the checks running now.
 static DONE: Mutex<u64> = Mutex::new(0);
 static RUNNING: Mutex<BTreeSet<(Hash, u64)>> = Mutex::new(BTreeSet::new());
-/// Checks made here: (block, replica, served), the newest last (for arc.status).
-static MADE: Mutex<Vec<(u64, Hash, bool)>> = Mutex::new(Vec::new());
+/// Checks made here: (block, replica, outcome), the newest last (for arc.status).
+static MADE: Mutex<Vec<(u64, Hash, String)>> = Mutex::new(Vec::new());
 /// Checks running at once at most.
 const MAX_RUNNING: usize = 4;
 
@@ -67,15 +67,25 @@ pub fn round(node: &std::sync::Arc<Node>, net: &Net, reg: &Registry, tip: u64) {
             }
             let (n, net, owner) = (node.clone(), *net, *owner);
             let _ = std::thread::Builder::new().name("arc serve check".into()).spawn(move || {
-                let served = check(&n, piece.0, &owner, &piece.1);
-                let mut v = Verdict { owner, height: h, checker: n.identity.verifying_key().to_bytes(), vrf_proof: proof, served, sig: [0; 64] };
-                if let Some((block_id, _)) = crate::arcsvc::block_at(h) {
+                let outcome = check(&n, piece.0, &owner, &piece.1);
+                let served = match &outcome {
+                    Outcome::Served => Some(true),
+                    Outcome::NotServed(_) => Some(false),
+                    Outcome::Unreachable(_) => None, // no verdict: see Outcome
+                };
+                if let (Some(served), Some((block_id, _))) = (served, crate::arcsvc::block_at(h)) {
+                    let mut v = Verdict { owner, height: h, checker: n.identity.verifying_key().to_bytes(), vrf_proof: proof, served, sig: [0; 64] };
                     v.sig = block::sign(&n.identity, &v.message(&net, &block_id));
                     crate::arcseg::add(Item::Verdict(v));
                 }
-                eprintln!("arc: serving check of replica {} at block {h}: {}", hex::encode(&id[..8]), if served { "served" } else { "NOT served" });
+                let said = match &outcome {
+                    Outcome::Served => "served".to_string(),
+                    Outcome::NotServed(why) => format!("NOT served ({why})"),
+                    Outcome::Unreachable(why) => format!("no way to it, no verdict ({why})"),
+                };
+                eprintln!("arc: serving check of replica {} (owner {}) at block {h}: {said}", hex::encode(&id[..8]), hex::encode(&owner[..8]));
                 let mut made = MADE.lock().unwrap();
-                made.push((h, id, served));
+                made.push((h, id, said));
                 let len = made.len();
                 if len > 50 {
                     made.drain(..len - 50);
@@ -113,32 +123,90 @@ fn piece_for(node: &Node, net: &Net, reg: &Registry, id: &Hash, seed: &Hash) -> 
     Some((p, hashes))
 }
 
+/// How a serving check came out.
+#[derive(Debug, PartialEq)]
+pub enum Outcome {
+    /// The owner handed out the whole piece, right, in time.
+    Served,
+    /// The owner was reached and refused, sent wrong blocks, or was too slow: a "not served" verdict.
+    NotServed(String),
+    /// This arcade has no way to the owner (no mesh link to it, and it can't be dialed, as
+    /// behind a NAT): no verdict. That says where this checker stands, not what the owner does;
+    /// an owner that is offline altogether misses its storage audits instead.
+    Unreachable(String),
+}
+
 /// Whether the replica's owner hands out the piece, checked against our own headers, in time.
-fn check(node: &Node, p: &'static ChainParams, owner: &block::Key, hashes: &[Hash256]) -> bool {
+/// Over the owner's mesh link when there is one (the only way to an arcade behind a NAT, as
+/// borrowing does it: crvia), else by dialing the address it offers the chain at.
+pub fn check(node: &Node, p: &'static ChainParams, owner: &block::Key, hashes: &[Hash256]) -> Outcome {
     let t0 = Instant::now();
-    let limit = Duration::from_secs(params::SERVE_SECONDS);
+    let until = t0 + Duration::from_secs(params::SERVE_SECONDS);
     let who = hex::encode(owner);
-    let Some(addr) = node.offers_for(p.net).into_iter().find(|o| o.0 == who && o.2 == "bk").map(|o| o.1) else {
-        return false; // not on the mesh with this chain
+    let mut fetch: Box<dyn FnMut(&[Hash256]) -> Result<Vec<Vec<u8>>, String> + '_> = if crate::crvia::linked(&who) {
+        Box::new(|chunk: &[Hash256]| via_blocks(&who, p, chunk, until))
+    } else {
+        let Some(addr) = node.offers_for(p.net).into_iter().find(|o| o.0 == who && o.2 == "bk").map(|o| o.1) else {
+            return Outcome::Unreachable("no mesh link to it and no address offering this chain".into());
+        };
+        use arcade_chaindb::sync::BlockSource;
+        let mut src = match crate::meshsource::MeshSource::dial_chain(node, &addr, p) {
+            Ok(s) => s,
+            Err(e) => return Outcome::Unreachable(format!("dial {addr}: {e}")),
+        };
+        Box::new(move |chunk: &[Hash256]| src.get_blocks(chunk))
     };
-    use arcade_chaindb::sync::BlockSource;
-    let Ok(mut src) = crate::meshsource::MeshSource::dial_chain(node, &addr, p) else { return false };
     for chunk in hashes.chunks(arcade_mesh::bk::MAX_BLOCKS) {
-        if t0.elapsed() > limit {
-            return false;
+        if Instant::now() > until {
+            return Outcome::NotServed(format!("over {} s", params::SERVE_SECONDS));
         }
-        let Ok(raws) = src.get_blocks(chunk) else { return false };
+        let raws = match fetch(chunk) {
+            Ok(r) => r,
+            Err(e) => return Outcome::NotServed(e),
+        };
         if raws.len() != chunk.len() {
-            return false;
+            return Outcome::NotServed(format!("asked {} blocks, got {}", chunk.len(), raws.len()));
         }
         for (raw, want) in raws.iter().zip(chunk) {
             match arcade_chain::Block::parse_with(raw, &p.format) {
                 Ok(b) if b.id == *want && b.computed_merkle_root() == b.header.merkle_root => {}
-                _ => return false,
+                _ => return Outcome::NotServed(format!("block {want} wrong")),
             }
         }
     }
-    t0.elapsed() <= limit
+    if Instant::now() > until {
+        return Outcome::NotServed(format!("over {} s", params::SERVE_SECONDS));
+    }
+    Outcome::Served
+}
+
+/// Ask `peer` for blocks over its mesh link (its link loop hands the answer frames back by id).
+fn via_blocks(peer: &str, p: &ChainParams, chunk: &[Hash256], until: Instant) -> Result<Vec<Vec<u8>>, String> {
+    use crate::crsource::Pipe;
+    use arcade_mesh::bk;
+    use arcade_mesh::link::Frame;
+    let mut via = crate::crvia::Via::open(peer)?;
+    let h: Vec<String> = chunk.iter().map(|x| x.to_hex()).collect();
+    via.send(&Frame::new(serde_json::json!({"t": "bk", "op": "bq", "net": p.net, "h": h, "id": via.id})))?;
+    let mut out = Vec::new();
+    let mut next = 0u64;
+    loop {
+        let f = via.recv(until)?;
+        if let Some(e) = f.head["err"].as_str() {
+            return Err(format!("peer: {e}"));
+        }
+        if f.head["seq"].as_u64() != Some(next) {
+            return Err("answer frames out of order".into());
+        }
+        next += 1;
+        out.extend_from_slice(&f.blob);
+        if out.len() > bk::MAX_ANSWER {
+            return Err("answer too large".into());
+        }
+        if f.head["end"] == true {
+            return bk::split_blocks(&out);
+        }
+    }
 }
 
 /// Verdicts waiting here that the chain can no longer take go.
@@ -166,8 +234,10 @@ pub fn status() -> serde_json::Value {
     let made = MADE.lock().unwrap();
     serde_json::json!({
         "made": made.len(),
-        "not_served": made.iter().filter(|m| !m.2).count(),
-        "last": made.iter().rev().take(10).map(|(h, id, s)| serde_json::json!({"block": h, "replica": hex::encode(id), "served": s})).collect::<Vec<_>>(),
+        "served": made.iter().filter(|m| m.2 == "served").count(),
+        "not_served": made.iter().filter(|m| m.2.starts_with("NOT")).count(),
+        "unreachable": made.iter().filter(|m| m.2.starts_with("no way")).count(),
+        "last": made.iter().rev().take(10).map(|(h, id, s)| serde_json::json!({"block": h, "replica": hex::encode(id), "outcome": s})).collect::<Vec<_>>(),
         "running": RUNNING.lock().unwrap().len(),
     })
 }
