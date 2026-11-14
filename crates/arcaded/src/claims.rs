@@ -25,6 +25,23 @@ pub fn check(node: &Node, tag: &str) -> Check {
     if let Ok(Some(row)) = arcade_ledger::index::tag_row(&node.chain, node.params.chain_no, &tag) {
         return Check { tag, available: false, reason: Some(format!("taken by {} at block {}", row.address, row.block_height)) };
     }
+    // This arcade's own tag index still catching up (a fresh install): every @tag would look
+    // free here, and a claim for a taken one is paid for and then refused by the chain (first
+    // claim wins). Another arcade's word decides; when none can say, wait (2026-11-13 report).
+    if lagging(node) {
+        match owner_while_lagging(node, &tag) {
+            Ok(Some(by)) => {
+                return Check { tag, available: false, reason: Some(format!("taken by {by} (seen by another arcade; this one is still catching up)")) };
+            }
+            Ok(None) => {}
+            Err(why) => {
+                return Check { tag, available: false, reason: Some(format!("this arcade is still catching up with the chain and no other arcade could say whether it is free ({why}); try again in a minute")) };
+            }
+        }
+        if let Some(by) = pending_elsewhere(node, &tag) {
+            return Check { tag, available: false, reason: Some(format!("a claim by {by} is waiting in the mempool")) };
+        }
+    }
     let pending = node.app.claims().unwrap_or_default().into_iter().any(|c| {
         c.tag == tag && matches!(c.status, ClaimStatus::Sent | ClaimStatus::Funding | ClaimStatus::Checking)
     });
@@ -165,6 +182,24 @@ fn advance_one(node: &Node, mut c: Claim) -> Result<Claim, String> {
                     return Ok(c);
                 }
             }
+            // ... and while this arcade's own tag index is behind, another arcade's word.
+            if lagging(node) && arcade_ledger::index::tag_row(&node.chain, p.chain_no, &c.tag).ok().flatten().is_none() {
+                match owner_while_lagging(node, &c.tag) {
+                    Ok(Some(by)) if by != key.address => {
+                        set(&mut c, ClaimStatus::Failed, "taken by someone else first");
+                        node.app.put_claim(&c).ok();
+                        return Ok(c);
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        // Not sent until someone can say it is still free.
+                        c.note = format!("waiting until another arcade can say @{} is still free", c.tag);
+                        c.updated = arcade_app::now();
+                        node.app.put_claim(&c).map_err(|e| e.to_string())?;
+                        return Ok(c);
+                    }
+                }
+            }
             let have = coins(node, &script);
             match build_claim(p, &tags::claim_payload(&c.tag), &sk, &have, FEE_PER_KB, DUST, arcade_app::now() as u32) {
                 Ok(tx) => {
@@ -223,6 +258,42 @@ fn advance_one(node: &Node, mut c: Claim) -> Result<Claim, String> {
     }
     node.app.put_claim(&c).map_err(|e| e.to_string())?;
     Ok(c)
+}
+
+/// This arcade's own tag index is behind the chain: the home chain is borrowed (still syncing)
+/// or more than 10 blocks back.
+fn lagging(node: &Node) -> bool {
+    crate::borrow::is_borrowed(node.params.key) || crate::borrow::home_lag(node).0 > 10
+}
+
+/// Who holds `tag` by another arcade's word, for when this arcade's own tag index is behind.
+/// Ok(None): an arcade keeping the tags says it is not claimed; Err: nobody could say.
+fn owner_while_lagging(node: &Node, tag: &str) -> Result<Option<String>, String> {
+    mesh_verdict(crate::explorer::handle(node, "explorer.tag", &serde_json::json!({"chain": node.params.key, "tag": tag})))
+}
+
+/// explorer.tag's answer as a verdict: an owner, free (only when the mesh was asked and said
+/// "not claimed"; this arcade's own "not claimed" is what can't be trusted here), or unknown.
+fn mesh_verdict(r: Result<serde_json::Value, String>) -> Result<Option<String>, String> {
+    match r {
+        Ok(v) => match v["home_address"].as_str().filter(|a| !a.is_empty()) {
+            Some(a) => Ok(Some(a.to_string())),
+            None => Err("no owner in the answer".into()),
+        },
+        Err(e) => match e.split_once("(asked the mesh too: ") {
+            Some((_, theirs)) if theirs.contains("is not claimed") => Ok(None),
+            Some((_, theirs)) => Err(theirs.trim_end_matches(')').to_string()),
+            None => Err(e),
+        },
+    }
+}
+
+/// A claim for `tag` waiting in the mempool of a V1.0 arcade keeping the home chain (a
+/// borrowed home chain's own pool may not hold it): its sender.
+fn pending_elsewhere(node: &Node, tag: &str) -> Option<String> {
+    let p = node.params;
+    let (v, _) = crate::shares::ask_explorer(node, p, "", "explorer.mempool", &serde_json::json!({"chain": p.key, "local": true})).ok()?;
+    v["pending_tags"].as_array()?.iter().find(|x| x[0] == tag).and_then(|x| x[1].as_str().map(String::from))
 }
 
 /// Who holds `tag` according to an arcade on the mesh (its explorer.tag answer), asked at
@@ -412,4 +483,21 @@ pub fn start_status(node: &Node) -> serde_json::Value {
         // is still fetching headers too).
         "best": best,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mesh_verdict;
+    use serde_json::json;
+
+    #[test]
+    fn a_lagging_arcade_trusts_only_the_mesh() {
+        assert_eq!(mesh_verdict(Ok(json!({"tag": "abc", "home_address": "PXabc"}))), Ok(Some("PXabc".into())));
+        assert_eq!(mesh_verdict(Err("@abc is not claimed (asked the mesh too: @abc is not claimed)".into())), Ok(None));
+        // Our own "not claimed" with no mesh to ask: unknown, not free.
+        assert!(mesh_verdict(Err("@abc is not claimed".into())).is_err());
+        // The mesh could not be reached: unknown.
+        assert!(mesh_verdict(Err("@abc is not claimed (asked the mesh too: no arcade on the mesh offers Pepecoin testnet right now)".into())).is_err());
+        assert!(mesh_verdict(Ok(json!({}))).is_err());
+    }
 }
