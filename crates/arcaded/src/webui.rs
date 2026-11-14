@@ -15,7 +15,7 @@ include!(concat!(env!("OUT_DIR"), "/webui_files.rs"));
 /// another page's frame.
 pub(crate) const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
     img-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; media-src 'self' blob: mediastream:; \
-    frame-src http://127.0.0.1:* http://localhost:*; connect-src 'self'; worker-src 'self' blob:; \
+    frame-src 'self' http://127.0.0.1:* http://localhost:*; connect-src 'self'; worker-src 'self' blob:; \
     frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
 /// A file of the window by its path under /ui/ ("" is index.html).

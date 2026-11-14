@@ -7,6 +7,11 @@ const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : webInvoke;
 // In a browser: notes meant only there (class "web-only") show; in the app they stay hidden.
 const IN_BROWSER = !window.__TAURI__;
 document.addEventListener("DOMContentLoaded", () => document.querySelectorAll(".web-only").forEach((e) => { e.hidden = !IN_BROWSER; }));
+// The arcade's own addresses (http://127.0.0.1:<port>/...) as this window reaches them: in the app,
+// as they are; in a browser, at this page's origin, which is the arcade itself (through an SSH
+// tunnel, or a password-protected entrance on the home network in front of it, docs/WEBUI.md).
+const ARCADE_URL = /^http:\/\/127\.0\.0\.1:\d+(?=\/|$)/;
+const arcadeUrl = (url) => (IN_BROWSER ? String(url || "").replace(ARCADE_URL, location.origin) : url);
 
 // The key from `arcade web`'s link (#k=...), kept for this browser; it changes when arcaded restarts.
 function webKey(ask) {
@@ -46,8 +51,9 @@ async function webInvoke(name, args = {}) {
     }
   }
   if (name === "open_app") {
-    if (!String(args.frame || "").startsWith("http://127.0.0.1:")) throw "apps run only from this arcade";
-    let url = `appwindow.html?frame=${encodeURIComponent(args.frame)}&id=${encodeURIComponent(args.id)}&title=${encodeURIComponent(args.title)}`;
+    const frame = arcadeUrl(args.frame);
+    if (!String(frame || "").startsWith(location.origin + "/app/")) throw "apps run only from this arcade";
+    let url = `appwindow.html?frame=${encodeURIComponent(frame)}&id=${encodeURIComponent(args.id)}&title=${encodeURIComponent(args.title)}`;
     if (args.ring && /^[0-9a-f]{16}$/.test(args.ring)) url += `&ring=${args.ring}`;
     const label = "app-" + String(args.id).replace(/[^A-Za-z0-9_-]/g, "_");
     const w = WEB_WINDOWS[label];
@@ -57,9 +63,10 @@ async function webInvoke(name, args = {}) {
     return;
   }
   if (name === "open_content") {
-    const ok = /^http:\/\/127\.0\.0\.1:\d+\/(content\/[A-Za-z0-9]+|(app|ord)\/[a-z]+\/[A-Za-z0-9]+)$/.test(String(args.url || ""));
+    const u = arcadeUrl(args.url);
+    const ok = String(u || "").startsWith(location.origin + "/") && /^\/(content\/[A-Za-z0-9]+|(app|ord)\/[a-z]+\/[A-Za-z0-9]+)$/.test(String(u).slice(location.origin.length));
     if (!ok) throw "only content from this arcade opens here";
-    window.open(args.url, "_blank", "noopener,popup,width=900,height=900");
+    window.open(u, "_blank", "noopener,popup,width=900,height=900");
     return;
   }
   if (name === "save_file") {

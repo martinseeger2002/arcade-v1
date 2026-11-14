@@ -154,7 +154,7 @@
     $("ap2-storebar").hidden = view !== "store";
     $("ap2-cats").hidden = view !== "store";
     try {
-      base = (await api("rpc.info")).url.replace(/\/rpc$/, "");
+      base = arcadeUrl((await api("rpc.info")).url.replace(/\/rpc$/, ""));
       if (detail) return drawDetail();
       if (view === "mine") {
         const list = await api("apps.installed");
