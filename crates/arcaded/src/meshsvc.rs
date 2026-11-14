@@ -618,6 +618,8 @@ fn serve_loop(
             "sh" if f.head["op"] == "hold" => crate::shares::on_hold(node, &link.peer_id, &f.head),
             "sh" if f.head["op"] == "q" => crate::shares::answer(node, link, &f.head)?,
             "sh" if f.head["op"] == "a" => crate::shares::on_answer(&link.peer_id, &f),
+            // An answer to blocks we asked for over this link (a serving check, crvia), else serve.
+            "bk" if crate::crvia::on_answer(peer, &f) => {}
             "bk" => serve_bk(node, link, addr, &f.head)?,
             "pub" | "sub" | "fx" => crate::realtime::on_frame(node, peer, conn, &f),
             "ud" | "st" | "ui" => crate::udpsvc::on_frame(node, link, &f)?,

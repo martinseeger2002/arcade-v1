@@ -559,6 +559,26 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             let id = crate::arcfraud::demand(node, &svc.net(), &seg, first, count)?;
             Ok(serde_json::json!({"demand": hex::encode(id), "segment": hex::encode(seg), "first": first, "count": count}))
         }
+        // A serving check by hand (§5.4), no verdict posted: does `owner` hand out these blocks?
+        "arc.serve_check" => {
+            let owner: [u8; 32] = s("owner").and_then(|x| hex::decode(x).ok()).and_then(|b| b.try_into().ok()).ok_or("owner required (64 hex)")?;
+            let p = s("chain").and_then(|k| arcade_chain::params::by_key(&k)).ok_or("chain required (a coin key)")?;
+            let hashes: Vec<arcade_chain::Hash256> = match req["hashes"].as_array() {
+                Some(a) => a.iter().filter_map(|x| x.as_str().and_then(|s| arcade_chain::Hash256::from_hex(s).ok())).collect(),
+                None => {
+                    let first = req["first"].as_u64().ok_or("first and count, or hashes")?;
+                    let count = req["count"].as_u64().unwrap_or(50).min(2_000);
+                    (first..first + count).map_while(|h| node.chain.hash_at(p.chain_no, h as u32).ok().flatten()).collect()
+                }
+            };
+            if hashes.is_empty() {
+                return Err("no blocks to ask for (this arcade doesn't keep those heights)".into());
+            }
+            let t = std::time::Instant::now();
+            let how = if crate::crvia::linked(&hex::encode(owner)) { "its mesh link" } else { "dialing it" };
+            let outcome = crate::arcserve::check(node, p, &owner, &hashes);
+            Ok(serde_json::json!({"blocks": hashes.len(), "via": how, "outcome": format!("{outcome:?}"), "seconds": t.elapsed().as_secs_f64()}))
+        }
         "arc.open" => crate::arcsvc::open(node, req),
         "arc.sealing" => crate::arcsvc::sealing(node, req),
         "arc.earn" => crate::arcsvc::earn(node, req),
