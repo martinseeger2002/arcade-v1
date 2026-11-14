@@ -4,7 +4,10 @@
   const PEP = homeCoins;
   const ago = (t) => { if (!t) return "waiting"; const s = Date.now() / 1000 - t; return s < 3600 ? `${Math.max(1, Math.round(s / 60))}m ago` : s < 172800 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`; };
   const PERMS = [["wallet", "Wallet access"], ["contacts", "Contacts"], ["groups", "Group chats"], ["media", "Camera & microphone"], ["pictures", "Pictures in the app"], ["notify", "Notifications"]];
-  let view = "mine", sort = "popular", query = "", base = "http://127.0.0.1:8420", detail = null;
+  let view = "mine", sort = "popular", query = "", cat = "", base = "http://127.0.0.1:8420", detail = null;
+  // Category labels by key, from the last App Store answer (apps.store "categories").
+  let CATS = {};
+  const catLabel = (k) => CATS[k] || k;
 
   const note = (t, bad) => say("ap2-msg", t, bad);
 
@@ -13,6 +16,11 @@
       const l = await api("apps.launch", { chain: a.chain, txid: a.txid });
       await invoke("open_app", { id: l.id, title: l.title, frame: l.frame });
     } catch (e) { note(e.message, true); }
+  }
+
+  // A theme app (category "themes", theme.js): checked, installed if it isn't, then worn (the window reloads).
+  async function useTheme(a) {
+    try { note(`Checking ${a.card.name}…`); await THEME.use(a); } catch (e) { note(`${a.card.name} can't be worn: ${e.message}`, true); }
   }
 
   function cover(a) {
@@ -27,9 +35,44 @@
       a.card.players ? a.card.players + " players" : null, s.tips ? `tipped ${s.tips} time${s.tips === 1 ? "" : "s"}` : null].filter(Boolean).join(" · ");
   }
 
+  // Star ratings live in reviews: a comment that starts with ★★★★☆ (appsvc::stars_of).
+  const STARS = (n) => "★".repeat(n) + "☆".repeat(5 - n);
+  function ratingLine(a) {
+    const r = (a.social || {}).rating || {};
+    return r.count ? h("span", { class: "ap-stars", title: `${r.count} rating${r.count === 1 ? "" : "s"}` }, `★ ${r.average.toFixed(1)} (${r.count})`) : h("span", { class: "ap-stars s" }, "no ratings yet");
+  }
+  function rateBox(a) {
+    const r = (a.social || {}).rating || {};
+    let pick = r.mine || 0;
+    const stars = [1, 2, 3, 4, 5].map((n) => {
+      const b = h("button", { class: "ap-star-pick", title: `${n} star${n === 1 ? "" : "s"}` }, "☆");
+      b.onclick = () => { pick = n; paint(); };
+      return b;
+    });
+    const paint = () => stars.forEach((b, i) => { b.textContent = i < pick ? "★" : "☆"; b.classList.toggle("on", i < pick); });
+    paint();
+    const text = h("input", { placeholder: "Your review (optional)", maxlength: "200", style: "flex:1;min-width:12em" });
+    const send = h("button", { class: "primary small" }, r.mine ? "Change my rating" : "Rate");
+    send.onclick = () => { if (!pick) return note("Pick 1 to 5 stars first.", true); act("reply", a, { text: `${STARS(pick)}${text.value.trim() ? " " + text.value.trim() : ""}` }); };
+    const kids = [h("div", { class: "row" }, ...stars, text, send)];
+    if (r.my_review) {
+      const take = h("button", { class: "small" }, "Remove my rating");
+      take.onclick = () => act("delete", { ...a, txid: r.my_review });
+      kids.push(h("div", { class: "row s" }, `Your rating: ${STARS(r.mine)}`, take));
+    }
+    const dist = (r.dist || [0, 0, 0, 0, 0]).map((x, i) => [5 - i, (r.dist || [])[4 - i] || 0]);
+    const most = Math.max(1, ...dist.map((d) => d[1]));
+    return h("div", { class: "card ap-rate" },
+      h("div", { class: "k" }, r.count ? `Rated ${r.average.toFixed(1)} of 5 by ${r.count}` : "Not rated yet"),
+      ...dist.map(([n, x]) => h("div", { class: "ap-dist" }, h("span", {}, `${n}★`), h("div", { class: "bar" }, h("i", { style: `width:${(x / most) * 100}%` })), h("span", { class: "s" }, String(x)))),
+      ...kids,
+      h("div", { class: "s" }, `A rating is a review on ${HOME.name}: a small fee, like a comment. Your latest one counts; change it any time, or remove it.`));
+  }
+
   function pills(a) {
     return h("div", { class: "ap-pills" },
       a.card.multiplayer ? h("span", { class: "pill" }, "multiplayer") : "",
+      a.card.category ? h("span", { class: "pill" }, catLabel(a.card.category)) : "",
       a.card.genre ? h("span", { class: "pill" }, a.card.genre) : "",
       h("span", { class: "pill" }, a.chain_name));
   }
@@ -49,7 +92,10 @@
     const inst = h("button", { class: a.installed ? "" : "primary" }, a.installed ? "Installed" : "Install");
     inst.disabled = a.installed;
     inst.onclick = async () => { await api("apps.install", { chain: a.chain, txid: a.txid }); note(`${a.card.name} is on Your apps.`); draw(); };
-    const openB = h("button", {}, "Open"); openB.onclick = () => open(a);
+    const theme = a.card.category === "themes";
+    const openB = h("button", {}, theme ? "Preview" : "Open"); openB.onclick = () => open(a);
+    const wear = theme ? h("button", { class: "primary" }, THEME.current()?.id === a.id ? "Worn" : "Use theme") : "";
+    if (wear) wear.onclick = () => useTheme(a);
     const details = h("button", { class: "small" }, "Details"); details.onclick = () => { detail = a; draw(); };
     const comment = h("div", { class: "fd-reply", hidden: true }, (() => { const t = h("input", { placeholder: "Comment…" }); const b = h("button", { class: "small primary" }, "Send"); b.onclick = () => t.value.trim() && act("reply", a, { text: t.value.trim() }); return [t, b]; })());
     const tip = h("div", { class: "fd-reply", hidden: true }, (() => { const t = h("input", { type: "number", min: "0.01", step: "0.01", placeholder: homeTicker(), style: "width:8em" }); const b = h("button", { class: "small primary" }, "Tip"); b.onclick = () => { const v = Math.round(Number(t.value) * 1e8); if (v > 0) act("tip", a, { amount: v }); }; return [t, b]; })());
@@ -57,9 +103,9 @@
     return h("div", { class: "ap-card" }, cover(a),
       h("div", { class: "ap-body" },
         h("div", { class: "ap-title" }, h("b", {}, a.card.name), star),
-        pills(a), h("div", { class: "s" }, byline(a)),
+        pills(a), h("div", { class: "s" }, byline(a), " · ", ratingLine(a)),
         a.card.description ? h("div", { class: "ap-desc" }, a.card.description) : "",
-        h("div", { class: "row ap-row" }, openB, inst, details),
+        h("div", { class: "row ap-row" }, openB, wear || inst, wear ? inst : "", details),
         h("div", { class: "fd-acts" },
           btn(`▲ ${s.likes || 0}`, () => act(s.my_opinion === "like" ? "unlike" : "like", a), s.my_opinion === "like"),
           btn(`▼ ${s.dislikes || 0}`, () => act(s.my_opinion === "dislike" ? "undislike" : "dislike", a), s.my_opinion === "dislike"),
@@ -79,7 +125,9 @@
     const un = h("button", { class: "small" }, "Uninstall");
     un.onclick = async () => { if (!un.dataset.sure) { un.dataset.sure = 1; un.textContent = "Sure?"; return; } await api("apps.uninstall", { id: a.id }); draw(); };
     const det = h("button", { class: "small" }, "Details"); det.onclick = () => { detail = a; draw(); };
-    tile.append(h("div", { class: "row ap-row" }, det, un));
+    const wear = a.card.category === "themes" ? h("button", { class: "small primary" }, THEME.current()?.id === a.id ? "Worn" : "Use theme") : "";
+    if (wear) wear.onclick = () => useTheme(a);
+    tile.append(h("div", { class: "row ap-row" }, wear, det, un));
     return tile;
   }
 
@@ -97,10 +145,12 @@
       h("div", { class: "ap-card" }, cover(a), h("div", { class: "ap-body" }, h("h2", {}, a.card.name), pills(a), h("div", { class: "s" }, byline(a)),
         h("div", { class: "ap-desc" }, a.card.description || ""), h("div", { class: "row ap-row" }, openB))),
       claimed.length ? h("div", { class: "card" }, h("div", { class: "k" }, "This app asks for"), ...sw, h("div", { class: "s" }, "Off: it asks you the first time it wants it.")) : "",
+      h("h2", {}, "Ratings"),
+      rateBox(a),
       h("h2", {}, "Versions"),
       h("ul", { class: "ap-list" }, ...a.versions.map((v, i) => h("li", {}, `${v.version ? "v" + v.version : "version"} · block ${v.height}${i === 0 ? " · shown" : ""}`))),
-      h("h2", {}, `Comments (${a.comments.length})`),
-      h("ul", { class: "ap-list" }, ...(a.comments.length ? a.comments.map((c) => h("li", {}, h("b", {}, (c.from || "").slice(0, 10) + "… "), c.text)) : [h("li", { class: "s" }, "None yet.")])),
+      h("h2", {}, `Reviews and comments (${a.comments.length})`),
+      h("ul", { class: "ap-list" }, ...(a.comments.length ? a.comments.map((c) => h("li", {}, h("b", {}, (c.from || "").slice(0, 10) + "… "), c.stars ? h("span", { class: "ap-stars" }, STARS(c.stars) + " ") : "", c.stars ? c.text.replace(/^[★☆]{5}\s*/, "") : c.text)) : [h("li", { class: "s" }, "None yet.")])),
       h("div", { class: "s" }, `Card ${a.txid} · page ${a.opens} on ${a.chain_name} · by ${a.creator}`)));
   }
 
@@ -112,15 +162,17 @@
     const put = (...kids) => { if (mySeq === drawSeq) body.replaceChildren(...kids); };
     document.querySelectorAll("#ap2-views button").forEach((b) => b.classList.toggle("on", b.dataset.v === view));
     $("ap2-storebar").hidden = view !== "store";
+    $("ap2-cats").hidden = view !== "store";
     try {
-      base = (await api("rpc.info")).url.replace(/\/rpc$/, "");
+      base = arcadeUrl((await api("rpc.info")).url.replace(/\/rpc$/, ""));
       if (detail) return drawDetail();
       if (view === "mine") {
         const list = await api("apps.installed");
         put(list.length ? h("div", { class: "ap-grid" }, ...list.map(mineCard)) : h("div", { class: "mx-empty" }, "No apps installed yet. Find some in the App Store."));
       } else if (view === "store") {
-        const r = await api("apps.store", { sort, q: query });
-        put(r.apps.length ? h("div", { class: "ap-store" }, ...r.apps.map(storeCard)) : h("div", { class: "mx-empty" }, "No apps found."));
+        const r = await api("apps.store", { sort, q: query, category: cat });
+        drawCats(r.categories || []);
+        put(r.apps.length ? h("div", { class: "ap-store" }, ...r.apps.map(storeCard)) : h("div", { class: "mx-empty" }, cat ? `No ${catLabel(cat)} found yet.` : "No apps found."));
       } else if (view === "publish") {
         drawPublish(put);
       } else {
@@ -136,6 +188,18 @@
     } catch (e) { note(e.message, true); }
   }
 
+  // Category chips: All, the known ones (even when empty), then any other a card uses.
+  function drawCats(list) {
+    CATS = Object.fromEntries(list.map((c) => [c.key, c.label]));
+    const total = list.reduce((n, c) => n + c.count, 0);
+    const chip = (key, label, n, about) => {
+      const b = h("button", { class: key === cat ? "on" : "", title: about || "", "data-cat": key }, `${label} ${n}`);
+      b.onclick = () => { cat = key; draw(); };
+      return b;
+    };
+    $("ap2-cats").replaceChildren(chip("", "All", total), ...list.filter((c) => c.known || c.count).map((c) => chip(c.key, c.label, c.count, c.about)));
+  }
+
   function drawPublish(put) {
     const f = (ph, attrs = {}) => h("input", { placeholder: ph, ...attrs });
     const name = f("Name (required, up to 60)"), version = f("Version, e.g. 1.0"), players = f("Players, e.g. 1-4"), genre = f("Genre, e.g. Puzzle"), family = f("Family (rooms shared across versions; letters, digits . _ : -)");
@@ -144,11 +208,17 @@
     const boxes = FLAGS.map(([k, l]) => h("label", { class: "ap-perm" }, h("input", { type: "checkbox", value: k }), " ", l));
     const page = h("input", { type: "file", accept: ".html,.htm,text/html" }), cov = h("input", { type: "file", accept: "image/*" });
     const est = h("div", { class: "s" });
+    // Category: a known one, or a new one typed in (it shows in the App Store once used).
+    const catSel = h("select", {}, h("option", { value: "" }, "Category: Apps"));
+    const catNew = f("or a new category", { maxlength: "24", style: "max-width:14em" });
+    api("apps.categories").then((list) => { catSel.replaceChildren(...list.map((c) => h("option", { value: c.key }, `Category: ${c.label}`)), h("option", { value: "" }, "Category: a new one →")); catSel.value = "apps"; }).catch(() => {});
     const read = (input) => new Promise((ok) => { const file = input.files[0]; if (!file) return ok(null); const r = new FileReader(); r.onload = () => ok({ name: file.name, type: file.type, data: String(r.result).split(",")[1], size: file.size }); r.readAsDataURL(file); });
     const cardOf = () => {
       const c = { name: name.value.trim() };
       for (const [k, el] of [["version", version], ["players", players], ["genre", genre], ["family", family], ["description", desc]]) if (el.value.trim()) c[k] = el.value.trim();
       for (const b of boxes) { const i = b.querySelector("input"); if (i.checked) c[i.value] = true; }
+      const cg = (catNew.value.trim() || catSel.value).toLowerCase().split(/\s+/).join("-");
+      if (cg) c.category = cg;
       return c;
     };
     const estimate = async () => {
@@ -179,7 +249,7 @@
     };
     put(h("div", { class: "card ap-pub" },
       h("p", { class: "s" }, "An app is an HTML page inscribed with its card. Publishing again under the same name replaces your earlier version; the old one still plays at its own link."),
-      name, h("div", { class: "row" }, version, players, genre), family, desc, h("div", { class: "ap-flags" }, ...boxes),
+      name, h("div", { class: "row" }, version, players, genre), h("div", { class: "row" }, catSel, catNew), family, desc, h("div", { class: "ap-flags" }, ...boxes),
       h("label", {}, "App page (HTML) ", page), h("label", {}, "Cover image ", cov), est, h("div", { class: "row" }, go)));
   }
 

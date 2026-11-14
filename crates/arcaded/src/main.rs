@@ -6,6 +6,7 @@
 //!           [--http-port N|0] [--http-bind ADDR] [--site DIR] [--stun-port N|0]
 
 mod accountsvc;
+mod webui;
 mod rulecheck;
 mod updater;
 mod handlegate;
@@ -31,7 +32,9 @@ mod dproto;
 mod commands;
 mod chainsvc;
 mod chains;
+mod chaindrive;
 mod claims;
+mod resend;
 mod cbimport;
 mod corecoins;
 mod coreboot;

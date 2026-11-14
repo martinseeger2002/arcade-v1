@@ -64,9 +64,15 @@ pub struct Coin {
     pub script: Vec<u8>,
 }
 
-/// Outputs that can never be spent are not coins.
-pub fn is_unspendable(value: u64, script: &[u8]) -> bool {
-    script.first() == Some(&0x6a) || (value == 0 && script.is_empty())
+/// Core's MAX_SCRIPT_SIZE: a longer output script can never be spent.
+pub const MAX_SCRIPT_SIZE: usize = 10_000;
+
+/// Outputs that can never be spent are not coins: Core's CScript::IsUnspendable, an OP_RETURN
+/// script or one over MAX_SCRIPT_SIZE. Nothing else, not even 0 coins to an empty script: anyone
+/// can spend that (an empty scriptSig leaves nothing false behind), and Bitcoin block 310272 does
+/// (tx ce7d73cb…, spending 87d8ed6a…:0 from block 301450).
+pub fn is_unspendable(_value: u64, script: &[u8]) -> bool {
+    script.first() == Some(&0x6a) || script.len() > MAX_SCRIPT_SIZE
 }
 
 fn other(e: impl std::fmt::Display) -> StoreError {
@@ -584,6 +590,14 @@ fn chains_dir(shared: &Path) -> std::path::PathBuf {
     }
 }
 
+/// Write a place file (through a temporary file, so it is whole or absent).
+fn write_place(chains: &Path, file: &Path, dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(chains).map_err(other)?;
+    let tmp = file.with_extension("place.tmp");
+    std::fs::write(&tmp, format!("{}\n", dir.display())).map_err(other)?;
+    std::fs::rename(&tmp, file).map_err(other)
+}
+
 /// Whether a file holds anything of chain `c`.
 fn has_rows(s: &Store, c: u16) -> Result<bool> {
     let pre = k_chain(c);
@@ -649,22 +663,162 @@ impl ChainDb {
 
     /// The path of chain `c`'s own file (whether or not it exists).
     pub fn own_path(&self, c: u16) -> std::path::PathBuf {
-        self.dir.join(chain_dir_name(c)).join("chain.mdbx")
+        self.own_dir(c).join("chain.mdbx")
+    }
+
+    /// Chain `c`'s own directory: `<chains>/<key>/`, or the directory its place file
+    /// `<chains>/<key>.place` names (a chain kept on another drive, docs/CHAINDRIVES.md).
+    pub fn own_dir(&self, c: u16) -> std::path::PathBuf {
+        std::fs::read_to_string(self.place_file(c))
+            .ok()
+            .map(|t| std::path::PathBuf::from(t.trim()))
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| self.dir.join(chain_dir_name(c)))
+    }
+
+    fn place_file(&self, c: u16) -> std::path::PathBuf {
+        self.dir.join(format!("{}.place", chain_dir_name(c)))
+    }
+
+    /// Whether chain `c` is kept somewhere other than `<chains>/<key>/` (a place file).
+    pub fn placed_elsewhere(&self, c: u16) -> bool {
+        self.place_file(c).is_file()
+    }
+
+    /// Keep chain `c`'s own file in `dir` (created if missing), for a chain with no own file
+    /// yet (one being installed): its first write creates it there. None: `<chains>/<key>/`.
+    pub fn set_place(&self, c: u16, dir: Option<&Path>) -> Result<()> {
+        if self.files.read().unwrap().contains_key(&c) || self.own_path(c).is_file() {
+            return Err(other(format!("{} already has its file; move it instead", chain_dir_name(c))));
+        }
+        match dir {
+            Some(d) => {
+                std::fs::create_dir_all(d).map_err(|e| other(format!("{}: {e}", d.display())))?;
+                write_place(&self.dir, &self.place_file(c), d)
+            }
+            None => match std::fs::remove_file(self.place_file(c)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(other(e)),
+                _ => Ok(()),
+            },
+        }
+    }
+
+    /// Move chain `c`'s own file into `to` (None: back to `<chains>/<key>/`) while the arcade
+    /// runs: a compact copy of the file (mdbx's consistent snapshot), checked by opening it,
+    /// then the chain switches to it and the old file is deleted. Stop the chain's writers first
+    /// (its sync and address build): anything written to the old file after the copy is lost.
+    /// `progress` gets the copy's path, to measure. Returns the new directory.
+    pub fn relocate(&self, c: u16, to: Option<&Path>, progress: impl FnOnce(&Path)) -> Result<std::path::PathBuf> {
+        if self.readonly {
+            return Err(other("read-only"));
+        }
+        let name = chain_dir_name(c);
+        let src = self.files.read().unwrap().get(&c).cloned().ok_or_else(|| other(format!("{name} has no file of its own to move")))?;
+        let home_dir = self.dir.join(&name);
+        let from = self.own_dir(c);
+        let target = to.map(Path::to_path_buf).unwrap_or_else(|| home_dir.clone());
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        if canon(&from) == canon(&target) {
+            return Err(other(format!("{name} is already in {}", target.display())));
+        }
+        // Back home, it is copied beside the old directory first (whose name it takes after).
+        let staging = if to.is_some() { target.clone() } else { self.dir.join(format!(".{name}.moving")) };
+        if to.is_none() {
+            // Left by a move home cut short before its switch: never in use.
+            let _ = std::fs::remove_dir_all(&staging);
+        }
+        if staging.join("chain.mdbx").exists() {
+            return Err(other(format!("{} already holds a chain.mdbx; move or delete it first", staging.display())));
+        }
+        std::fs::create_dir_all(&staging).map_err(|e| other(format!("{}: {e}", staging.display())))?;
+        let part = staging.join("chain.mdbx.part");
+        let _ = std::fs::remove_file(&part);
+        // Left by a move cut short after its switch: a copy already replaced.
+        let _ = std::fs::remove_dir_all(self.dir.join(format!(".{name}.old")));
+        let lock = self.batch_of(&src);
+        let _batch = lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.flush_coins(c)?;
+        progress(&part);
+        if let Err(e) = src.compact_copy(&part) {
+            let _ = std::fs::remove_file(&part);
+            return Err(e);
+        }
+        let file = staging.join("chain.mdbx");
+        std::fs::rename(&part, &file).map_err(other)?;
+        let new = match Store::open_sync(&file, &CHAIN_SCHEMA, false) {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                let _ = std::fs::remove_file(&file);
+                return Err(e);
+            }
+        };
+        let same = |a: &Store, b: &Store| -> Result<bool> {
+            Ok(a.read(|r| r.get(STATE, &k_state(c, "tip")))? == b.read(|r| r.get(STATE, &k_state(c, "tip")))?)
+        };
+        if !same(&src, &new)? {
+            drop(new);
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(other("the copy's tip differs from the chain's; nothing was moved"));
+        }
+        new.read(|r| crate::txruns::load(r, new.id(), &[c]))?;
+        // Switch. The new place is written down first, so a stop at any point leaves a whole
+        // copy where the place says; `.<key>.old` only ever holds a copy already replaced.
+        let from_home = from == home_dir;
+        let aside = self.dir.join(format!(".{name}.old"));
+        {
+            let mut files = self.files.write().unwrap();
+            match to {
+                Some(d) => {
+                    write_place(&self.dir, &self.place_file(c), d)?;
+                    if from_home {
+                        std::fs::rename(&home_dir, &aside).map_err(other)?;
+                    }
+                }
+                None => {
+                    std::fs::rename(&staging, &home_dir).map_err(other)?;
+                    let _ = std::fs::remove_file(self.place_file(c));
+                }
+            }
+            files.insert(c, new);
+        }
+        drop(src);
+        // A reader still holding the old file keeps it until it closes.
+        let gone = if from_home { aside } else { from };
+        if std::fs::symlink_metadata(&gone).is_ok_and(|m| m.file_type().is_symlink()) {
+            let real = canon(&gone);
+            let _ = std::fs::remove_file(&gone);
+            let _ = std::fs::remove_dir_all(real);
+        } else {
+            let _ = std::fs::remove_dir_all(&gone);
+        }
+        Ok(target)
     }
 
     fn open_own_files(&self) -> Result<()> {
         let Ok(rd) = std::fs::read_dir(&self.dir) else { return Ok(()) };
         let mut files = self.files.write().unwrap();
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let p = e.path().join("chain.mdbx");
-            if !p.is_file() {
-                continue;
-            }
+        let mut names: Vec<String> = rd
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with('.'))
+            .map(|n| n.strip_suffix(".place").map(String::from).unwrap_or(n))
+            .collect();
+        names.sort();
+        names.dedup();
+        for name in names {
             let Some(c) = chain_no_of_dir(&name) else {
-                eprintln!("chain files: {} is no chain's; left alone", e.path().display());
+                if self.dir.join(&name).join("chain.mdbx").is_file() {
+                    eprintln!("chain files: {} is no chain's; left alone", self.dir.join(&name).display());
+                }
                 continue;
             };
+            let p = self.own_path(c);
+            if !p.is_file() {
+                if self.placed_elsewhere(c) && !self.own_dir(c).is_dir() {
+                    eprintln!("chain files: {name} is kept in {}, which isn't there (drive not mounted?)", self.own_dir(c).display());
+                }
+                continue;
+            }
             let s = if self.readonly { Store::open_readonly(&p, &CHAIN_SCHEMA)? } else { Store::open_sync(&p, &CHAIN_SCHEMA, false)? };
             files.insert(c, Arc::new(s));
         }
@@ -704,6 +858,11 @@ impl ChainDb {
             self.legacy.clone()
         } else {
             let p = self.own_path(c);
+            // On another drive: its folder must be there (set_place made it). Missing means the
+            // drive isn't mounted, and a new file would start the chain over on the mount point.
+            if self.placed_elsewhere(c) && !p.parent().unwrap().is_dir() {
+                return Err(other(format!("{} is kept in {}, which isn't there: is that drive mounted?", chain_dir_name(c), p.parent().unwrap().display())));
+            }
             std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| StoreError::Other(format!("{}: {e}", p.display())))?;
             let s = Arc::new(Store::open_sync(&p, &CHAIN_SCHEMA, false)?);
             // Add-on tables of indexers already registered for this chain.
@@ -972,9 +1131,11 @@ impl ChainDb {
         if let Some(s) = own.filter(|s| !Arc::ptr_eq(s, &self.legacy)) {
             drop(s);
             // A reader still holding it keeps the unlinked file until it closes.
-            let dir = self.own_path(chain_no).parent().unwrap().to_path_buf();
+            let dir = self.own_dir(chain_no);
             std::fs::remove_dir_all(&dir).map_err(|e| StoreError::Other(format!("{}: {e}", dir.display())))?;
         }
+        // A drive chosen for it goes with it: a new install starts in <chains>/<key>/ again.
+        let _ = std::fs::remove_file(self.place_file(chain_no));
         Ok(0)
     }
 

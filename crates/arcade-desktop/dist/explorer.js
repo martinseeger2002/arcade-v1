@@ -39,7 +39,7 @@
   let httpBase = null;
   const imgArgs = async () => {
     if (httpBase === null) {
-      try { httpBase = (await api("rpc.info")).url.replace(/\/rpc$/, ""); } catch { httpBase = ""; }
+      try { httpBase = arcadeUrl((await api("rpc.info")).url.replace(/\/rpc$/, "")); } catch { httpBase = ""; }
     }
     return httpBase ? { img: "links" } : {};
   };

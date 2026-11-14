@@ -39,6 +39,8 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
     let p = node.params;
     let c = p.chain_no;
     match req["cmd"].as_str().unwrap_or("") {
+        // The link that opens the desktop app's window in a browser (crate::webui; `arcade web`).
+        "ui.link" => crate::webui::link(node, node.http_port.get().copied().unwrap_or(8420)),
         "status" => {
             let tip = node.chain.tip(c).map_err(|e| e.to_string())?;
             use arcade_ledger::index;
@@ -221,7 +223,8 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             let keys: Vec<String> = req["members"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
             crate::grpsvc::remove(node, &s("id").ok_or("id required")?, &keys)
         }
-        "apps.store" => Ok(crate::appsvc::store(node, &s("sort").unwrap_or_else(|| "popular".into()), &s("q").unwrap_or_default(), req["flagged"] == true)),
+        "apps.store" => Ok(crate::appsvc::store(node, &s("sort").unwrap_or_else(|| "popular".into()), &s("q").unwrap_or_default(), req["flagged"] == true, &s("category").unwrap_or_default())),
+        "apps.categories" => Ok(crate::appsvc::categories()),
         "apps.installed" => Ok(crate::appsvc::installed(node)),
         "apps.install" => crate::appsvc::install(node, &s("chain").ok_or("chain required")?, &s("txid").ok_or("txid required")?),
         "apps.uninstall" => crate::appsvc::uninstall(node, &s("id").ok_or("id required")?),
@@ -541,7 +544,18 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             *node.my_sizes.lock().unwrap() = m.clone();
             Ok(json!({"measured": m, "chains": crate::chains::list(node)}))
         }
-        "chains.status" => crate::chains::status(node, &s("key").ok_or("key required")?),
+        "chains.status" => {
+            let key = s("key").ok_or("key required")?;
+            let mut st = crate::chains::status(node, &key)?;
+            // Where its file is, and a move to another drive (crate::chaindrive).
+            if let Some(p) = crate::chains::find(&key).filter(|_| st["installed"] != false && st.is_object()) {
+                st["place"] = crate::chaindrive::place(node, p.chain_no);
+                st["move"] = crate::chaindrive::status(p.key);
+            }
+            Ok(st)
+        }
+        "chains.drives" => Ok(crate::chaindrive::drives(node)),
+        "chains.move" => crate::chaindrive::start(&node.self_arc(), &s("key").ok_or("key required")?, &s("drive").unwrap_or_else(|| "home".into())),
         "arc.status" => crate::arcsvc::status(node),
         "arc.block" => crate::arcsvc::block(req),
         "arc.submit" => crate::arcsvc::submit(req),
@@ -584,6 +598,12 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "arc.earn" => crate::arcsvc::earn(node, req),
         "chains.add" => {
             let with: Vec<String> = req["with"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+            // A drive chosen for it (crate::chaindrive): its file starts there.
+            if let (Some(d), Some(p)) = (s("drive").filter(|d| !d.is_empty() && d != "home"), s("key").as_deref().and_then(crate::chains::find)) {
+                if !node.extra.lock().unwrap().contains_key(p.key) && p.chain_no != node.params.chain_no {
+                    crate::chaindrive::place_new(node, p.chain_no, p.key, &d)?;
+                }
+            }
             crate::chains::add(&node.self_arc(), &s("key").ok_or("key required")?, &s("mode").unwrap_or_else(|| "full".into()), with)
         }
         "chains.unqueue" => crate::chains::unqueue(node, &s("key").ok_or("key required")?),

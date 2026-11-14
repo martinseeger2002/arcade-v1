@@ -96,6 +96,10 @@ Set these in the service's environment, for example with `systemctl --user edit 
 
 Stopping the service writes the coin cache to disk first, which can take a few minutes while a chain is catching up. The service units allow 300 s for that (`TimeoutStopSec=300`). A unit written by an older installer lacks this line, so systemd kills the service after 90 s and the next start redoes the unsaved blocks. Re-run the installer, or add `TimeoutStopSec=300` under `[Service]` with `systemctl --user edit arcaded`.
 
+### The app's window in a browser
+
+No screen on the arcade's computer, or using it from another one? `arcade web` prints a link that opens the same window in a browser, on that computer or through an SSH tunnel (`ssh -N -L 8420:127.0.0.1:8420 you@that-computer`). It answers only that computer and needs the key in the link. See [docs/WEBUI.md](docs/WEBUI.md).
+
 ### Uninstall
 
 ```sh

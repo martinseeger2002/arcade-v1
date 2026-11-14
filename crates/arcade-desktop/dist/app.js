@@ -133,7 +133,7 @@ async function drawStart() {
 // Restore a wallet from its words right on Home (the same as the Wallet tab's Restore).
 let restoring = false;
 function restoreBox() {
-  const ta = h("textarea", { rows: "2", placeholder: "or: your 12 words, separated by spaces", autocomplete: "off", spellcheck: "false", class: "start-words" });
+  const ta = h("textarea", { rows: "2", placeholder: "or: your 12 words, separated by spaces", autocomplete: "off", spellcheck: "false", autocapitalize: "off", autocorrect: "off", class: "start-words" });
   const m = h("p", { class: "msg" });
   const b = h("button", { onclick: async () => {
     if (restoring) return;
@@ -147,7 +147,8 @@ function restoreBox() {
     } catch (e) { msg(m, e.message, "bad"); }
     finally { restoring = false; b.disabled = false; }
   } }, "Restore my wallet");
-  return h("div", { class: "start-restore" }, ta, h("div", { class: "row" }, b), m);
+  const web = IN_BROWSER ? h("p", { class: "hint" }, "In a browser, your words go through your tunnel to this arcade only. Do it on a computer you trust: browser extensions can read what a page shows.") : null;
+  return h("div", { class: "start-restore" }, ta, web, h("div", { class: "row" }, b), m);
 }
 
 // Home: every arcade linked or heard lately, who runs it, and what it offers per chain.
@@ -545,7 +546,7 @@ async function refresh() {
     if (tab === "wallet") await refreshWallet();
     if (tab === "mine") await refreshMine();
     if (tab === "activity") await refreshActivity();
-    if (tab === "options") await refreshOptions();
+    if (tab === "options") { await refreshOptions(); refreshWebUi(); }
   } catch (e) {
     $("conn").textContent = "service not running"; $("conn").className = "pill bad";
   }

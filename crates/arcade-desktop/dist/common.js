@@ -1,7 +1,87 @@
 // Shared by the main window (index.html) and app windows (appwindow.html); loaded first.
 // Each tab's script is an IIFE and uses these globals; app.js is a plain script beside them.
 const $ = (id) => document.getElementById(id);
-const invoke = window.__TAURI__.core.invoke;
+// In the desktop app the window's calls go to the app; in a browser (arcaded serves these same
+// files at /ui/, docs/WEBUI.md) the same four calls go to arcaded over HTTP.
+const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : webInvoke;
+// In a browser: notes meant only there (class "web-only") show; in the app they stay hidden.
+const IN_BROWSER = !window.__TAURI__;
+document.addEventListener("DOMContentLoaded", () => document.querySelectorAll(".web-only").forEach((e) => { e.hidden = !IN_BROWSER; }));
+// The arcade's own addresses (http://127.0.0.1:<port>/...) as this window reaches them: in the app,
+// as they are; in a browser, at this page's origin, which is the arcade itself (through an SSH
+// tunnel, or a password-protected entrance on the home network in front of it, docs/WEBUI.md).
+const ARCADE_URL = /^http:\/\/127\.0\.0\.1:\d+(?=\/|$)/;
+const arcadeUrl = (url) => (IN_BROWSER ? String(url || "").replace(ARCADE_URL, location.origin) : url);
+
+// The key from `arcade web`'s link (#k=...), kept for this browser; it changes when arcaded restarts.
+function webKey(ask) {
+  const m = location.hash.match(/[#&]k=([0-9a-f]{16,128})/);
+  if (m) {
+    try { localStorage.setItem("arcade.uikey", m[1]); } catch {}
+    history.replaceState(null, "", location.pathname + location.search);
+    return m[1];
+  }
+  let k = "";
+  try { k = localStorage.getItem("arcade.uikey") || ""; } catch {}
+  if (!k || ask) {
+    const got = (prompt("This arcade is locked. Paste its link or key (run: arcade web)") || "").trim();
+    const g = got.match(/([0-9a-f]{16,128})\s*$/);
+    if (g) { k = g[1]; try { localStorage.setItem("arcade.uikey", k); } catch {} }
+  }
+  return k;
+}
+
+const WEB_WINDOWS = {};
+async function webInvoke(name, args = {}) {
+  if (name === "api") {
+    // arcaded's JSON-RPC with the cookie: the same commands the app sends over the socket.
+    const { cmd, ...params } = args.req || {};
+    for (let tries = 0; tries < 2; tries++) {
+      let r;
+      try {
+        r = await fetch("/rpc", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Basic " + btoa("__cookie__:" + webKey(tries > 0)) }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: cmd, params }) });
+      } catch (e) {
+        return { ok: false, error: "the arcade can't be reached (is it running, and the tunnel open?)" };
+      }
+      if (r.status === 401 && tries === 0) continue;
+      if (r.status === 401) return { ok: false, error: "locked: open the link from `arcade web` (the key changes when the arcade restarts)" };
+      let j;
+      try { j = await r.json(); } catch { return { ok: false, error: `the arcade answered ${r.status}` }; }
+      return j.error ? { ok: false, error: j.error.message || String(j.error) } : { ok: true, result: j.result };
+    }
+  }
+  if (name === "open_app") {
+    const frame = arcadeUrl(args.frame);
+    if (!String(frame || "").startsWith(location.origin + "/app/")) throw "apps run only from this arcade";
+    let url = `appwindow.html?frame=${encodeURIComponent(frame)}&id=${encodeURIComponent(args.id)}&title=${encodeURIComponent(args.title)}`;
+    if (args.ring && /^[0-9a-f]{16}$/.test(args.ring)) url += `&ring=${args.ring}`;
+    const label = "app-" + String(args.id).replace(/[^A-Za-z0-9_-]/g, "_");
+    const w = WEB_WINDOWS[label];
+    if (w && !w.closed && !args.ring) { w.focus(); return; }
+    WEB_WINDOWS[label] = window.open(url, label, "popup,width=1000,height=720");
+    if (!WEB_WINDOWS[label]) throw "the browser blocked the app's window: allow pop-ups for this page";
+    return;
+  }
+  if (name === "open_content") {
+    const u = arcadeUrl(args.url);
+    const ok = String(u || "").startsWith(location.origin + "/") && /^\/(content\/[A-Za-z0-9]+|(app|ord)\/[a-z]+\/[A-Za-z0-9]+)$/.test(String(u).slice(location.origin.length));
+    if (!ok) throw "only content from this arcade opens here";
+    window.open(u, "_blank", "noopener,popup,width=900,height=900");
+    return;
+  }
+  if (name === "save_file") {
+    const bin = atob(args.data || "");
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([bytes]));
+    a.download = String(args.name || "file").replace(/[\/\\]/g, "_");
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    return a.download;
+  }
+  throw `unknown call ${name}`;
+}
 
 // Everything goes through arcaded's local API (one JSON request each).
 async function api(cmd, args = {}) {

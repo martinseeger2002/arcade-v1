@@ -305,6 +305,10 @@ pub fn unqueue(node: &Node, key: &str) -> Result<Value, String> {
         return Err(format!("{key} isn't waiting to be installed"));
     }
     save_queue(node, &q);
+    // A drive chosen for it is forgotten with it (crate::chaindrive).
+    if let Some(p) = by_key(key) {
+        let _ = node.chain.set_place(p.chain_no, None);
+    }
     Ok(json!({"unqueued": key}))
 }
 
@@ -1167,12 +1171,32 @@ fn turn_wait(busy: Option<&str>, name: &str, at: u64, tip: u64) -> Option<String
 /// and launches a new thread at once, while the old one can be minutes into a round.
 static FOLLOWING: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 
-struct Following(u16);
+pub(crate) struct Following(u16);
 
 impl Drop for Following {
     fn drop(&mut self) {
         FOLLOWING.lock().unwrap_or_else(|e| e.into_inner()).retain(|c| *c != self.0);
     }
+}
+
+/// A move (crate::chaindrive): wait up to 2 minutes until no thread stores chain `c` (its
+/// follower was told to stop), and hold it until dropped.
+pub(crate) fn wait_stopped(c: u16) -> Option<Following> {
+    let t = std::time::Instant::now();
+    let stop = AtomicBool::new(false);
+    take_chain(c, &stop, || {
+        if t.elapsed() > Duration::from_secs(120) {
+            stop.store(true, Ordering::Relaxed);
+        }
+    })
+}
+
+/// Start a chain's follower again after a move held it: the same mode, indexes and share.
+pub(crate) fn relaunch(node: &Arc<Node>, run: &ChainRun, paused: bool) -> Result<(), String> {
+    node.extra.lock().unwrap().remove(run.params.key);
+    launch(node, run.params.key, &run.mode, run.indexes.clone(), run.added, paused, run.share.clone())?;
+    save(node);
+    Ok(())
 }
 
 /// Wait until no other thread stores chain `c`, then take it (given back when dropped).

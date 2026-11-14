@@ -1017,3 +1017,80 @@ fn rules_not_switched_on_are_watched_not_enforced() {
     let w = f.db.rule_watch(c).unwrap().unwrap();
     assert_eq!((w.checked, w.broken), (2, 0));
 }
+
+/// Only Core's unspendable outputs are left out of the coins (OP_RETURN, or a script over
+/// MAX_SCRIPT_SIZE). 0 coins to an empty script is a coin anyone can spend, and a block spending
+/// it is valid (Bitcoin block 310272 spends one from block 301450).
+#[test]
+fn an_empty_script_with_no_coins_is_still_a_coin() {
+    use crate::db::{is_unspendable, MAX_SCRIPT_SIZE};
+    assert!(!is_unspendable(0, &[]));
+    assert!(!is_unspendable(5, &[]));
+    assert!(is_unspendable(0, &[0x6a, 0x01, 0x00]));
+    assert!(!is_unspendable(0, &vec![0x51; MAX_SCRIPT_SIZE]));
+    assert!(is_unspendable(0, &vec![0x51; MAX_SCRIPT_SIZE + 1]));
+
+    let f = fixture();
+    let cb1 = tx(&[], &[(50, p2pkh(1)), (0, Vec::new()), (0, vec![0x6a, 0x01, 0x07])], 1);
+    let b1 = block(f.g.hash(), vec![cb1.clone()], 2);
+    f.db.connect_blocks(f.p, &[b1.clone()]).unwrap();
+    let op = |vout| arcade_chain::OutPoint { txid: cb1.txid, vout };
+    assert!(f.db.coin(f.p, &op(1)).unwrap().is_some_and(|c| c.value == 0 && c.script.is_empty()), "the empty output is a coin");
+    assert!(f.db.coin(f.p, &op(2)).unwrap().is_none(), "OP_RETURN is no coin");
+
+    let spend = tx(&[(cb1.txid, 1)], &[(0, p2pkh(2))], 0);
+    let b2 = block(b1.hash(), vec![tx(&[], &[(50, p2pkh(3))], 2), spend], 3);
+    assert_eq!(f.db.connect_blocks(f.p, &[b2]).unwrap().height, 2);
+    assert!(f.db.coin(f.p, &op(1)).unwrap().is_none(), "spent");
+}
+
+/// A chain's file moved to another drive (docs/CHAINDRIVES.md) while the database stays open:
+/// every row comes along, the chain goes on syncing there, a fresh open finds it through its
+/// place file, and it moves back home; removing the chain deletes it where it is.
+#[test]
+fn a_chain_moves_to_another_drive_and_back() {
+    let f = fixture();
+    let c = f.p.chain_no;
+    let blocks = busy_chain(&f.g, 30);
+    f.db.connect_blocks(f.p, &blocks[..20]).unwrap();
+    let before = dump_chain(&f.db, c);
+    let home = f.db.own_dir(c);
+    assert!(home.join("chain.mdbx").is_file() && !f.db.placed_elsewhere(c));
+
+    let drive = tempfile::tempdir().unwrap();
+    let to = drive.path().join("arcade-chains").join("x");
+    let mut copied = None;
+    assert_eq!(f.db.relocate(c, Some(&to), |p| copied = Some(p.to_path_buf())).unwrap(), to);
+    assert_eq!(copied.unwrap(), to.join("chain.mdbx.part"));
+    assert!(f.db.placed_elsewhere(c) && f.db.own_dir(c) == to && to.join("chain.mdbx").is_file());
+    assert!(!home.exists(), "the old copy is deleted");
+    assert_eq!(dump_chain(&f.db, c), before, "every row came along");
+    assert!(f.db.relocate(c, Some(&to), |_| {}).is_err(), "already there");
+
+    // It syncs on in its new place, and a fresh open finds it there.
+    f.db.connect_blocks(f.p, &blocks[20..]).unwrap();
+    let after = dump_chain(&f.db, c);
+    let path = f._dir.path().join("chain.mdbx");
+    drop(f.db);
+    let db = ChainDb::open(&path).unwrap();
+    assert_eq!(db.tip(c).unwrap().unwrap().height, 30);
+    assert_eq!(dump_chain(&db, c), after);
+
+    // Back home.
+    assert_eq!(db.relocate(c, None, |_| {}).unwrap(), home);
+    assert!(!db.placed_elsewhere(c) && home.join("chain.mdbx").is_file() && !to.exists());
+    assert_eq!(dump_chain(&db, c), after);
+    let spend = blocks[29].txs[1].inputs[0].prevout;
+    assert!(db.coin(f.p, &spend).unwrap().is_none(), "spent coins stay spent");
+
+    // A place chosen before the first write: the file starts there; removal deletes it there.
+    db.relocate(c, Some(&to), |_| {}).unwrap();
+    while db.remove_chain_batch(c, 10_000).unwrap() > 0 {}
+    assert!(!to.exists() && !db.placed_elsewhere(c));
+    db.set_place(c, Some(&to)).unwrap();
+    std::fs::remove_dir(&to).unwrap();
+    assert!(db.connect_blocks(f.p, &[f.g.clone()]).is_err(), "drive gone: refused, not started over");
+    db.set_place(c, Some(&to)).unwrap();
+    db.connect_blocks(f.p, &[f.g.clone()]).unwrap();
+    assert!(to.join("chain.mdbx").is_file(), "its first write is on the chosen drive");
+}

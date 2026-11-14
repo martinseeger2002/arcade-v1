@@ -174,6 +174,59 @@ fn flags(node: &Node, apps: &[App]) -> BTreeMap<String, String> {
 }
 
 /// Opinions, comments and tips on any version of an app (home chain feed acts).
+/// A review's stars: a comment that begins with five marks, ★ for each star given and ☆ for the
+/// rest, given ones first ("★★★★☆ works well" = 4). The original arcade shows it as a comment.
+pub fn stars_of(text: &str) -> Option<(u8, &str)> {
+    let head: Vec<char> = text.chars().take(5).collect();
+    if head.len() < 5 || !head.iter().all(|c| *c == '★' || *c == '☆') {
+        return None;
+    }
+    let n = head.iter().take_while(|c| **c == '★').count();
+    if n == 0 || head[n..].iter().any(|c| *c == '★') {
+        return None;
+    }
+    let rest = &text[head.iter().map(|c| c.len_utf8()).sum::<usize>()..];
+    Some((n as u8, rest.trim()))
+}
+
+/// Comments on an app (any version) as they stand: an edit by its writer replaces its text, a
+/// delete by its writer takes it out. Oldest first.
+fn comments_on(acts: &[Value], txids: &BTreeSet<String>) -> Vec<Value> {
+    let k = |a: &Value| a["kind"].as_u64().unwrap_or(0);
+    let order = |a: &Value| (a["h"].as_u64().filter(|h| *h > 0).unwrap_or(1 << 60), a["txid"].as_str().unwrap_or("").to_string());
+    let mut out: Vec<Value> = acts.iter().filter(|a| k(a) == 3 && txids.contains(a["target"].as_str().unwrap_or(""))).cloned().collect();
+    out.retain(|c| !acts.iter().any(|a| k(a) == 6 && a["target"] == c["txid"] && a["from"] == c["from"]));
+    for c in out.iter_mut() {
+        if let Some(e) = acts.iter().filter(|a| k(a) == 5 && a["target"] == c["txid"] && a["from"] == c["from"]).max_by_key(|a| order(a)) {
+            c["text"] = e["text"].clone();
+        }
+        if let Some((n, _)) = stars_of(c["text"].as_str().unwrap_or("")) {
+            c["stars"] = json!(n);
+        }
+    }
+    out.sort_by_key(|a| order(a));
+    out
+}
+
+/// Star ratings from the reviews: each person's latest review with stars counts.
+fn ratings(comments: &[Value], me: &str) -> Value {
+    let mut by: BTreeMap<String, (u8, String)> = BTreeMap::new();
+    for c in comments {
+        if let Some(n) = c["stars"].as_u64() {
+            by.insert(c["from"].as_str().unwrap_or("").to_string(), (n as u8, c["txid"].as_str().unwrap_or("").to_string()));
+        }
+    }
+    let mut dist = [0u64; 5];
+    for (n, _) in by.values() {
+        dist[*n as usize - 1] += 1;
+    }
+    let count: u64 = dist.iter().sum();
+    let sum: u64 = dist.iter().enumerate().map(|(i, x)| (i as u64 + 1) * x).sum();
+    let mine = by.get(me);
+    json!({"count": count, "average": if count == 0 { Value::Null } else { json!((sum as f64 / count as f64 * 10.0).round() / 10.0) },
+           "dist": dist, "mine": mine.map(|m| m.0), "my_review": mine.map(|m| m.1.clone())})
+}
+
 fn social(acts: &[Value], txids: &BTreeSet<String>, me: &str) -> Value {
     let on: Vec<&Value> = acts.iter().filter(|a| txids.contains(a["target"].as_str().unwrap_or(""))).collect();
     let k = |a: &Value| a["kind"].as_u64().unwrap_or(0);
@@ -194,13 +247,17 @@ fn social(acts: &[Value], txids: &BTreeSet<String>, me: &str) -> Value {
     }
     let nl = likes.values().filter(|x| x.0 == 1).count();
     let nd = dislikes.values().filter(|x| x.0 == 8).count();
-    let mut comments: Vec<&Value> = on.iter().filter(|a| k(a) == 3).copied().collect();
-    comments.sort_by_key(|a| order(a));
+    let comments = comments_on(acts, txids);
+    let rating = ratings(&comments, me);
+    // Each rating moves the score like a like or a dislike would: +1 for 5 stars, -1 for 1.
+    // (stars - 3) / 2 per rater: 5 stars +1, 4 +0.5, 3 nothing, 2 -0.5, 1 -1.
+    let stars_score: f64 = rating["dist"].as_array().map(|d| d.iter().enumerate().map(|(i, x)| (i as f64 - 2.0) / 2.0 * x.as_f64().unwrap_or(0.0)).sum()).unwrap_or(0.0);
     let tips = on.iter().filter(|a| matches!(k(a), 7 | 10)).count();
     let mine = if likes.get(me).is_some_and(|x| x.0 == 1) { "like" } else if dislikes.get(me).is_some_and(|x| x.0 == 8) { "dislike" } else { "none" };
     json!({"likes": nl, "dislikes": nd, "comments": comments.len(), "tips": tips, "my_opinion": mine,
-           "last_comments": comments.iter().rev().take(3).rev().map(|a| json!({"from": a["from"], "text": a["text"], "txid": a["txid"]})).collect::<Vec<_>>(),
-           "score": nl as f64 - nd as f64 + 0.5 * comments.len() as f64})
+           "last_comments": comments.iter().rev().take(3).rev().map(|a| json!({"from": a["from"], "text": a["text"], "txid": a["txid"], "stars": a["stars"]})).collect::<Vec<_>>(),
+           "rating": rating,
+           "score": nl as f64 - nd as f64 + 0.5 * comments.len() as f64 + stars_score})
 }
 
 fn installed_ids(node: &Node) -> Vec<Value> {
@@ -243,8 +300,35 @@ fn me(node: &Node) -> String {
     crate::msgsvc::sender_key(node).map(|(a, _, _)| a).unwrap_or_default()
 }
 
-/// The App Store: every app (not removed; flagged only when asked), starred first.
-pub fn store(node: &Node, sort: &str, q: &str, show_flagged: bool) -> Value {
+/// App Store categories: these first, in this order. Any other category a card names shows after
+/// them, so a new kind of app needs no new arcade. (key, label, what it holds)
+pub const CATEGORIES: &[(&str, &str, &str)] = &[
+    ("games", "Games", "Things to play"),
+    ("apps", "Apps", "Tools and everything else"),
+    ("social", "Social", "Chats, groups and feeds"),
+    ("node-modules", "Node modules", "Features for this arcade itself, published and installed like any app"),
+    ("themes", "Themes", "How this window looks: an application window or a desktop, its colours and frame (docs/THEMES.md)"),
+];
+
+/// A category for the store's list: a known one's label, else its name in words.
+fn category_json(key: &str, count: usize) -> Value {
+    match CATEGORIES.iter().find(|c| c.0 == key) {
+        Some((k, l, a)) => json!({"key": k, "label": l, "about": a, "count": count, "known": true}),
+        None => {
+            let label: String = key.split('-').map(|w| { let mut c = w.chars(); c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default() }).collect::<Vec<_>>().join(" ");
+            json!({"key": key, "label": label, "about": "", "count": count, "known": false})
+        }
+    }
+}
+
+/// The categories, for publishing (the known ones).
+pub fn categories() -> Value {
+    Value::Array(CATEGORIES.iter().map(|c| category_json(c.0, 0)).collect())
+}
+
+/// The App Store: every app (not removed; flagged only when asked), starred first. `category`
+/// "" is all of them; the reply counts each category among the apps the search finds.
+pub fn store(node: &Node, sort: &str, q: &str, show_flagged: bool, category: &str) -> Value {
     let apps = gather(node);
     let fl = flags(node, &apps);
     let acts = arcade_ledger::messages::rows(&node.chain, arcade_ledger::messages::ACT, node.params.chain_no).unwrap_or_default();
@@ -260,9 +344,18 @@ pub fn store(node: &Node, sort: &str, q: &str, show_flagged: bool) -> Value {
             let hidden = f.is_some_and(|f| f.starts_with("flagged") || f == "confirmed");
             show_flagged == hidden
         })
-        .filter(|a| q.is_empty() || a.versions[0].card.name.to_lowercase().contains(&q) || a.versions[0].card.genre.to_lowercase().contains(&q) || a.versions[0].card.description.to_lowercase().contains(&q))
+        .filter(|a| q.is_empty() || a.versions[0].card.name.to_lowercase().contains(&q) || a.versions[0].card.genre.to_lowercase().contains(&q) || a.versions[0].card.description.to_lowercase().contains(&q) || a.versions[0].card.category.contains(&q))
         .map(|a| entry(node, a, &acts, &me, fl.get(&a.versions[0].txid), &installed, &starred))
         .collect();
+    let mut counts: BTreeMap<String, usize> = CATEGORIES.iter().map(|c| (c.0.to_string(), 0)).collect();
+    for a in &out {
+        *counts.entry(a["card"]["category"].as_str().unwrap_or("apps").to_string()).or_default() += 1;
+    }
+    let mut cats: Vec<Value> = CATEGORIES.iter().map(|c| category_json(c.0, counts[c.0])).collect();
+    cats.extend(counts.iter().filter(|(k, _)| !CATEGORIES.iter().any(|c| c.0 == k.as_str())).map(|(k, n)| category_json(k, *n)));
+    if !category.is_empty() {
+        out.retain(|a| a["card"]["category"] == category);
+    }
     out.sort_by(|a, b| {
         let st = b["starred"].as_bool().cmp(&a["starred"].as_bool());
         st.then_with(|| if sort == "new" {
@@ -271,7 +364,7 @@ pub fn store(node: &Node, sort: &str, q: &str, show_flagged: bool) -> Value {
             b["social"]["hot"].as_f64().partial_cmp(&a["social"]["hot"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
         })
     });
-    json!({"apps": out, "chains": ledger_chains(node).iter().map(|p| p.key).collect::<Vec<_>>()})
+    json!({"apps": out, "categories": cats, "chains": ledger_chains(node).iter().map(|p| p.key).collect::<Vec<_>>()})
 }
 
 /// The apps installed here, each at its newest version.
@@ -342,9 +435,8 @@ pub fn card(node: &Node, chain: &str, txid: &str) -> Result<Value, String> {
     let installed: BTreeSet<String> = installed_ids(node).iter().filter_map(|x| x["id"].as_str().map(String::from)).collect();
     let mut e = entry(node, &apps[0], &acts, &me(node), fl.get(&apps[0].versions[0].txid), &installed, &starred_ids(node));
     let txids: BTreeSet<String> = apps[0].versions.iter().map(|v| v.txid.clone()).collect();
-    let mut comments: Vec<Value> = acts.iter().filter(|a| a["kind"] == 3 && txids.contains(a["target"].as_str().unwrap_or(""))).cloned().collect();
-    comments.sort_by_key(|a| a["h"].as_u64().unwrap_or(u64::MAX));
-    e["comments"] = json!(comments.iter().map(|a| json!({"from": a["from"], "text": a["text"], "txid": a["txid"], "height": a["h"]})).collect::<Vec<_>>());
+    let comments = comments_on(&acts, &txids);
+    e["comments"] = json!(comments.iter().map(|a| json!({"from": a["from"], "text": a["text"], "txid": a["txid"], "height": a["h"], "stars": a["stars"]})).collect::<Vec<_>>());
     e["permissions"] = perms(node, &id);
     Ok(e)
 }
@@ -489,4 +581,40 @@ pub fn storage(node: &Node, page: &str, op: &str, key: Option<&str>, value: Opti
     meta_put(node, &format!("pagestore:{page}"), &Value::Object(items))?;
     meta_put(node, &format!("pagehist:{page}"), &Value::Object(hist))?;
     Ok(json!({}))
+}
+
+#[cfg(test)]
+mod rating_tests {
+    use super::*;
+
+    #[test]
+    fn reviews_carry_stars_and_the_latest_counts() {
+        assert_eq!(stars_of("★★★★☆ works well"), Some((4, "works well")));
+        assert_eq!(stars_of("★★★★★"), Some((5, "")));
+        assert_eq!(stars_of("★☆☆☆☆meh"), Some((1, "meh")));
+        for no in ["☆☆☆☆☆ zero", "★★☆★☆ mixed", "★★★★ four marks", "great ★★★★★", ""] {
+            assert_eq!(stars_of(no), None, "{no}");
+        }
+        let app: BTreeSet<String> = ["a1".to_string()].into();
+        let act = |kind: u64, txid: &str, from: &str, target: &str, text: &str, h: u64| json!({"kind": kind, "txid": txid, "from": from, "target": target, "text": text, "h": h});
+        let acts = vec![
+            act(3, "r1", "bob", "a1", "★★☆☆☆ crashes", 10),
+            act(3, "r2", "bob", "a1", "★★★★★ fixed now", 12),      // bob's latest counts: 5
+            act(3, "r3", "amy", "a1", "★★★☆☆ ok", 11),
+            act(5, "e1", "amy", "r3", "★★★★☆ better", 13),         // amy edits hers: 4
+            act(3, "r4", "cat", "a1", "★☆☆☆☆ no", 11),
+            act(6, "d1", "cat", "r4", "", 14),                     // cat takes hers back
+            act(6, "d2", "bob", "r3", "", 14),                     // not bob's to delete
+            act(3, "r5", "dan", "a1", "nice app", 11),             // a comment without stars
+        ];
+        let c = comments_on(&acts, &app);
+        assert_eq!(c.iter().map(|x| x["txid"].as_str().unwrap()).collect::<Vec<_>>(), ["r1", "r3", "r5", "r2"]);
+        let r = ratings(&c, "amy");
+        assert_eq!((r["count"].as_u64(), r["average"].as_f64(), r["mine"].as_u64()), (Some(2), Some(4.5), Some(4)));
+        assert_eq!(r["dist"], json!([0, 0, 0, 1, 1]));
+        assert_eq!(r["my_review"], "r3");
+        let s = social(&acts, &app, "bob");
+        assert_eq!(s["rating"]["mine"], 5);
+        assert_eq!(s["score"].as_f64(), Some(0.5 * 4.0 + 1.0 + 0.5));
+    }
 }

@@ -18,6 +18,10 @@ base.html 332-770 and 1852, web/docs/games.md), 2026-11-08. V1.0 calls them **ap
   - minimized `{"timeout": n}` or n: absent/invalid 900, 0 none, else clamp 1..86400 (→ minimized_timeout).
 - Author = the inscription's **creator** address (not the owner). No url, icon (cover is the icon),
   category (genre) or chains fields.
+- **V1.0 adds `category`** (the original ignores it): lowercase letters, digits and inner dashes, up
+  to 24 ("Node Modules" reads as "node-modules"). The App Store shows its known categories first
+  (games, apps, social, node-modules: `appsvc::CATEGORIES`), then any other a card names, so a new
+  kind of app needs no new arcade. Without one, a "game" card is in games and an "app" card in apps.
 
 ## 2. Versions and removal
 - One card per game: key (creator, name casefolded), newest by (height, position).
@@ -41,6 +45,12 @@ base.html 332-770 and 1852, web/docs/games.md), 2026-11-08. V1.0 calls them **ap
 - Shown per card: cover (or name tile), name, star, pills (multiplayer, genre, chain), "by @tag · when ·
   vX · N players · tipped N", description, Open, permission switches for what it claims, like/dislike/
   comment/tip, Remove (if mine), Details, last 3 comments, Discuss.
+
+- **V1.0 star ratings live in reviews.** A review is an ordinary comment (FEED_ACT REPLY on the card,
+  any version) whose text begins with five marks, ★ for each star and ☆ for the rest, stars first
+  ("★★★★☆ works well" = 4). The original shows it as a comment. Each person's latest review with
+  stars counts; an EDIT by its writer changes it, a DELETE by its writer takes it back. Shown: average,
+  count, 1–5 spread. Popularity adds (stars − 3) / 2 per rater (5 stars +1, 1 star −1) to the score.
 
 ## 4. Launch and sandbox
 - Open runs `/content/<opens>` in an iframe (opens = play if same creator, else the card's page).

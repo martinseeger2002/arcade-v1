@@ -142,6 +142,7 @@
     open = c; watching = null;
     $("c-installer").hidden = false; $("c-choose").hidden = false; $("c-progress").hidden = true; msg("");
     $("c-title").textContent = `Install ${c.name}`;
+    driveChoice(c);
     // The ARCADE chain is kept whole and comes over the mesh: nothing to choose.
     for (const id of ["c-modes", "c-idx"]) { $(id).hidden = !!c.arcade; $(id).previousElementSibling.hidden = !!c.arcade; }
     if (c.arcade) {
@@ -189,6 +190,66 @@
       : `Arcades on the mesh are asked first (this waits up to a minute and a half for their answers), then the coin's own P2P network.`;
   }
 
+  // Which drive a chain's file goes on (chains.drives): this arcade's own by default, or another
+  // mounted disk. Installed chains can move later (driveBox).
+  let drive = "home", drivesAt = 0, drivesList = [];
+  async function loadDrives() {
+    if (Date.now() - drivesAt > 30000) { try { drivesList = await api("chains.drives"); drivesAt = Date.now(); } catch { drivesList = []; } }
+    return drivesList;
+  }
+  const driveText = (d) => `${d.home ? "This arcade's drive" : d.label} · ${gb(d.free)} free of ${gb(d.size)}`;
+  async function driveChoice(c) {
+    const box = $("c-drive");
+    box.hidden = !!c.arcade; box.previousElementSibling.hidden = !!c.arcade;
+    if (c.arcade) return;
+    const list = await loadDrives();
+    if (!list.some((d) => d.id === drive)) drive = "home";
+    box.replaceChildren(...list.map((d) => {
+      const l = document.createElement("label");
+      l.className = "mode" + (d.id === drive ? " sel" : "") + (d.ok ? "" : " off");
+      l.innerHTML = `<input type="radio" name="drive" ${d.id === drive ? "checked" : ""} ${d.ok ? "" : "disabled"}><b></b><small></small>`;
+      l.querySelector("b").textContent = driveText(d);
+      l.querySelector("small").textContent = d.ok ? `Kept in ${d.path}` : `The arcade can't write here yet. In a terminal: ${d.fix}`;
+      if (d.ok) l.onclick = () => { drive = d.id; driveChoice(c); };
+      return l;
+    }));
+  }
+
+  // An installed chain: which drive its file is on, and moving it to another one.
+  async function driveBox(st) {
+    let box = document.getElementById("c-place");
+    if (!box) { box = document.createElement("div"); box.id = "c-place"; box.className = "addix"; $("c-stages").before(box); }
+    if (!st.place || st.home || st.arcade) { box.replaceChildren(); return; }
+    // Not while the operator is picking a drive (the panel refreshes every few seconds).
+    if (box.contains(document.activeElement) && !(st.move && !st.move.finished)) return;
+    const row = document.createElement("div"); row.className = "addrow";
+    const t = document.createElement("div"); t.innerHTML = "<b></b><small></small>";
+    const mv = st.move;
+    const on = st.place.drive === "home" ? "this arcade's drive" : st.place.drive || "another drive";
+    if (mv && !mv.finished) {
+      t.querySelector("b").textContent = `Moving to ${mv.to} · ${mv.phase === "stopping" ? "stopping its sync" : `${gb(mv.bytes_done)} of ${gb(mv.bytes)} (${mv.pct.toFixed(0)}%)`}`;
+      t.querySelector("small").textContent = "Its sync waits while the file is copied, then goes on from the new drive. The old copy is deleted once the new one is in use.";
+      row.append(t); box.replaceChildren(row); return;
+    }
+    t.querySelector("b").textContent = `Stored on ${on} · ${gb(st.place.bytes)}`;
+    t.querySelector("small").textContent = (mv && mv.error ? `Last move failed: ${mv.error}. ` : "") + `${st.place.dir} · ${gb(st.place.free)} free there`;
+    row.append(t);
+    const list = (await loadDrives()).filter((d) => d.ok && d.id !== st.place.drive);
+    if (list.length) {
+      const sel = document.createElement("select");
+      sel.append(...list.map((d) => Object.assign(document.createElement("option"), { value: d.id, textContent: driveText(d) })));
+      const b = document.createElement("button"); b.className = "small"; b.textContent = "Move";
+      b.onclick = async () => {
+        const d = list.find((x) => x.id === sel.value);
+        if (!confirm(`Move ${st.name} (${gb(st.place.bytes)}) to ${d.home ? "this arcade's drive" : d.label}? Its sync pauses while the file is copied.`)) return;
+        b.disabled = true;
+        try { await api("chains.move", { key: st.key, drive: sel.value }); msg(`Moving ${st.name}…`); refresh(); } catch (e) { b.disabled = false; msg(e.message, true); }
+      };
+      const ctl = document.createElement("div"); ctl.append(sel, " ", b); row.append(ctl);
+    }
+    box.replaceChildren(row);
+  }
+
   // Bring the install card into view (it sits below the list of coins).
   function reveal() {
     const el = $("c-installer");
@@ -198,7 +259,7 @@
   async function install() {
     const withIdx = [...$("c-idx").querySelectorAll("input:checked")].map((i) => i.dataset.k);
     try {
-      const st = await api("chains.add", open.arcade ? { key: open.key } : { key: open.key, mode, with: withIdx });
+      const st = await api("chains.add", open.arcade ? { key: open.key } : { key: open.key, mode, with: withIdx, drive });
       if (st.queued) {
         // Another chain is still being installed: this one starts by itself after it.
         $("c-installer").hidden = true;
@@ -326,6 +387,7 @@
     }));
     copyBox(st);
     earnBox(st);
+    driveBox(st);
     // Indexes the chain doesn't have yet: a clear list at the top of the panel (opt-in, one at a time).
     let add = document.getElementById("c-addix");
     if (!add) { add = document.createElement("div"); add.id = "c-addix"; add.className = "addix"; $("c-stages").before(add); }

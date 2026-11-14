@@ -146,6 +146,10 @@ cmds! {
     "profile" Public "who" "A published profile (who = @tag or address).";
     "ord" Public "id?, chain?" "An inscription, or ord index counts.";
     "ord.send" Local "inscription, to, chain?, send?" "Send one inscription (id or number) from this wallet's address on a chain kept here with its ord index: its coin whole to `to` first, clean coins pay the fee. Only one alone at the start of its coin. send: true broadcasts, otherwise it is built and shown with its fee.";
+    "token.send" Local "propertyid, units, to, send?" "Send arcade tokens (base units) from this wallet in one transaction; without send: true, only what it would do.";
+    "token20.send" Local "chain, tick, amount, to, send?" "Send PRC-20 / DRC-20 tokens from this wallet (a job: inscribe the transfer, then send it).";
+    "token20.sends" Read "" "This wallet's PRC-20 / DRC-20 send jobs and where each stands.";
+    "arc.earn" Admin "chain, on?" "The Earn ARCADE switch for a chain kept here in full (docs/ARCADECHAIN.md), and where it stands.";
     "ord.chunks" Public "from?, chain?" "Ord fingerprint chunks (as other arcades compare them).";
     "name" Public "name?, chain?" "A name claim, or counts.";
     "map" Public "map?, chain?" "A map claim, or counts.";
@@ -190,9 +194,12 @@ cmds! {
     "chains.status" Public "key" "One chain's staged progress.";
     "chains.offers" Public "" "Chains other arcades offer over the mesh.";
     "chains.sizes" Admin "" "Measure this arcade's disk use per chain now.";
-    "chains.add" Admin "key, mode?, with?" "Install a chain (mode full, shared or chain; with = indexes). One install at a time: while another chain is still being installed it waits in a queue (queued, position).";
+    "chains.add" Admin "key, mode?, with?, drive?" "Install a chain (mode full, shared or chain; with = indexes; drive from chains.drives, else this arcade's own). One install at a time: while another chain is still being installed it waits in a queue (queued, position).";
     "chains.unqueue" Admin "key" "Take a chain out of the install queue.";
     "chains.pause" Admin "key" "Pause a chain.";
+    "ui.link" Local "" "The link that opens the app's window in a browser (/ui/, with this start's key) and the SSH tunnel command for another computer (docs/WEBUI.md).";
+    "chains.drives" Read "" "Drives a chain's file can go on: this arcade's own, and other mounted disks (free space, whether the arcade can write there).";
+    "chains.move" Admin "key, drive" "Move an installed chain's file to another drive (drive from chains.drives; home = this arcade's own). Runs in the background; chains.status shows its progress.";
     "chains.resume" Admin "key" "Resume a chain.";
     "chains.index_add" Admin "key, index" "Add an index to a chain.";
     "chains.index_remove" Admin "key, index" "Remove an index from a chain.";
@@ -237,7 +244,8 @@ cmds! {
     "stake.set" Admin "on" "Turn KOT staking on or off.";
     "stake.check" Read "" "Check our KOT stake rules against the newest blocks.";
     // Apps (app cards)
-    "apps.store" Public "sort?, q?, flagged?" "The App Store: app cards from every chain with the arcade ledger (popular or new; starred first).";
+    "apps.store" Public "sort?, q?, flagged?, category?" "The App Store: app cards from every chain with the arcade ledger (popular or new; starred first), in categories (counts in \"categories\"; category = one of them).";
+    "apps.categories" Public "" "The App Store's known categories (games, apps, social, node modules); a card may name any other.";
     "apps.installed" Read "" "Apps installed on this arcade, each at its newest version.";
     "apps.install" Admin "chain, txid" "Install an app (it follows its author's updates).";
     "apps.uninstall" Admin "id" "Uninstall an app.";

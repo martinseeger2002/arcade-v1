@@ -8,7 +8,10 @@
   const id = q.get("id") || "";
   document.title = q.get("title") || "App";
   const el = document.getElementById("app");
-  if (!/^http:\/\/127\.0\.0\.1:\d+\/app\/[a-z]+\/[0-9a-f]{64}$/.test(frame)) {
+  // In the app the frame is the arcade's 127.0.0.1 address; in a browser, this page's own origin.
+  const frameOk = IN_BROWSER ? frame.startsWith(location.origin + "/app/") && /^\/app\/[a-z]+\/[0-9a-f]{64}$/.test(frame.slice(location.origin.length))
+    : /^http:\/\/127\.0\.0\.1:\d+\/app\/[a-z]+\/[0-9a-f]{64}$/.test(frame);
+  if (!frameOk) {
     const e = document.getElementById("err");
     e.textContent = "This app can't be opened.";
     e.style.display = "flex";

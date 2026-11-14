@@ -39,6 +39,11 @@ pub fn stop(c: u16) {
     }
 }
 
+/// Whether a build of chain `c` is running (a stopped one ends after its current write).
+pub fn building(c: u16) -> bool {
+    svc().lock().unwrap().stops.contains_key(&c)
+}
+
 /// Delete a chain's address rows (index removed), a batch at a time.
 pub fn clear_in_background(node: Arc<Node>, p: &'static ChainParams) {
     let c = p.chain_no;
