@@ -533,3 +533,11 @@ button.linkish { border: 0; background: none; padding: 0; font-size: 11px; color
 .ap-cats { display: flex; flex-wrap: wrap; gap: 0.4em; margin: 0.4em 0 0.8em; }
 .ap-cats button { border-radius: 999px; padding: 0.25em 0.8em; }
 .ap-cats button.on { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+
+/* Star ratings (reviews). */
+.ap-stars { color: #d9a300; white-space: nowrap; }
+.ap-star-pick { font-size: 1.4em; line-height: 1; padding: 0 0.15em; background: none; border: none; color: #d9a300; cursor: pointer; }
+.ap-rate .ap-dist { display: grid; grid-template-columns: 2.5em 1fr 2.5em; align-items: center; gap: 0.5em; margin: 0.15em 0; }
+.ap-rate .ap-dist .bar { height: 0.55em; background: var(--line); border-radius: 99px; overflow: hidden; }
+.ap-rate .ap-dist .bar > i { display: block; height: 100%; background: #d9a300; }
+.ap-rate .row { gap: 0.4em; flex-wrap: wrap; align-items: center; margin-top: 0.5em; }

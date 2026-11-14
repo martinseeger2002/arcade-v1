@@ -30,6 +30,40 @@
       a.card.players ? a.card.players + " players" : null, s.tips ? `tipped ${s.tips} time${s.tips === 1 ? "" : "s"}` : null].filter(Boolean).join(" · ");
   }
 
+  // Star ratings live in reviews: a comment that starts with ★★★★☆ (appsvc::stars_of).
+  const STARS = (n) => "★".repeat(n) + "☆".repeat(5 - n);
+  function ratingLine(a) {
+    const r = (a.social || {}).rating || {};
+    return r.count ? h("span", { class: "ap-stars", title: `${r.count} rating${r.count === 1 ? "" : "s"}` }, `★ ${r.average.toFixed(1)} (${r.count})`) : h("span", { class: "ap-stars s" }, "no ratings yet");
+  }
+  function rateBox(a) {
+    const r = (a.social || {}).rating || {};
+    let pick = r.mine || 0;
+    const stars = [1, 2, 3, 4, 5].map((n) => {
+      const b = h("button", { class: "ap-star-pick", title: `${n} star${n === 1 ? "" : "s"}` }, "☆");
+      b.onclick = () => { pick = n; paint(); };
+      return b;
+    });
+    const paint = () => stars.forEach((b, i) => { b.textContent = i < pick ? "★" : "☆"; b.classList.toggle("on", i < pick); });
+    paint();
+    const text = h("input", { placeholder: "Your review (optional)", maxlength: "200", style: "flex:1;min-width:12em" });
+    const send = h("button", { class: "primary small" }, r.mine ? "Change my rating" : "Rate");
+    send.onclick = () => { if (!pick) return note("Pick 1 to 5 stars first.", true); act("reply", a, { text: `${STARS(pick)}${text.value.trim() ? " " + text.value.trim() : ""}` }); };
+    const kids = [h("div", { class: "row" }, ...stars, text, send)];
+    if (r.my_review) {
+      const take = h("button", { class: "small" }, "Remove my rating");
+      take.onclick = () => act("delete", { ...a, txid: r.my_review });
+      kids.push(h("div", { class: "row s" }, `Your rating: ${STARS(r.mine)}`, take));
+    }
+    const dist = (r.dist || [0, 0, 0, 0, 0]).map((x, i) => [5 - i, (r.dist || [])[4 - i] || 0]);
+    const most = Math.max(1, ...dist.map((d) => d[1]));
+    return h("div", { class: "card ap-rate" },
+      h("div", { class: "k" }, r.count ? `Rated ${r.average.toFixed(1)} of 5 by ${r.count}` : "Not rated yet"),
+      ...dist.map(([n, x]) => h("div", { class: "ap-dist" }, h("span", {}, `${n}★`), h("div", { class: "bar" }, h("i", { style: `width:${(x / most) * 100}%` })), h("span", { class: "s" }, String(x)))),
+      ...kids,
+      h("div", { class: "s" }, `A rating is a review on ${HOME.name}: a small fee, like a comment. Your latest one counts; change it any time, or remove it.`));
+  }
+
   function pills(a) {
     return h("div", { class: "ap-pills" },
       a.card.multiplayer ? h("span", { class: "pill" }, "multiplayer") : "",
@@ -61,7 +95,7 @@
     return h("div", { class: "ap-card" }, cover(a),
       h("div", { class: "ap-body" },
         h("div", { class: "ap-title" }, h("b", {}, a.card.name), star),
-        pills(a), h("div", { class: "s" }, byline(a)),
+        pills(a), h("div", { class: "s" }, byline(a), " · ", ratingLine(a)),
         a.card.description ? h("div", { class: "ap-desc" }, a.card.description) : "",
         h("div", { class: "row ap-row" }, openB, inst, details),
         h("div", { class: "fd-acts" },
@@ -101,10 +135,12 @@
       h("div", { class: "ap-card" }, cover(a), h("div", { class: "ap-body" }, h("h2", {}, a.card.name), pills(a), h("div", { class: "s" }, byline(a)),
         h("div", { class: "ap-desc" }, a.card.description || ""), h("div", { class: "row ap-row" }, openB))),
       claimed.length ? h("div", { class: "card" }, h("div", { class: "k" }, "This app asks for"), ...sw, h("div", { class: "s" }, "Off: it asks you the first time it wants it.")) : "",
+      h("h2", {}, "Ratings"),
+      rateBox(a),
       h("h2", {}, "Versions"),
       h("ul", { class: "ap-list" }, ...a.versions.map((v, i) => h("li", {}, `${v.version ? "v" + v.version : "version"} · block ${v.height}${i === 0 ? " · shown" : ""}`))),
-      h("h2", {}, `Comments (${a.comments.length})`),
-      h("ul", { class: "ap-list" }, ...(a.comments.length ? a.comments.map((c) => h("li", {}, h("b", {}, (c.from || "").slice(0, 10) + "… "), c.text)) : [h("li", { class: "s" }, "None yet.")])),
+      h("h2", {}, `Reviews and comments (${a.comments.length})`),
+      h("ul", { class: "ap-list" }, ...(a.comments.length ? a.comments.map((c) => h("li", {}, h("b", {}, (c.from || "").slice(0, 10) + "… "), c.stars ? h("span", { class: "ap-stars" }, STARS(c.stars) + " ") : "", c.stars ? c.text.replace(/^[★☆]{5}\s*/, "") : c.text)) : [h("li", { class: "s" }, "None yet.")])),
       h("div", { class: "s" }, `Card ${a.txid} · page ${a.opens} on ${a.chain_name} · by ${a.creator}`)));
   }
 
