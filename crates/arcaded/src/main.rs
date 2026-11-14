@@ -32,6 +32,7 @@ mod dproto;
 mod commands;
 mod chainsvc;
 mod chains;
+mod chaindrive;
 mod claims;
 mod cbimport;
 mod corecoins;

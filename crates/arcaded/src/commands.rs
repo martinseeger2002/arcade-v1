@@ -194,9 +194,11 @@ cmds! {
     "chains.status" Public "key" "One chain's staged progress.";
     "chains.offers" Public "" "Chains other arcades offer over the mesh.";
     "chains.sizes" Admin "" "Measure this arcade's disk use per chain now.";
-    "chains.add" Admin "key, mode?, with?" "Install a chain (mode full, shared or chain; with = indexes). One install at a time: while another chain is still being installed it waits in a queue (queued, position).";
+    "chains.add" Admin "key, mode?, with?, drive?" "Install a chain (mode full, shared or chain; with = indexes; drive from chains.drives, else this arcade's own). One install at a time: while another chain is still being installed it waits in a queue (queued, position).";
     "chains.unqueue" Admin "key" "Take a chain out of the install queue.";
     "chains.pause" Admin "key" "Pause a chain.";
+    "chains.drives" Read "" "Drives a chain's file can go on: this arcade's own, and other mounted disks (free space, whether the arcade can write there).";
+    "chains.move" Admin "key, drive" "Move an installed chain's file to another drive (drive from chains.drives; home = this arcade's own). Runs in the background; chains.status shows its progress.";
     "chains.resume" Admin "key" "Resume a chain.";
     "chains.index_add" Admin "key, index" "Add an index to a chain.";
     "chains.index_remove" Admin "key, index" "Remove an index from a chain.";
