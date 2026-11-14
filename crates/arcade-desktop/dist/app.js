@@ -545,6 +545,7 @@ async function refresh() {
     if (tab === "wallet") await refreshWallet();
     if (tab === "mine") await refreshMine();
     if (tab === "activity") await refreshActivity();
+    if (tab === "options") await refreshOptions();
   } catch (e) {
     $("conn").textContent = "service not running"; $("conn").className = "pill bad";
   }

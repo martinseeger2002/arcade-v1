@@ -61,6 +61,7 @@ pub fn chain_params(net: &Net, genesis: &Hash256) -> &'static ChainParams {
         fixed_peers: &[],
         checkpoints: &[],
         coinbase_maturity: params::COINBASE_MATURITY as u32,
+        coinbase_script_max: 100,
         index_start: 0,
     }))
 }

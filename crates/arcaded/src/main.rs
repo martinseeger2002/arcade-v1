@@ -7,6 +7,7 @@
 
 mod accountsvc;
 mod rulecheck;
+mod updater;
 mod handlegate;
 mod addrsvc;
 mod collsvc;
@@ -149,6 +150,14 @@ fn tame_malloc() {}
 
 /// Set by SIGTERM / SIGINT; the "stop" thread flushes and exits.
 static STOP_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set by an update: after the clean stop, start the new arcaded in this process's place.
+static RESTART_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stop cleanly (as on SIGTERM), then start the arcaded now installed, with the same options.
+pub fn request_restart() {
+    RESTART_ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
+    STOP_ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
 
 extern "C" fn on_stop_signal(_: libc::c_int) {
     // A second SIGTERM / Ctrl-C while the caches are being written: leave at once (the next
@@ -186,6 +195,10 @@ fn stop_cleanly_on_signal(node: Arc<Node>) {
                     }
                 }
                 eprintln!("arcaded: stopped ({:.1}s)", t.elapsed().as_secs_f64());
+                if RESTART_ASKED.load(std::sync::atomic::Ordering::SeqCst) {
+                    eprintln!("arcaded: starting the updated arcaded");
+                    updater::exec_self();
+                }
                 std::process::exit(0);
             }
         })
@@ -519,5 +532,6 @@ fn main() {
         std::thread::Builder::new().name("http".into()).spawn(move || http::serve(n, o)).unwrap();
     }
     stop_cleanly_on_signal(node.clone());
+    updater::start(node.clone());
     api::serve(node, home.join("arcaded.sock"));
 }

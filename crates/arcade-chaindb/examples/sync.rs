@@ -51,4 +51,8 @@ fn main() {
     let tip = db.tip(p.chain_no).unwrap().unwrap();
     println!("done in {:?}: tip {} at {}, outputs {}, txs {}", t.elapsed(), tip.hash, tip.height,
         db.count_all(arcade_chaindb::schema::OUTPUTS).unwrap(), db.count_all(arcade_chaindb::schema::TXS).unwrap());
+    if let Some(w) = db.rule_watch(p.chain_no).unwrap() {
+        println!("rule watch: heights {:?}, {} checked, {} paying the whole reward, {} broken, scripts from {}; first broken {:?}",
+            w.ranges, w.checked, w.full_reward, w.broken, w.scripts_from, w.first);
+    }
 }

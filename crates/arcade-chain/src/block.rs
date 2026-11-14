@@ -40,7 +40,7 @@ pub enum BlockError {
     Mutated,
     #[error("more than one coinbase (bad-cb-multiple)")]
     MultipleCoinbase,
-    #[error("coinbase script is not 2 to 100 bytes (bad-cb-length)")]
+    #[error("coinbase script is too short or too long (bad-cb-length)")]
     CoinbaseLength,
     #[error("transaction {0} has no inputs (bad-txns-vin-empty)")]
     NoInputs(Hash256),
@@ -133,6 +133,11 @@ impl Block {
     /// repeated transactions, witness commitment), then the rules no block may break whatever
     /// chain it is on. PoW is checked by the header chain; coin values when it is connected.
     pub fn check(&self) -> Result<(), BlockError> {
+        self.check_with(100)
+    }
+
+    /// [`Block::check`] with a chain's own coinbase-script limit (`ChainParams::coinbase_script_max`).
+    pub fn check_with(&self, max_cb: usize) -> Result<(), BlockError> {
         if self.txs.is_empty() {
             return Err(BlockError::Empty);
         }
@@ -160,7 +165,7 @@ impl Block {
                 return Err(BlockError::NoOutputs(t.txid));
             }
             if i == 0 {
-                if !(2..=100).contains(&t.inputs[0].script_sig.len()) {
+                if !(2..=max_cb).contains(&t.inputs[0].script_sig.len()) {
                     return Err(BlockError::CoinbaseLength);
                 }
             } else {
@@ -188,7 +193,17 @@ impl Block {
         if !self.txs.iter().any(|t| t.has_witness()) {
             return Ok(());
         }
+        self.check_witness_commitment()
+    }
+
+    /// Core's witness rules once SegWit is active (ContextualCheckBlock): a commitment, where the
+    /// coinbase has one, must match even in a block without witness data; without one, no
+    /// transaction may carry a witness.
+    pub fn check_witness_commitment(&self) -> Result<(), BlockError> {
         let cb = &self.txs[0];
+        if !cb.outputs.iter().any(|o| o.script_pubkey.len() >= 38 && o.script_pubkey.starts_with(&WITNESS_COMMITMENT)) {
+            return if self.txs.iter().any(|t| t.has_witness()) { Err(BlockError::UnexpectedWitness) } else { Ok(()) };
+        }
         // The last matching output counts, as in Core's GetWitnessCommitmentIndex.
         let Some(commit) = cb.outputs.iter().rev().find(|o| o.script_pubkey.len() >= 38 && o.script_pubkey.starts_with(&WITNESS_COMMITMENT))
         else {
