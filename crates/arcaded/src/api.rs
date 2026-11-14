@@ -71,16 +71,20 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
         "peers" => Ok(json!(node.links.lock().unwrap().values().map(|l| json!({"addr": l.addr, "node_id": l.node_id, "since": l.since})).collect::<Vec<_>>())),
         "wallet.create" => {
             let phrase = node.app.create_wallet(s("phrase").as_deref()).map_err(|e| e.to_string())?;
+            let restored = s("phrase").is_some();
+            // A restored wallet's @handle, found on chain right away (else after a later sync round).
+            let tag = if restored { crate::claims::find_own_tag(node, true) } else { None };
             // Test coins for the first handle come by themselves: asked for now, so they are
             // usually here by the time a handle is picked (a restored wallet may have some).
-            if let Ok((k, _)) = node.app.tag_key(p, 0) {
-                let script = arcade_wallet::keys::p2pkh_script_for(&arcade_wallet::secp256k1::PublicKey::from_slice(&hex::decode(&k.pubkey).unwrap()).unwrap());
-                if crate::claims::coins(node, &script).is_empty() {
-                    let _ = crate::faucet::ask_if_needed(node, &k.address, "");
+            if tag.is_none() {
+                if let Ok((k, _)) = node.app.tag_key(p, 0) {
+                    let script = arcade_wallet::keys::p2pkh_script_for(&arcade_wallet::secp256k1::PublicKey::from_slice(&hex::decode(&k.pubkey).unwrap()).unwrap());
+                    if crate::claims::coins(node, &script).is_empty() {
+                        let _ = crate::faucet::ask_if_needed(node, &k.address, "");
+                    }
                 }
             }
-            let restored = s("phrase").is_some();
-            Ok(json!({"phrase": if restored { Value::Null } else { json!(phrase) }, "restored": restored}))
+            Ok(json!({"phrase": if restored { Value::Null } else { json!(phrase) }, "restored": restored, "tag": tag}))
         }
         "wallet.phrase" => Ok(json!({"phrase": node.app.phrase().map_err(|e| e.to_string())?})),
         "wallet.keys" => {
