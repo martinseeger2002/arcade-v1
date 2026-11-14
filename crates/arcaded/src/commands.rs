@@ -146,6 +146,10 @@ cmds! {
     "profile" Public "who" "A published profile (who = @tag or address).";
     "ord" Public "id?, chain?" "An inscription, or ord index counts.";
     "ord.send" Local "inscription, to, chain?, send?" "Send one inscription (id or number) from this wallet's address on a chain kept here with its ord index: its coin whole to `to` first, clean coins pay the fee. Only one alone at the start of its coin. send: true broadcasts, otherwise it is built and shown with its fee.";
+    "token.send" Local "propertyid, units, to, send?" "Send arcade tokens (base units) from this wallet in one transaction; without send: true, only what it would do.";
+    "token20.send" Local "chain, tick, amount, to, send?" "Send PRC-20 / DRC-20 tokens from this wallet (a job: inscribe the transfer, then send it).";
+    "token20.sends" Read "" "This wallet's PRC-20 / DRC-20 send jobs and where each stands.";
+    "arc.earn" Admin "chain, on?" "The Earn ARCADE switch for a chain kept here in full (docs/ARCADECHAIN.md), and where it stands.";
     "ord.chunks" Public "from?, chain?" "Ord fingerprint chunks (as other arcades compare them).";
     "name" Public "name?, chain?" "A name claim, or counts.";
     "map" Public "map?, chain?" "A map claim, or counts.";

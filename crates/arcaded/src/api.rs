@@ -39,6 +39,8 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
     let p = node.params;
     let c = p.chain_no;
     match req["cmd"].as_str().unwrap_or("") {
+        // The link that opens the desktop app's window in a browser (crate::webui; `arcade web`).
+        "ui.link" => crate::webui::link(node, node.http_port.get().copied().unwrap_or(8420)),
         "status" => {
             let tip = node.chain.tip(c).map_err(|e| e.to_string())?;
             use arcade_ledger::index;

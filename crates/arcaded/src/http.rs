@@ -13,6 +13,8 @@
 //!   GET|POST /api/v1/<group>/<name>  the web API: public reads need nothing; the rest an API key
 //!                                    (Authorization: Bearer ak_...) with the right permission
 //!   GET /api/v1/routes               every command, its parameters and what it needs
+//!   GET /ui/                         the desktop app's window in a browser (crate::webui); its
+//!                                    calls go to /rpc with the cookie (`arcade web` gives the link)
 //!   GET|POST /r/...                  the page API for app pages: each request carries its page's
 //!                                    pass (X-Arcade-Page), given to the page when /app/ serves it
 //! Content is from strangers: served with a sandbox CSP and nosniff so it can't reach the API.
@@ -429,6 +431,16 @@ fn handle(node: &Node, mut s: TcpStream, conf: &Conf) {
         }
         return realtime_door(node, &mut s, &r, what);
     }
+    // The desktop app's window in a browser (crate::webui): this computer only, as /rpc.
+    if path == "/ui" || path.starts_with("/ui/") {
+        if !is_local {
+            return respond(&mut s, status_line(403), "text/plain", &[], b"the arcade's window answers only this computer (from another one, through an SSH tunnel: arcade web)\n");
+        }
+        if path == "/ui" {
+            return respond(&mut s, "301 Moved Permanently", "text/plain", &[("Location", "/ui/".into())], b"");
+        }
+        return web_ui(&mut s, &r, &path["/ui/".len()..]);
+    }
     if path == "/rpc" {
         if !is_local {
             return json_out(&mut s, 403, &json!({"error": "the RPC answers only this computer"}));
@@ -834,6 +846,25 @@ fn web_api(node: &Node, s: &mut TcpStream, r: &Req, rest: &str) {
     }
 }
 
+/// /ui/<file> for a request from this computer (crate::webui).
+fn web_ui(s: &mut TcpStream, r: &Req, rest: &str) {
+    if !matches!(r.method.as_str(), "GET" | "HEAD") {
+        return respond(s, "405 Method Not Allowed", "text/plain", &[], b"");
+    }
+    match crate::webui::file(rest) {
+        Some((ctype, body)) => {
+            let h = [
+                ("Content-Security-Policy", crate::webui::CSP.to_string()),
+                ("X-Frame-Options", "DENY".to_string()),
+                ("Referrer-Policy", "no-referrer".to_string()),
+                ("Cache-Control", "no-cache".to_string()),
+            ];
+            respond(s, "200 OK", ctype, &h, if r.method == "HEAD" { b"" } else { body })
+        }
+        None => respond(s, status_line(404), "text/plain", &[], b"no such file in the arcade's window\n"),
+    }
+}
+
 /// JSON-RPC 2.0 (single or batch) with the cookie: every command, as on the local socket.
 fn cookie_ok(node: &Node, r: &Req) -> bool {
     use base64::Engine;
@@ -1051,6 +1082,36 @@ pub(crate) mod tests {
         }
         assert!(!loopback_host(None, 8420));
         assert!(loopback_host(Some("localhost"), 80));
+    }
+
+    #[test]
+    fn the_window_in_a_browser_answers_only_this_computer() {
+        let (_one, t) = crate::http::tests::node();
+        // The files: this computer only, with the app's rules and never in a frame.
+        let a = ask(&t.node, &conf(), b"GET /ui/ HTTP/1.1\r\nHost: rebind.example:8420\r\n\r\n");
+        assert_eq!(status(&a), "403", "{a}");
+        let a = ask(&t.node, &conf(), &get("/ui/", ""));
+        assert_eq!(status(&a), "200", "{a}");
+        assert!(a.contains("Content-Security-Policy: default-src 'self'") && a.contains("X-Frame-Options: DENY"), "{a}");
+        assert_eq!(status(&ask(&t.node, &conf(), &get("/ui", ""))), "301");
+        assert_eq!(status(&ask(&t.node, &conf(), &get("/ui/common.js", ""))), "200");
+        assert_eq!(status(&ask(&t.node, &conf(), &get("/ui/../Cargo.toml", ""))), "404");
+        let proxied = Conf { site: None, behind_proxy: true };
+        assert_eq!(status(&ask(&t.node, &proxied, &get("/ui/", ""))), "403");
+        // Its calls are /rpc's: the cookie, or nothing.
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let _ = t.node.rpc_cookie.set(format!("__cookie__:{key}"));
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"status","params":{}}"#;
+        let rpc = |auth: &str| format!("POST /rpc HTTP/1.1\r\nHost: 127.0.0.1:8420\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{auth}\r\n{body}", body.len()).into_bytes();
+        assert_eq!(status(&ask(&t.node, &conf(), &rpc(""))), "401");
+        use base64::Engine;
+        let basic = base64::engine::general_purpose::STANDARD.encode(format!("__cookie__:{key}"));
+        let a = ask(&t.node, &conf(), &rpc(&format!("Authorization: Basic {basic}\r\n")));
+        assert_eq!(status(&a), "200", "{a}");
+        assert!(a.contains(r#""result""#), "{a}");
+        // The link names the key.
+        let l = crate::webui::link(&t.node, 8420).unwrap();
+        assert_eq!(l["url"], format!("http://127.0.0.1:8420/ui/#k={key}"));
     }
 
     #[test]
