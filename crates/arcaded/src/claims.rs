@@ -334,8 +334,71 @@ fn ask_for_first_handle(node: &Node) {
     }
 }
 
+/// Tag slots a restored wallet's @handle is looked for in (one handle per wallet since
+/// 2026-11-10; a wallet from before may hold it in a later slot).
+const RESTORE_SLOTS: u32 = 5;
+
+/// A wallet restored from its 12 words gets its @handle back by itself (Martin 2026-11-13:
+/// "it should get their name automatically"): the first of its tag keys holding a @tag on
+/// chain is recorded as holding it, so the Home tab shows the name instead of asking for a
+/// new one. While this arcade's own tag index catches up (a fresh install), another arcade's
+/// word is asked. Nothing is looked for once the wallet has a handle
+/// or a claim of its own.
+pub fn find_own_tag(node: &Node, now: bool) -> Option<String> {
+    use std::sync::Mutex;
+    static LAST: Mutex<u64> = Mutex::new(0);
+    let p = node.params;
+    if !node.app.has_wallet().unwrap_or(false) {
+        return None;
+    }
+    if let Some(t) = node.app.tag_keys(p.chain_no).unwrap_or_default().into_iter().find_map(|k| k.tag) {
+        return Some(t);
+    }
+    if node.app.claims().unwrap_or_default().iter().any(|c| c.chain == p.chain_no && c.status != ClaimStatus::Failed) {
+        return None;
+    }
+    // Looked for at most every 30 s (a minute while other arcades are asked): the words are
+    // turned into keys each time.
+    let lag = lagging(node);
+    if !now {
+        let t = arcade_app::now();
+        let mut last = LAST.lock().unwrap();
+        if *last + if lag { 60 } else { 30 } > t {
+            return None;
+        }
+        *last = t;
+    }
+    let phrase = node.app.phrase().ok()?;
+    let seed = arcade_wallet::keys::seed_from_phrase(&phrase).ok()?;
+    for i in 0..RESTORE_SLOTS {
+        // Derived without being written down: only the slot found is kept.
+        let Ok(x) = arcade_wallet::keys::tag_key(&seed[..], p.bip44_coin_type, i) else { return None };
+        let address = arcade_wallet::keys::p2pkh_address(&x.public(), p.p2pkh_version);
+        let mut tag = arcade_ledger::index::tag_of(&node.chain, p.chain_no, &address).ok().flatten();
+        if tag.is_none() && lag {
+            tag = tag_by_mesh(node, &address);
+        }
+        if let Some(t) = tag {
+            let Ok((mut k, _)) = node.app.tag_key(p, i) else { return None };
+            k.tag = Some(t.clone());
+            node.app.put_tag_key(&k).ok()?;
+            node.app.event("tag", &format!("@{t} is yours (found on chain for this wallet's words)")).ok();
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// The @tag another arcade says `address` holds on the home chain.
+fn tag_by_mesh(node: &Node, address: &str) -> Option<String> {
+    let p = node.params;
+    let (v, _) = crate::shares::ask_explorer(node, p, "", "explorer.address", &serde_json::json!({"chain": p.key, "address": address, "local": true})).ok()?;
+    v["tag"].as_str().filter(|t| !t.is_empty()).map(String::from)
+}
+
 /// Called after each sync round.
 pub fn advance_all(node: &Node) {
+    find_own_tag(node, false);
     ask_for_first_handle(node);
     for c in node.app.claims().unwrap_or_default() {
         if !matches!(c.status, ClaimStatus::Confirmed | ClaimStatus::Failed) {
@@ -452,7 +515,9 @@ pub fn start_status(node: &Node) -> serde_json::Value {
     if !wallet {
         return json!({"wallet": false});
     }
-    let tag = node.app.tag_keys(p.chain_no).unwrap_or_default().into_iter().find_map(|k| k.tag);
+    // A restored wallet's @handle is looked for here too (throttled while catching up), so the
+    // Home tab shows it as soon as it is found.
+    let tag = find_own_tag(node, false);
     let claim = node.app.claims().unwrap_or_default().into_iter().filter(|c| c.chain == p.chain_no).max_by_key(|c| c.created);
     let index = claim.as_ref().map(|c| c.key_index).unwrap_or(0);
     let (key, _) = match node.app.tag_key(p, index) {

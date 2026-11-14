@@ -117,7 +117,8 @@ async function drawStart() {
     } }, "Claim");
     s3 = [h("div", { class: "hint" }, failed ? `@${failed.tag} didn't work (${failed.note}); pick another.` : "Your name on the arcade (2–24 characters: a–z, 0–9 and _). It's published on the chain, so every arcade sees it."),
       h("div", { class: "row start-claim" }, h("span", { class: "at" }, "@"), input, check, claim),
-      START.msg ? h("p", { class: "msg " + (START.checked ? "ok" : "bad") }, START.msg) : null];
+      START.msg ? h("p", { class: "msg " + (START.checked ? "ok" : "bad") }, START.msg) : null,
+      catchUp() ? h("div", { class: "hint" }, "Restored a wallet that already has a name? It comes back here by itself once it's found on the chain; no need to claim a new one.") : null];
   }
 
   const steps = [
@@ -561,7 +562,7 @@ $("w-create").addEventListener("click", async () => {
 $("w-saved").addEventListener("change", (e) => { $("w-done").disabled = !e.target.checked; });
 $("w-done").addEventListener("click", () => { $("w-phrase-words").textContent = ""; $("w-phrase").hidden = true; refresh(); });
 $("w-restore").addEventListener("click", async () => {
-  try { await api("wallet.create", { phrase: $("w-words").value }); $("w-words").value = ""; msg($("w-msg"), "Wallet restored.", "ok"); refresh(); }
+  try { const r = await api("wallet.create", { phrase: $("w-words").value }); $("w-words").value = ""; msg($("w-msg"), r && r.tag ? `Wallet restored: you're @${r.tag} again.` : "Wallet restored. If it had a name, it shows here once this arcade or another can read it from the chain.", "ok"); refresh(); }
   catch (e) { msg($("w-msg"), e.message, "bad"); }
 });
 $("w-more").addEventListener("toggle", () => { if ($("w-more").open) { drawAccounts(); drawLinks(picked()); } });
