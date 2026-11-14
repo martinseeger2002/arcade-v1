@@ -197,6 +197,7 @@ cmds! {
     "chains.add" Admin "key, mode?, with?, drive?" "Install a chain (mode full, shared or chain; with = indexes; drive from chains.drives, else this arcade's own). One install at a time: while another chain is still being installed it waits in a queue (queued, position).";
     "chains.unqueue" Admin "key" "Take a chain out of the install queue.";
     "chains.pause" Admin "key" "Pause a chain.";
+    "ui.link" Local "" "The link that opens the app's window in a browser (/ui/, with this start's key) and the SSH tunnel command for another computer (docs/WEBUI.md).";
     "chains.drives" Read "" "Drives a chain's file can go on: this arcade's own, and other mounted disks (free space, whether the arcade can write there).";
     "chains.move" Admin "key, drive" "Move an installed chain's file to another drive (drive from chains.drives; home = this arcade's own). Runs in the background; chains.status shows its progress.";
     "chains.resume" Admin "key" "Resume a chain.";
@@ -243,7 +244,8 @@ cmds! {
     "stake.set" Admin "on" "Turn KOT staking on or off.";
     "stake.check" Read "" "Check our KOT stake rules against the newest blocks.";
     // Apps (app cards)
-    "apps.store" Public "sort?, q?, flagged?" "The App Store: app cards from every chain with the arcade ledger (popular or new; starred first).";
+    "apps.store" Public "sort?, q?, flagged?, category?" "The App Store: app cards from every chain with the arcade ledger (popular or new; starred first), in categories (counts in \"categories\"; category = one of them).";
+    "apps.categories" Public "" "The App Store's known categories (games, apps, social, node modules); a card may name any other.";
     "apps.installed" Read "" "Apps installed on this arcade, each at its newest version.";
     "apps.install" Admin "chain, txid" "Install an app (it follows its author's updates).";
     "apps.uninstall" Admin "id" "Uninstall an app.";

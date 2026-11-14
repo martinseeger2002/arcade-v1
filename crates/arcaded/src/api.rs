@@ -223,7 +223,8 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
             let keys: Vec<String> = req["members"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
             crate::grpsvc::remove(node, &s("id").ok_or("id required")?, &keys)
         }
-        "apps.store" => Ok(crate::appsvc::store(node, &s("sort").unwrap_or_else(|| "popular".into()), &s("q").unwrap_or_default(), req["flagged"] == true)),
+        "apps.store" => Ok(crate::appsvc::store(node, &s("sort").unwrap_or_else(|| "popular".into()), &s("q").unwrap_or_default(), req["flagged"] == true, &s("category").unwrap_or_default())),
+        "apps.categories" => Ok(crate::appsvc::categories()),
         "apps.installed" => Ok(crate::appsvc::installed(node)),
         "apps.install" => crate::appsvc::install(node, &s("chain").ok_or("chain required")?, &s("txid").ok_or("txid required")?),
         "apps.uninstall" => crate::appsvc::uninstall(node, &s("id").ok_or("id required")?),

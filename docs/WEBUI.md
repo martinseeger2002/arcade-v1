@@ -6,7 +6,12 @@ web port. The browser shows the same tabs, apps and windows as the app; nothing 
 
 ## Use it
 
-On the arcade's computer:
+**In the app:** Options → *Use this arcade from a browser* shows the steps, this computer's tunnel
+command (its user and LAN address filled in) and the link (hidden until you press Show), each with
+a Copy button. The same section is there in the browser window, so a new key after a restart is
+one click away in either.
+
+**In a terminal**, on the arcade's computer:
 
 ```sh
 arcade web

@@ -57,7 +57,8 @@
         <button class="primary" id="w-create">Create a new wallet</button>
       </div>
       <h2>Or restore</h2>
-      <textarea id="w-words" rows="2" placeholder="twelve words …"></textarea>
+      <textarea id="w-words" rows="2" placeholder="twelve words …" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
+      <p class="wl-hint web-only" hidden>In a browser, your words go through your tunnel to this arcade only. Do it on a computer you trust: browser extensions can read what a page shows.</p>
       <div class="row"><button id="w-restore">Restore</button></div>
     </div>
     <div id="w-phrase" hidden class="warn">
@@ -90,7 +91,8 @@
       <div id="w-imp-panel" class="wl-panel" hidden>
         <h2>Import a wallet</h2>
         <p class="wl-hint">Paste a private key (WIF) or another wallet's 12 or 24 words; words give that wallet's first address. Kept here, encrypted; nothing is published.</p>
-        <textarea id="w-isecret" rows="2" placeholder="private key (WIF) or recovery words" autocomplete="off" spellcheck="false"></textarea>
+        <textarea id="w-isecret" rows="2" placeholder="private key (WIF) or recovery words" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
+        <p class="wl-hint web-only" hidden>In a browser, the key goes through your tunnel to this arcade only. Do it on a computer you trust: browser extensions can read what a page shows.</p>
         <div class="row">
           <label class="wl-hint">Address kind <select id="w-ikind"><option value="legacy">legacy</option><option value="p2wpkh">SegWit (p2wpkh)</option><option value="p2sh-p2wpkh">wrapped SegWit (p2sh-p2wpkh, receive only)</option></select></label>
           <input id="w-iname" placeholder="name (optional)" maxlength="60" autocomplete="off" style="max-width:12em">
@@ -245,6 +247,7 @@
       <div class="mx-views" id="ap2-sort"><button data-s="popular" class="on">Popular</button><button data-s="new">New</button></div>
       <input id="ap2-q" placeholder="Search apps" style="flex:1;min-width:180px">
     </div>
+    <div class="ap-cats" id="ap2-cats" hidden></div>
     <p class="msg" id="ap2-msg"></p>
     <div id="ap2-body"></div>
   </section>
@@ -339,6 +342,19 @@
     <p class="opt">Off unless you turn it on. When on, this arcade looks for a new release every 6 hours and installs it by itself: the download is checked against the release's SHA-256, the old programs are kept beside the new ones (as .prev), and the service restarts cleanly. Your wallet, @handle, messages and chains stay as they are. If the app window is open, open it again after an update to load the new version.</p>
     <div class="row"><button id="o-check">Check now</button><button class="primary" id="o-now" disabled>Update now</button></div>
     <p class="msg" id="o-msg"></p>
+
+    <h2>Use this arcade from a browser</h2>
+    <p class="opt">This same window, with every tab, opens in a web browser: on this computer, or on another one (a laptop) through an SSH tunnel. Nothing new is opened to the network: the arcade still answers only this computer, and the tunnel brings the other computer's browser here. <span class="web-only" hidden><b>You're using it in a browser now.</b></span></p>
+    <ol class="howto">
+      <li><b>On another computer, open the tunnel</b> in a terminal there and leave it running:
+        <div class="row"><code id="o-tunnel">…</code><button class="small" id="o-tunnel-copy">Copy</button></div>
+        <small>It asks for this computer's login password (or uses your SSH key). The port must be the same on both ends.</small></li>
+      <li><b>Open the link</b> in that computer's browser (or in a browser here, without a tunnel):
+        <div class="row"><code id="o-link">hidden</code><button class="small" id="o-link-show">Show</button><button class="small" id="o-link-copy">Copy</button></div>
+        <small>The link holds this arcade's key. Anyone with the link and a way in can do what this app does, wallet included, so treat it like your wallet's words. Run <code>arcade web</code> in a terminal here for the same link.</small></li>
+      <li><b>Afterwards</b> the plain address <code id="o-plain">http://127.0.0.1:8420/ui/</code> works in that browser, until this arcade restarts (an update, a reboot). Then the key changes: come back here, or run <code>arcade web</code>, for the new link.</li>
+    </ol>
+    <p class="msg" id="o-web-msg"></p>
   </section>
 
   <!-- Activity -->

@@ -4,7 +4,10 @@
   const PEP = homeCoins;
   const ago = (t) => { if (!t) return "waiting"; const s = Date.now() / 1000 - t; return s < 3600 ? `${Math.max(1, Math.round(s / 60))}m ago` : s < 172800 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`; };
   const PERMS = [["wallet", "Wallet access"], ["contacts", "Contacts"], ["groups", "Group chats"], ["media", "Camera & microphone"], ["pictures", "Pictures in the app"], ["notify", "Notifications"]];
-  let view = "mine", sort = "popular", query = "", base = "http://127.0.0.1:8420", detail = null;
+  let view = "mine", sort = "popular", query = "", cat = "", base = "http://127.0.0.1:8420", detail = null;
+  // Category labels by key, from the last App Store answer (apps.store "categories").
+  let CATS = {};
+  const catLabel = (k) => CATS[k] || k;
 
   const note = (t, bad) => say("ap2-msg", t, bad);
 
@@ -30,6 +33,7 @@
   function pills(a) {
     return h("div", { class: "ap-pills" },
       a.card.multiplayer ? h("span", { class: "pill" }, "multiplayer") : "",
+      a.card.category ? h("span", { class: "pill" }, catLabel(a.card.category)) : "",
       a.card.genre ? h("span", { class: "pill" }, a.card.genre) : "",
       h("span", { class: "pill" }, a.chain_name));
   }
@@ -112,6 +116,7 @@
     const put = (...kids) => { if (mySeq === drawSeq) body.replaceChildren(...kids); };
     document.querySelectorAll("#ap2-views button").forEach((b) => b.classList.toggle("on", b.dataset.v === view));
     $("ap2-storebar").hidden = view !== "store";
+    $("ap2-cats").hidden = view !== "store";
     try {
       base = (await api("rpc.info")).url.replace(/\/rpc$/, "");
       if (detail) return drawDetail();
@@ -119,8 +124,9 @@
         const list = await api("apps.installed");
         put(list.length ? h("div", { class: "ap-grid" }, ...list.map(mineCard)) : h("div", { class: "mx-empty" }, "No apps installed yet. Find some in the App Store."));
       } else if (view === "store") {
-        const r = await api("apps.store", { sort, q: query });
-        put(r.apps.length ? h("div", { class: "ap-store" }, ...r.apps.map(storeCard)) : h("div", { class: "mx-empty" }, "No apps found."));
+        const r = await api("apps.store", { sort, q: query, category: cat });
+        drawCats(r.categories || []);
+        put(r.apps.length ? h("div", { class: "ap-store" }, ...r.apps.map(storeCard)) : h("div", { class: "mx-empty" }, cat ? `No ${catLabel(cat)} found yet.` : "No apps found."));
       } else if (view === "publish") {
         drawPublish(put);
       } else {
@@ -136,6 +142,18 @@
     } catch (e) { note(e.message, true); }
   }
 
+  // Category chips: All, the known ones (even when empty), then any other a card uses.
+  function drawCats(list) {
+    CATS = Object.fromEntries(list.map((c) => [c.key, c.label]));
+    const total = list.reduce((n, c) => n + c.count, 0);
+    const chip = (key, label, n, about) => {
+      const b = h("button", { class: key === cat ? "on" : "", title: about || "" }, `${label} ${n}`);
+      b.onclick = () => { cat = key; draw(); };
+      return b;
+    };
+    $("ap2-cats").replaceChildren(chip("", "All", total), ...list.filter((c) => c.known || c.count).map((c) => chip(c.key, c.label, c.count, c.about)));
+  }
+
   function drawPublish(put) {
     const f = (ph, attrs = {}) => h("input", { placeholder: ph, ...attrs });
     const name = f("Name (required, up to 60)"), version = f("Version, e.g. 1.0"), players = f("Players, e.g. 1-4"), genre = f("Genre, e.g. Puzzle"), family = f("Family (rooms shared across versions; letters, digits . _ : -)");
@@ -144,11 +162,17 @@
     const boxes = FLAGS.map(([k, l]) => h("label", { class: "ap-perm" }, h("input", { type: "checkbox", value: k }), " ", l));
     const page = h("input", { type: "file", accept: ".html,.htm,text/html" }), cov = h("input", { type: "file", accept: "image/*" });
     const est = h("div", { class: "s" });
+    // Category: a known one, or a new one typed in (it shows in the App Store once used).
+    const catSel = h("select", {}, h("option", { value: "" }, "Category: Apps"));
+    const catNew = f("or a new category", { maxlength: "24", style: "max-width:14em" });
+    api("apps.categories").then((list) => { catSel.replaceChildren(...list.map((c) => h("option", { value: c.key }, `Category: ${c.label}`)), h("option", { value: "" }, "Category: a new one →")); catSel.value = "apps"; }).catch(() => {});
     const read = (input) => new Promise((ok) => { const file = input.files[0]; if (!file) return ok(null); const r = new FileReader(); r.onload = () => ok({ name: file.name, type: file.type, data: String(r.result).split(",")[1], size: file.size }); r.readAsDataURL(file); });
     const cardOf = () => {
       const c = { name: name.value.trim() };
       for (const [k, el] of [["version", version], ["players", players], ["genre", genre], ["family", family], ["description", desc]]) if (el.value.trim()) c[k] = el.value.trim();
       for (const b of boxes) { const i = b.querySelector("input"); if (i.checked) c[i.value] = true; }
+      const cg = (catNew.value.trim() || catSel.value).toLowerCase().split(/\s+/).join("-");
+      if (cg) c.category = cg;
       return c;
     };
     const estimate = async () => {
@@ -179,7 +203,7 @@
     };
     put(h("div", { class: "card ap-pub" },
       h("p", { class: "s" }, "An app is an HTML page inscribed with its card. Publishing again under the same name replaces your earlier version; the old one still plays at its own link."),
-      name, h("div", { class: "row" }, version, players, genre), family, desc, h("div", { class: "ap-flags" }, ...boxes),
+      name, h("div", { class: "row" }, version, players, genre), h("div", { class: "row" }, catSel, catNew), family, desc, h("div", { class: "ap-flags" }, ...boxes),
       h("label", {}, "App page (HTML) ", page), h("label", {}, "Cover image ", cov), est, h("div", { class: "row" }, go)));
   }
 

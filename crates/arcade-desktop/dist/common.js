@@ -4,6 +4,9 @@ const $ = (id) => document.getElementById(id);
 // In the desktop app the window's calls go to the app; in a browser (arcaded serves these same
 // files at /ui/, docs/WEBUI.md) the same four calls go to arcaded over HTTP.
 const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : webInvoke;
+// In a browser: notes meant only there (class "web-only") show; in the app they stay hidden.
+const IN_BROWSER = !window.__TAURI__;
+document.addEventListener("DOMContentLoaded", () => document.querySelectorAll(".web-only").forEach((e) => { e.hidden = !IN_BROWSER; }));
 
 // The key from `arcade web`'s link (#k=...), kept for this browser; it changes when arcaded restarts.
 function webKey(ask) {

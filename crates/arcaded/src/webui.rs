@@ -43,14 +43,30 @@ pub(crate) fn key(node: &Node) -> Option<String> {
     node.rpc_cookie.get().and_then(|c| c.strip_prefix("__cookie__:")).filter(|k| !k.is_empty()).map(String::from)
 }
 
-/// The link that opens the window in a browser on this computer (or through a tunnel to it).
+/// The link that opens the window in a browser on this computer (or through a tunnel to it),
+/// with the tunnel command for another computer: this computer's user and LAN address.
 pub(crate) fn link(node: &Node, port: u16) -> Result<Value, String> {
     let k = key(node).ok_or("the arcade's key isn't ready yet; try again in a moment")?;
+    let user = std::env::var("USER").ok().filter(|u| !u.is_empty() && u.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)));
+    let host = std::fs::read_to_string("/etc/hostname").ok().map(|h| h.trim().to_string()).filter(|h| !h.is_empty());
+    let ip = lan_ip();
+    let at = format!("{}@{}", user.as_deref().unwrap_or("<you>"), ip.clone().or_else(|| host.clone()).unwrap_or_else(|| "<this computer>".into()));
     Ok(json!({
         "url": format!("http://127.0.0.1:{port}/ui/#k={k}"),
-        "tunnel": format!("ssh -N -L {port}:127.0.0.1:{port} <you>@<this computer>"),
+        "port": port,
+        "tunnel": format!("ssh -N -L {port}:127.0.0.1:{port} {at}"),
+        "user": user, "host": host, "ip": ip,
         "note": "Open the url in a browser on this computer, or on another one through the tunnel (the same port on both ends). The key changes each time the arcade starts.",
     }))
+}
+
+/// This computer's address on its local network (the one its default route leaves by), if any.
+/// A UDP "connect" only picks the route; nothing is sent.
+fn lan_ip() -> Option<String> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:9").ok()?;
+    let ip = s.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then(|| ip.to_string())
 }
 
 #[cfg(test)]

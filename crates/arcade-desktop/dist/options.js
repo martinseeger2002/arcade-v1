@@ -41,3 +41,22 @@ $("o-now").addEventListener("click", () => {
   if (!confirm("Install the newest release now? The service restarts; your wallet and data stay as they are.")) return;
   optionsDo("Downloading the new release…", () => api("update.now"));
 });
+
+// Use this arcade from a browser (ui.link): the tunnel command and the link, in the app and in a
+// browser alike (docs/WEBUI.md).
+const WEBUI = { link: null, shown: false };
+async function refreshWebUi() {
+  try { WEBUI.link = await api("ui.link"); } catch (e) { say("o-web-msg", e.message, true); return; }
+  const l = WEBUI.link;
+  $("o-tunnel").textContent = l.tunnel;
+  $("o-plain").textContent = `http://127.0.0.1:${l.port}/ui/`;
+  $("o-link").textContent = WEBUI.shown ? l.url : "hidden";
+  $("o-link-show").textContent = WEBUI.shown ? "Hide" : "Show";
+}
+async function copyText(text, what) {
+  try { await navigator.clipboard.writeText(text); say("o-web-msg", `${what} copied.`); }
+  catch { say("o-web-msg", `Couldn't copy here: select the ${what.toLowerCase()} and copy it by hand.`, true); WEBUI.shown = true; refreshWebUi(); }
+}
+$("o-tunnel-copy").addEventListener("click", () => WEBUI.link && copyText(WEBUI.link.tunnel, "Tunnel command"));
+$("o-link-copy").addEventListener("click", () => WEBUI.link && copyText(WEBUI.link.url, "Link"));
+$("o-link-show").addEventListener("click", () => { WEBUI.shown = !WEBUI.shown; refreshWebUi(); });

@@ -18,6 +18,10 @@ base.html 332-770 and 1852, web/docs/games.md), 2026-11-08. V1.0 calls them **ap
   - minimized `{"timeout": n}` or n: absent/invalid 900, 0 none, else clamp 1..86400 (→ minimized_timeout).
 - Author = the inscription's **creator** address (not the owner). No url, icon (cover is the icon),
   category (genre) or chains fields.
+- **V1.0 adds `category`** (the original ignores it): lowercase letters, digits and inner dashes, up
+  to 24 ("Node Modules" reads as "node-modules"). The App Store shows its known categories first
+  (games, apps, social, node-modules: `appsvc::CATEGORIES`), then any other a card names, so a new
+  kind of app needs no new arcade. Without one, a "game" card is in games and an "app" card in apps.
 
 ## 2. Versions and removal
 - One card per game: key (creator, name casefolded), newest by (height, position).
