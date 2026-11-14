@@ -328,6 +328,11 @@
   <!-- Options -->
   <section id="options" class="tab">
     <h1>Options</h1>
+    <h2 id="o-theme">Look</h2>
+    <div class="row"><select id="o-look" title="How this window looks"><option value="">Default look</option></select>
+      <button id="o-look-store">Find themes…</button></div>
+    <p class="opt">Themes are apps from the App Store's Themes category. One changes how this window looks and is laid out (an application window with menus, or a desktop with windows and a taskbar), never what it does: every screen is still this one's. It is checked before it is worn: its text must be readable, and its style can only reach its own frame. This window keeps its own choice; the desktop app and each browser choose for themselves.</p>
+    <p class="msg" id="o-look-msg"></p>
     <h2>Updates</h2>
     <div class="grid">
       <div class="card"><div class="k">This version</div><div class="v" id="o-ver">—</div></div>
@@ -348,6 +353,7 @@
 </main>
 <script src="common.js"></script>
 <script src="app.js"></script>
+<script src="theme.js"></script>
 <script src="chains.js"></script>
 <script src="explorer.js"></script>
 <script src="messages.js"></script>

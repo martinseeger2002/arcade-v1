@@ -18,6 +18,11 @@
     } catch (e) { note(e.message, true); }
   }
 
+  // A theme app (category "themes", theme.js): checked, installed if it isn't, then worn (the window reloads).
+  async function useTheme(a) {
+    try { note(`Checking ${a.card.name}…`); await THEME.use(a); } catch (e) { note(`${a.card.name} can't be worn: ${e.message}`, true); }
+  }
+
   function cover(a) {
     return a.card.cover
       ? h("img", { class: "ap-cover", src: `${base}/app/${a.chain}/${a.card.cover}`, alt: "" })
@@ -53,7 +58,10 @@
     const inst = h("button", { class: a.installed ? "" : "primary" }, a.installed ? "Installed" : "Install");
     inst.disabled = a.installed;
     inst.onclick = async () => { await api("apps.install", { chain: a.chain, txid: a.txid }); note(`${a.card.name} is on Your apps.`); draw(); };
-    const openB = h("button", {}, "Open"); openB.onclick = () => open(a);
+    const theme = a.card.category === "themes";
+    const openB = h("button", {}, theme ? "Preview" : "Open"); openB.onclick = () => open(a);
+    const wear = theme ? h("button", { class: "primary" }, THEME.current()?.id === a.id ? "Worn" : "Use theme") : "";
+    if (wear) wear.onclick = () => useTheme(a);
     const details = h("button", { class: "small" }, "Details"); details.onclick = () => { detail = a; draw(); };
     const comment = h("div", { class: "fd-reply", hidden: true }, (() => { const t = h("input", { placeholder: "Comment…" }); const b = h("button", { class: "small primary" }, "Send"); b.onclick = () => t.value.trim() && act("reply", a, { text: t.value.trim() }); return [t, b]; })());
     const tip = h("div", { class: "fd-reply", hidden: true }, (() => { const t = h("input", { type: "number", min: "0.01", step: "0.01", placeholder: homeTicker(), style: "width:8em" }); const b = h("button", { class: "small primary" }, "Tip"); b.onclick = () => { const v = Math.round(Number(t.value) * 1e8); if (v > 0) act("tip", a, { amount: v }); }; return [t, b]; })());
@@ -63,7 +71,7 @@
         h("div", { class: "ap-title" }, h("b", {}, a.card.name), star),
         pills(a), h("div", { class: "s" }, byline(a)),
         a.card.description ? h("div", { class: "ap-desc" }, a.card.description) : "",
-        h("div", { class: "row ap-row" }, openB, inst, details),
+        h("div", { class: "row ap-row" }, openB, wear || inst, wear ? inst : "", details),
         h("div", { class: "fd-acts" },
           btn(`▲ ${s.likes || 0}`, () => act(s.my_opinion === "like" ? "unlike" : "like", a), s.my_opinion === "like"),
           btn(`▼ ${s.dislikes || 0}`, () => act(s.my_opinion === "dislike" ? "undislike" : "dislike", a), s.my_opinion === "dislike"),
@@ -83,7 +91,9 @@
     const un = h("button", { class: "small" }, "Uninstall");
     un.onclick = async () => { if (!un.dataset.sure) { un.dataset.sure = 1; un.textContent = "Sure?"; return; } await api("apps.uninstall", { id: a.id }); draw(); };
     const det = h("button", { class: "small" }, "Details"); det.onclick = () => { detail = a; draw(); };
-    tile.append(h("div", { class: "row ap-row" }, det, un));
+    const wear = a.card.category === "themes" ? h("button", { class: "small primary" }, THEME.current()?.id === a.id ? "Worn" : "Use theme") : "";
+    if (wear) wear.onclick = () => useTheme(a);
+    tile.append(h("div", { class: "row ap-row" }, wear, det, un));
     return tile;
   }
 
@@ -147,7 +157,7 @@
     CATS = Object.fromEntries(list.map((c) => [c.key, c.label]));
     const total = list.reduce((n, c) => n + c.count, 0);
     const chip = (key, label, n, about) => {
-      const b = h("button", { class: key === cat ? "on" : "", title: about || "" }, `${label} ${n}`);
+      const b = h("button", { class: key === cat ? "on" : "", title: about || "", "data-cat": key }, `${label} ${n}`);
       b.onclick = () => { cat = key; draw(); };
       return b;
     };

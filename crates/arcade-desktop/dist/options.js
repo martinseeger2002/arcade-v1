@@ -41,3 +41,28 @@ $("o-now").addEventListener("click", () => {
   if (!confirm("Install the newest release now? The service restarts; your wallet and data stay as they are.")) return;
   optionsDo("Downloading the new release…", () => api("update.now"));
 });
+// Look: the default, or an installed theme app (theme.js).
+(async () => {
+  const sel = document.getElementById("o-look"); if (!sel) return;
+  const msg = document.getElementById("o-look-msg");
+  const fill = async () => {
+    let list = [];
+    try { list = await THEME.installedThemes(); } catch {}
+    const cur = THEME.current();
+    sel.replaceChildren(h("option", { value: "" }, "Default look"), ...list.map((a) => h("option", { value: a.id }, a.card.name)));
+    sel.value = cur && list.some((a) => a.id === cur.id) ? cur.id : "";
+    sel._list = list;
+  };
+  sel.onchange = async () => {
+    msg.className = "msg"; msg.textContent = "";
+    if (!sel.value) return THEME.clear();
+    const a = sel._list.find((x) => x.id === sel.value);
+    try { await THEME.use(a); } catch (e) { msg.className = "msg bad"; msg.textContent = `${a.card.name} can't be worn: ${e.message}`; await fill(); }
+  };
+  document.getElementById("o-look-store").onclick = () => {
+    goTab("apps"); document.querySelector('#ap2-views button[data-v="store"]')?.click();
+    let n = 0; const t = setInterval(() => { const c = document.querySelector('#ap2-cats [data-cat="themes"]'); if (c || ++n > 20) { clearInterval(t); c?.click(); } }, 150);
+  };
+  document.querySelector('nav button[data-tab="options"]')?.addEventListener("click", fill);
+  fill();
+})();

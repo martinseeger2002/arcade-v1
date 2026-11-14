@@ -250,6 +250,7 @@ pub const CATEGORIES: &[(&str, &str, &str)] = &[
     ("apps", "Apps", "Tools and everything else"),
     ("social", "Social", "Chats, groups and feeds"),
     ("node-modules", "Node modules", "Features for this arcade itself, published and installed like any app"),
+    ("themes", "Themes", "How this window looks: an application window or a desktop, its colours and frame (docs/THEMES.md)"),
 ];
 
 /// A category for the store's list: a known one's label, else its name in words.
