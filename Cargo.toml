@@ -10,3 +10,8 @@ license = "MIT"
 [workspace.dependencies]
 anyhow = "1"
 thiserror = "1"
+
+# libbitcoinconsensus with one addition: a per-thread signature-hash prefix, for chains that hash
+# a chain id ahead of each signature's message (Luckycoin). See vendor/bitcoinconsensus/ARCADE.md.
+[patch.crates-io]
+bitcoinconsensus = { path = "vendor/bitcoinconsensus" }

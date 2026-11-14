@@ -74,8 +74,16 @@ pub struct BlockRules {
     pub max_block_size: usize,
     /// Most signature operations in a block (legacy, plus P2SH redeem scripts).
     pub max_sigops: u32,
+    /// 32 bytes a chain hashes ahead of each signature's message from `height` on (None: plain
+    /// Bitcoin signature hashing). Luckycoin's "revival" CHAIN_ID, against replays across forks.
+    pub sighash_prefix: fn(u32) -> Option<&'static [u8; 32]>,
     /// Checked when a block is connected (see [`ValueRules::enforced`]).
     pub enforced: bool,
+}
+
+/// No signature-hash prefix at any height.
+pub fn no_sighash_prefix(_: u32) -> Option<&'static [u8; 32]> {
+    None
 }
 
 /// `CPureBlockHeader::IsLegacy()` in the Dogecoin 1.14 family.
@@ -403,6 +411,7 @@ pub const PEPECOIN_BLOCK_RULES: BlockRules = BlockRules {
     min_version: |h| if h >= 1000 { 4 } else { 0 },
     max_block_size: 1_000_000,
     max_sigops: 20_000,
+    sighash_prefix: no_sighash_prefix,
     enforced: true,
 };
 
@@ -413,6 +422,7 @@ pub const PEPECOIN_REGTEST_BLOCK_RULES: BlockRules = BlockRules {
     min_version: |h| if h >= 1351 { 4 } else if h >= 1251 { 3 } else { 0 },
     max_block_size: 1_000_000,
     max_sigops: 20_000,
+    sighash_prefix: no_sighash_prefix,
     enforced: true,
 };
 
@@ -436,6 +446,7 @@ pub const DOGECOIN_BLOCK_RULES: BlockRules = BlockRules {
     max_block_size: 1_000_000,
     max_sigops: 20_000,
     // Not yet: until the MiniPC's replay of Dogecoin's whole history finds no block breaking them.
+    sighash_prefix: no_sighash_prefix,
     enforced: false,
 };
 
@@ -455,6 +466,7 @@ pub const FLOPCOIN_BLOCK_RULES: BlockRules = BlockRules {
     min_version: |h| if h >= 111_000 { 4 } else if h >= 101 { 3 } else { 0 },
     max_block_size: 1_000_000,
     max_sigops: 20_000,
+    sighash_prefix: no_sighash_prefix,
     enforced: false,
 };
 
@@ -473,16 +485,19 @@ pub const SHIBACOIN_BLOCK_RULES: BlockRules = BlockRules {
     min_version: |h| if h >= 1000 { 4 } else { 0 },
     max_block_size: 1_000_000,
     max_sigops: 20_000,
+    sighash_prefix: no_sighash_prefix,
     enforced: false,
 };
 
 /// Luckycoin (Luckycoin Core 5.0.1): see luckycoin.rs; MAX_MONEY 20 million, maturity 70; P2SH
-/// since launch, BIP34, DERSIG, CHECKLOCKTIMEVERIFY and version 4 from 95,551; CSV and SegWit off.
+/// since launch, BIP34, DERSIG, CHECKLOCKTIMEVERIFY and version 4 from 95,551; CSV and SegWit off;
+/// signatures hash CHAIN_ID first from 276,500. Enforced: the whole history (1,179,864 blocks,
+/// every script) replays with none broken.
 pub const LUCKYCOIN_VALUE_RULES: ValueRules = ValueRules {
     max_money: crate::luckycoin::MAX_MONEY,
     subsidy: crate::luckycoin::subsidy,
     maturity: crate::luckycoin::maturity,
-    enforced: false,
+    enforced: true,
 };
 pub const LUCKYCOIN_BLOCK_RULES: BlockRules = BlockRules {
     script_flags: |h| SCRIPT_P2SH | if h >= 95_551 { SCRIPT_DERSIG | SCRIPT_CHECKLOCKTIMEVERIFY } else { 0 },
@@ -490,7 +505,8 @@ pub const LUCKYCOIN_BLOCK_RULES: BlockRules = BlockRules {
     min_version: |h| if h >= 95_551 { 4 } else { 0 },
     max_block_size: 1_000_000,
     max_sigops: 20_000,
-    enforced: false,
+    sighash_prefix: crate::luckycoin::sighash_prefix,
+    enforced: true,
 };
 
 /// Pepecoin regtest: halving every 150 blocks, maturity 60.

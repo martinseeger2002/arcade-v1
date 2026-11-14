@@ -44,6 +44,18 @@ pub fn maturity(_height: u32) -> u32 {
     70
 }
 
+/// From this block on signatures hash CHAIN_ID first (validation.cpp: ConnectBlock asks
+/// GetChainSigVersion of the block itself, `nHeight >= 276500`).
+pub const REVIVAL: u32 = 276_500;
+/// CHAIN_ID (script/interpreter.h): uint256S("0x4c55434b59434f494e5f5245564956414c"),
+/// "LUCKYCOIN_REVIVAL", as it is serialized into the hash (little-endian, 32 bytes).
+pub const CHAIN_ID: [u8; 32] = [0x4c, 0x41, 0x56, 0x49, 0x56, 0x45, 0x52, 0x5f, 0x4e, 0x49, 0x4f, 0x43, 0x59, 0x4b, 0x43, 0x55, 0x4c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+/// The signature-hash prefix of a block at `height`: CHAIN_ID from [`REVIVAL`].
+pub fn sighash_prefix(height: u32) -> Option<&'static [u8; 32]> {
+    (height >= REVIVAL).then_some(&CHAIN_ID)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
