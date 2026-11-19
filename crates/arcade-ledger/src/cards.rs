@@ -21,6 +21,8 @@ pub struct Card {
     pub notify: bool,
     pub contacts: bool,
     pub groups: bool,
+    /// Posts, likes, replies and follows on the public feed in the operator's name (the Feed app).
+    pub feed: bool,
     pub family: String,
     pub cover: String,
     pub play: String,
@@ -95,6 +97,7 @@ pub fn parse(json_text: &str) -> Option<Card> {
         notify: d["notify"] == true,
         contacts: d["contacts"] == true,
         groups: d["groups"] == true,
+        feed: d["feed"] == true,
         family,
         cover: hex64(&d["cover"]),
         play: hex64(&d["play"]),
@@ -109,7 +112,7 @@ impl Card {
         json!({
             "name": self.name, "description": self.description, "version": self.version, "players": self.players,
             "genre": self.genre, "category": self.category, "multiplayer": self.multiplayer, "wallet": self.wallet, "media": self.media,
-            "pictures": self.pictures, "notify": self.notify, "contacts": self.contacts, "groups": self.groups,
+            "pictures": self.pictures, "notify": self.notify, "contacts": self.contacts, "groups": self.groups, "feed": self.feed,
             "family": self.family, "cover": self.cover, "play": self.play, "tdeck": self.tdeck, "tdeck_icon": self.tdeck_icon,
             "minimized_timeout": self.minimized_timeout,
         })

@@ -10,6 +10,7 @@ mod webui;
 mod rulecheck;
 mod updater;
 mod handlegate;
+mod lentrows;
 mod hometag;
 mod addrsvc;
 mod collsvc;
@@ -81,6 +82,9 @@ mod namesites;
 mod ordtypes;
 mod staker;
 mod sitesvc;
+mod siteid;
+mod sitesign;
+mod psbt;
 mod grpsvc;
 mod feedsvc;
 mod follows;
@@ -103,6 +107,7 @@ mod sizes;
 mod udpsvc;
 mod relaysvc;
 mod svcmesh;
+mod walletproofs;
 mod turnsvc;
 mod v1copy;
 mod vxshare;
@@ -505,6 +510,7 @@ fn main() {
     tokensend::start(node.clone());
     ordtypes::init(&node);
     namesites::init(&node);
+    sitesign::boot(&node);
     // A home chain far behind (a fresh install): installed from copies when the mesh has them.
     v1import::auto_home(node.clone());
     sizes::load(&node);
@@ -553,6 +559,8 @@ fn main() {
         let n = node.clone();
         std::thread::Builder::new().name("svc".into()).spawn(move || svcmesh::run(n)).unwrap();
     }
+    // Wallet proofs on profiles (walletproofs): kept current by themselves once a profile is published.
+    walletproofs::run(node.clone());
     {
         let n = node.clone();
         std::thread::Builder::new().name("rooms".into()).spawn(move || realtime::run(n)).unwrap();

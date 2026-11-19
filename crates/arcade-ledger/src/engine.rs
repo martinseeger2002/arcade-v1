@@ -52,6 +52,7 @@ pub const A_FOLLOW: &str = "ledger.v1.a_follow"; // C|follower address|00|tag ->
 pub const A_FOLLOWER: &str = "ledger.v1.a_follower"; // C|tag|00|follower address -> {"h"}
 pub const A_CONTACT: &str = "ledger.v1.a_contact"; // C|address|00|id (8) -> {"c": sealed hex, "h"}
 pub const A_POST: &str = "ledger.v1.a_post"; // C|address|00|height u32|pos u32 -> {"t", "txid"}
+pub const A_WALLET: &str = "ledger.v1.a_wallet"; // C|address|00|coin|00|wallet address -> {"h", "txid"} (proven, A:// op 7); C|address|01 -> {"set"}
 
 pub const MAX_AMOUNT: u64 = 9_223_372_036_854_775_807;
 const PROPERTY_TYPES: &[u16] = &[1, 2, 65, 66, 129, 130, 5];
@@ -426,6 +427,8 @@ impl Engine<'_, '_, '_> {
     fn aproto(&self, r: &Rtx) -> Result<Inv> {
         use crate::aproto::AOp;
         let op = match crate::aproto::parse(&r.atx.payload) {
+            // Below its height op 7 is unknown, as it was before (every arcade's ledger reads the same).
+            Some(Ok(AOp::Wallets { .. })) if !crate::aproto::wallets_known(self.c, self.h as u64) => return Ok(Err("A:// record not valid: unknown A:// op".into())),
             Some(Ok(op)) => op,
             Some(Err(e)) => return Ok(Err(format!("A:// record not valid: {e}"))),
             None => return Ok(Err("malformed A:// record".into())),
@@ -465,6 +468,29 @@ impl Engine<'_, '_, '_> {
                     return Ok(Err("no such contact".into()));
                 }
                 self.l.del(A_CONTACT, &key)?;
+            }
+            AOp::Wallets { set, proofs } => {
+                if let Some(bad) = proofs.iter().find(|w| !crate::aproto::wallet_proof_ok(me, w)) {
+                    return Ok(Err(format!("A:// record not valid: the proof of {} {} doesn't check", bad.coin, bad.address)));
+                }
+                let pre = k(self.c).bytes(me.as_bytes()).u8(0).done();
+                let set_key = k(self.c).bytes(me.as_bytes()).u8(1).done();
+                let now = self.jget(A_WALLET, &set_key)?.and_then(|v| v["set"].as_u64());
+                match now {
+                    // An older set: the newer one stands (its records may have come first in the block).
+                    Some(n) if set < n => return Ok(Ok(())),
+                    Some(n) if set == n => {}
+                    _ => {
+                        for (key, _) in self.l.scan(A_WALLET, &pre)? {
+                            self.l.del(A_WALLET, &key)?;
+                        }
+                        self.jput(A_WALLET, &set_key, &json!({"set": set}))?;
+                    }
+                }
+                for w in proofs {
+                    let key = k(self.c).bytes(me.as_bytes()).u8(0).bytes(w.coin.as_bytes()).u8(0).bytes(w.address.as_bytes()).done();
+                    self.jput(A_WALLET, &key, &json!({"h": self.h, "txid": r.txid}))?;
+                }
             }
             AOp::Post(t) => {
                 self.jput(A_POST, &k(self.c).bytes(me.as_bytes()).u8(0).u32(self.h).u32(r.pos).done(), &json!({"t": t, "txid": r.txid}))?;
@@ -1594,7 +1620,7 @@ impl Indexer for LedgerIndexer {
         vec![(arcade_chaindb::journal::LEDGER, self.tables().iter().map(|t| t.name).collect())]
     }
     fn tables(&self) -> Vec<TableDef> {
-        [ROWS, PROPERTY, PROPERTY_BY_BLOCK, BALANCE, BOOK, TAKE, INSCRIPTION, CHUNK, PIECE, OFFER, ASK, COLLECTION, META, BY_NUMBER, TAG, TAG_BY_ADDRESS, TAG_SEEN, TAG_DUE, TAG_REL, TAG_COMMIT, TAG_PEND, TAG_WIN, REPO, REPO_MAINT, REPO_LOG, REPO_ITEM, REPO_EVENT, A_PROFILE, A_FOLLOW, A_FOLLOWER, A_CONTACT, A_POST]
+        [ROWS, PROPERTY, PROPERTY_BY_BLOCK, BALANCE, BOOK, TAKE, INSCRIPTION, CHUNK, PIECE, OFFER, ASK, COLLECTION, META, BY_NUMBER, TAG, TAG_BY_ADDRESS, TAG_SEEN, TAG_DUE, TAG_REL, TAG_COMMIT, TAG_PEND, TAG_WIN, REPO, REPO_MAINT, REPO_LOG, REPO_ITEM, REPO_EVENT, A_PROFILE, A_FOLLOW, A_FOLLOWER, A_CONTACT, A_POST, A_WALLET]
             .iter()
             .map(|t| TableDef::plain(t))
             .collect()

@@ -17,13 +17,10 @@ use arcade_msg::public::{Act, FeedAct, Post};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Where the home chain's blocks start in the order key ([`ledger_rows`]): above any older chain's height.
-const HOME_BASE: u64 = 1 << 40;
-
-/// A row read from ledger chain `c` (history: an older chain than the home): addresses in the home chain's form (one
-/// key, one person, whichever chain it wrote on), its chain `c`, and its order key `o` (older chains' history first,
-/// then the home chain's blocks, then what is waiting).
-fn norm(node: &Node, mut v: Value, c: u16, history: bool) -> Value {
+/// A row read from ledger chain `c`: addresses in the home chain's form (one key, one person, whichever chain it wrote
+/// on), its chain `c`, and its order key `o`: its block's time (chains side by side by time, not by their heights),
+/// what is waiting last. `times` caches block times by (chain, height).
+fn norm(node: &Node, mut v: Value, c: u16, times: &mut BTreeMap<(u16, u64), u64>) -> Value {
     if let Some(a) = v["from"].as_str().map(|a| node.home_address(a)) {
         v["from"] = json!(a);
     }
@@ -33,27 +30,72 @@ fn norm(node: &Node, mut v: Value, c: u16, history: bool) -> Value {
     }
     let h = v["h"].as_u64().unwrap_or(0);
     v["c"] = json!(c);
-    v["o"] = json!(if h == 0 { u64::MAX } else if history { h } else { HOME_BASE + h });
+    let o = if h == 0 {
+        u64::MAX
+    } else {
+        // Time first, then the height within the chain (blocks of one second keep their order).
+        // (Rows read from a lender carry their block's time: this arcade may not have the header yet.)
+        let t = match v["_t"].as_u64() {
+            Some(t) => t,
+            None => *times.entry((c, h)).or_insert_with(|| block_time(node, c, h as u32)),
+        };
+        t.saturating_mul(1 << 24).saturating_add(h & 0xff_ffff)
+    };
+    v["o"] = json!(o);
     v
 }
 
 /// A messages table's rows from every ledger chain (HOMECHAIN.md phase 3: the old home's posts and acts stay readable
 /// as history), oldest chain first, each [`norm`]ed.
 pub(crate) fn ledger_rows(node: &Node, table: &str) -> Vec<Value> {
-    let home = node.ledger_home().chain_no;
+    let mut times = BTreeMap::new();
     let mut out = Vec::new();
     for p in node.ledger_chains() {
-        for v in m::rows(&node.chain, table, p.chain_no).unwrap_or_default() {
-            out.push(norm(node, v, p.chain_no, p.chain_no != home));
+        for v in chain_rows(node, p, table) {
+            out.push(norm(node, v, p.chain_no, &mut times));
         }
     }
+    // One order across the chains (follows settle the newest act last; the feed reads `o` too).
+    out.sort_by_key(|v| v["o"].as_u64().unwrap_or(u64::MAX));
+    out
+}
+
+/// One messages table of one ledger chain: this arcade's own rows, or, where it can't read the chain for itself yet,
+/// what arcades that keep it hold (crate::lentrows).
+/// what arcades that keep it hold besides (crate::lentrows): one row per txid, this arcade's own first.
+fn chain_rows(node: &Node, p: &'static arcade_chain::params::ChainParams, table: &str) -> Vec<Value> {
+    let own = m::rows(&node.chain, table, p.chain_no).unwrap_or_default();
+    let t = if table == m::POST { "post" } else if table == m::ACT { "act" } else { return own };
+    if !crate::lentrows::lent(node, p) {
+        return own;
+    }
+    crate::lentrows::merged(own, crate::lentrows::rows(node, p, t))
+}
+
+/// The acts on `target` from every ledger chain, [`norm`]ed and in one order (oldest first).
+pub(crate) fn ledger_acts_on(node: &Node, target: &str) -> Vec<Value> {
+    let mut times = BTreeMap::new();
+    let on = |p: &'static arcade_chain::params::ChainParams| -> Vec<Value> {
+        let own = m::acts_on(&node.chain, p.chain_no, target);
+        if !crate::lentrows::lent(node, p) {
+            return own;
+        }
+        crate::lentrows::merged(own, crate::lentrows::rows(node, p, "act").into_iter().filter(|a| a["target"] == target).collect())
+    };
+    let mut out: Vec<Value> = node.ledger_chains().into_iter().flat_map(|p| on(p).into_iter().map(move |v| (p.chain_no, v))).collect::<Vec<_>>()
+        .into_iter().map(|(c, v)| norm(node, v, c, &mut times)).collect();
+    out.sort_by_key(|v| v["o"].as_u64().unwrap_or(u64::MAX));
     out
 }
 
 /// A post by txid on any ledger chain: (its chain, the row [`norm`]ed).
 fn find_post(node: &Node, txid: &str) -> Option<(u16, Value)> {
-    let home = node.ledger_home().chain_no;
-    node.ledger_chains().into_iter().rev().find_map(|p| m::post(&node.chain, p.chain_no, txid).map(|v| (p.chain_no, norm(node, v, p.chain_no, p.chain_no != home))))
+    let mut times = BTreeMap::new();
+    node.ledger_chains().into_iter().rev().find_map(|p| {
+        let v = m::post(&node.chain, p.chain_no, txid)
+            .or_else(|| crate::lentrows::lent(node, p).then(|| crate::lentrows::rows(node, p, "post").into_iter().find(|v| v["txid"] == txid)).flatten());
+        v.map(|v| (p.chain_no, norm(node, v, p.chain_no, &mut times)))
+    })
 }
 
 /// Acts waiting in the mempool, and posts too (shown at once, read live each time).
@@ -97,7 +139,7 @@ fn author(node: &Node, address: &str, cache: &mut BTreeMap<String, Value>) -> Va
     }
     let tag = crate::hometag::of_address(node, address);
     // The home chain's profile first, then an older chain's.
-    let prof = node.ledger_chains().into_iter().rev().find_map(|p| arcade_ledger::index::profile(&node.chain, p.chain_no, &crate::hometag::address_on(p, address)?).ok().flatten());
+    let prof = node.ledger_chains().into_iter().rev().find_map(|p| crate::msgsvc::profile_on(node, p, &crate::hometag::address_on(p, address)?));
     let v = json!({"address": address, "tag": tag, "name": prof.as_ref().map(|p| p["name"].clone()), "pfp": prof.as_ref().map(|p| p["pfp"].clone()), "key": prof.as_ref().map(|p| p["pubkey"].clone())});
     cache.insert(address.to_string(), v.clone());
     v
@@ -211,6 +253,8 @@ pub fn feed(node: &Node, v: &View) -> Result<Value, String> {
                 "txid": txid, "author": author(node, from, cache), "channel": p["channel"], "nick": p["nick"],
                 "text": if is_muted { Value::Null } else { json!(r.text.clone().unwrap_or_else(|| p["text"].as_str().unwrap_or("").to_string())) },
                 "edited": r.text.is_some(), "muted": is_muted, "file": p["file"], "height": p["h"],
+                // The chain it is written on (a:// ARCADE, p:// Pepecoin testnet), for a badge.
+                "chain": p["c"].as_u64().and_then(|c| crate::chains::all().into_iter().chain(crate::arcsvc::defined()).find(|x| x.chain_no as u64 == c)).map(|x| x.key),
                 "likes": r.likes, "dislikes": r.dislikes, "shares": r.shares, "tips": r.tips, "tip_count": r.tip_count,
                 "mine": from == me, "my_opinion": r.mine, "score": score(&r), "replies": replies,
             }))
@@ -246,7 +290,7 @@ pub fn feed(node: &Node, v: &View) -> Result<Value, String> {
         let hot = (1.0 + row["score"].as_f64().unwrap_or(0.0)) / (age_h + 2.0).powf(1.5);
         row["age_hours"] = json!(age_h);
         let o = p["o"].as_u64().unwrap_or(u64::MAX);
-        let newest = if o == u64::MAX { u64::MAX } else { o.saturating_mul(100_000).saturating_add(p["p"].as_u64().unwrap_or(0)) };
+        let newest = o; // block time, then height (waiting ones newest)
         out.push((hot, newest, row));
     }
     if v.order == "popular" {

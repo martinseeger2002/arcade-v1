@@ -126,6 +126,7 @@ pub const FORWARDABLE: &[&str] = &[
     "explorer.dogefeed", "explorer.dogefeed_tx", "explorer.dogefeed_inscription", "explorer.dogefeed_address",
     "explorer.inscription_types", "explorer.site", "explorer.sites", "explorer.ledger_bytes", "explorer.page", "explorer.app_cards",
     "explorer.ord_outpoints", "explorer.collections", "explorer.collection", "explorer.collection_of", "explorer.held",
+    "explorer.msg_rows",
 ];
 
 /// What apps may read through the page API (GET /r/explorer/<name>?args=<json>, `page_read`): the public
@@ -720,6 +721,36 @@ fn handle_here(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
             Ok(json!({"claim": q, "number": num, "id": id, "owner": owner, "owner_tag": owner.as_deref().and_then(|o| tag_of(&x, o))}))
         }
         "explorer.mempool" => mempool(&x),
+        // A page of one posts-and-messages table, rows in key order after `after` (hex, the key past the chain number), each
+        // with its key `k` and, where it has a height, its block's time `t`: what an arcade whose own copy of this chain is
+        // borrowed or still catching up reads instead (crate::lentrows; HOMECHAIN.md option C, 2c).
+        "explorer.msg_rows" => {
+            let (table, ix) = match s("table").as_deref() {
+                Some("post") => (arcade_ledger::messages::POST, "messages"),
+                Some("act") => (arcade_ledger::messages::ACT, "messages"),
+                Some("cand") => (arcade_ledger::messages::CAND, "messages"),
+                Some("profile") => (arcade_ledger::index::PROFILE, "profiles"),
+                _ => return Err("table: post, act, cand or profile".into()),
+            };
+            // (ARCADE keeps its posts, messages and profiles with every block, whatever its index list says.)
+            if !crate::arcsvc::runs(x.p) {
+                x.need(ix)?;
+            }
+            let pre = KeyBuf::new().u16(x.c()).done();
+            let after = s("after").map(|a| hex::decode(a).map(|k| [pre.clone(), k].concat()).map_err(|_| "after: hex".to_string())).transpose()?;
+            let want = n(500, 1000) as usize;
+            let rows = x.node.chain.store(x.c()).read(|r| r.scan_after(table, &pre, after.as_deref(), want)).map_err(e)?;
+            let mut times: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
+            let items: Vec<Value> = rows.iter().filter(|(k, _)| k.starts_with(&pre)).filter_map(|(k, v)| {
+                let v: Value = serde_json::from_slice(v).ok()?;
+                let t = v["h"].as_u64().filter(|h| *h > 0).map(|h| *times.entry(h).or_insert_with(|| {
+                    x.node.chain.hash_at(x.c(), h as u32).ok().flatten().and_then(|hash| x.node.chain.header(x.c(), &hash).ok().flatten()).map(|r| r.header.time as u64).unwrap_or(0)
+                }));
+                Some(json!({"k": hex::encode(&k[pre.len()..]), "v": v, "t": t}))
+            }).collect();
+            let indexed = x.node.chain.indexed_to(x.c(), if ix == "messages" { "messages.v1" } else { "profiles.v1" }).ok().flatten();
+            Ok(json!({"rows": items, "more": rows.len() == want, "indexed": indexed}))
+        }
         "explorer.ledger" => { x.need("ledger")?; ledger_summary(&x) }
         "explorer.ledger_tokens" => {
             x.need("ledger")?;

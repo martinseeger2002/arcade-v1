@@ -21,6 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const MODES: &[&str] = &["light", "chain", "index", "full", "shared"];
+/// Coins besides the home chain whose arcade posts, acts and messages can be indexed (the messages index).
+pub const MESSAGE_CHAINS: &[&str] = &["pep", "doge", "dgb"];
+
 pub const INDEXES: &[&str] = &["addresses", "messages", "ledger", "profiles", "ord", "names", "maps", "tokens", "collections", "dogefeed", "runes", "dunes"];
 pub const COMING: &[&str] = &["runes", "dunes"];
 const HOME_DEFAULT: &[&str] = &["ledger", "profiles"];
@@ -85,8 +88,10 @@ fn normalize(p: &ChainParams, indexes: &[String], home: bool) -> Result<Vec<Stri
             return Err(format!("unknown index {ix}; indexes: {}", INDEXES.join(", ")));
         }
         // (The home chain's own list holds messages: adding another index there must work.)
-        if ix == "messages" && !home {
-            return Err("messages live on the home chain (Pepecoin testnet), where they're always on".into());
+        // Posts, acts and messages on the mainnet ledger chains too (Martin 2026-11-17, option C): read and written
+        // there by choice. Other coins keep no arcade feed.
+        if ix == "messages" && !home && !MESSAGE_CHAINS.contains(&p.key) {
+            return Err(format!("posts and messages live on ARCADE, Pepecoin testnet, Pepecoin, Dogecoin and DigiByte; not on {}", p.name));
         }
         // Runes live on Bitcoin and dunes on Dogecoin only.
         if ix == "runes" && p.key != "btc" {
@@ -529,6 +534,13 @@ pub fn add_index(node: &Arc<Node>, key: &str, index: &str) -> Result<Value, Stri
     let mut want = cur.clone();
     want.push(index.into());
     let set = normalize(p, &want, home)?;
+    // Messages on a mainnet coin start at its current block (Martin 2026-11-17): no arcade posts were made there
+    // before, so there is nothing to walk back through.
+    if index == "messages" && !home {
+        let tip = node.chain.tip(p.chain_no).map_err(|e| e.to_string())?.map(|t| t.height).ok_or_else(|| format!("{} has no blocks here yet", p.name))?;
+        node.chain.set_indexed_to(p.chain_no, "messages.v1", Some(tip)).map_err(|e| e.to_string())?;
+        let _ = node.app.event("chains", &format!("adding posts and messages on {} from block {tip}", p.name));
+    }
     if index == "addresses" && run.as_ref().is_none_or(|r| r.mode != "shared" || crate::shares::pruned(node, p.net).is_empty()) {
         // Rows for the blocks already stored are built from them, in the background.
         if crate::addrsvc::clearing(p.chain_no) {
@@ -1670,7 +1682,10 @@ mod home_queue_tests {
         assert!(check(pep, "full", &with(&["ledgr"])).unwrap_err().contains("unknown index ledgr"));
         assert!(check(pep, "full", &with(&["dogefeed"])).unwrap_err().contains("Dogecoin"));
         assert!(check(doge, "full", &with(&["dogefeed"])).is_ok());
-        assert!(check(pep, "full", &with(&["messages"])).is_err(), "messages are the home chain's");
+        // Posts and messages on Pepecoin, Dogecoin and DigiByte too (Martin 2026-11-17); not on other coins.
+        assert!(check(pep, "full", &with(&["messages"])).is_ok());
+        let ltc = arcade_chain::params::by_key("ltc").unwrap();
+        assert!(check(ltc, "full", &with(&["messages"])).unwrap_err().contains("not on"));
         assert!(check(pep, "fast", &[]).unwrap_err().contains("mode must be"));
         assert!(check(pep, "chain", &with(&["ledger"])).is_err());
         assert!(check(pep, "chain", &with(&["addresses"])).is_ok());

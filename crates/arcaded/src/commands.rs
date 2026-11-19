@@ -71,12 +71,31 @@ cmds! {
     "svc.attach" Local "service" "API socket only: attach a helper program for a service; the connection then carries its requests (docs/MODELS-APP.md).";
     "svc.offers" Read "service?" "Services offered over the mesh: each arcade's offer, its @tag, public name, pay_to and link state.";
     "svc.services" Read "" "The service helpers attached to this arcade, with their offers and open requests.";
-    "svc.ask" Local "to, service, body, timeout?, stream?" "Ask a service at an arcade (node id) over the mesh; answers collected (bytes as base64), or streamed line by line on the socket.";
+    "svc.ask" Local "to, service, body, timeout?, stream?" "Ask a service at an arcade (node id, or \"self\" for this one) over the mesh; answers collected (bytes as base64), or streamed line by line on the socket.";
     "svc.pay" Wallet "to, amount, memo" "Pay ARCADE to an address with a memo of up to 80 bytes (a service's credit).";
     "svc.paid" Read "txid, memo?" "Whether a payment is in a block, what it paid this arcade's address, and whether the memo is in it.";
     "events" Read "n?, kind?" "Recent activity (newest first), optionally of one kind.";
     "mempool" Public "" "Home chain transactions waiting for a block.";
     // For a website server in front of this arcade (its users hold their own keys)
+    "id.start" Public "host, path?, http?" "ARCADE ID sign-in (no password; built on Digi-ID, created by the DigiByte community): a code for a website to show as a QR code, digiid://host/path?x=nonce (path default /digiid/callback; http: true for a plain-http test address). Digi-ID wallets answer it (Coinomi is the one digi-id.io names); an ARCADE wallet may answer with a key on any chain it holds. Lasts 5 minutes, works once.";
+    "id.callback" Public "address, uri, signature, chain?" "What the wallet posted to the website's callback URL, checked: a code from id.start, not used or run out, signed by address (Core signmessage over uri: Digi-ID's DigiByte prefix, or with chain that chain's prefix or ARCADE's).";
+    "id.poll" Public "nonce" "A sign-in code's state for the website's page: waiting, done (once: the address that signed and its chain; chain null = a Digi-ID wallet's key for this site), expired or unknown. The website links that address to its user.";
+    "id.link_start" Public "key, host, via?" "Add a device with no password: the new browser's one-time public key (hex) in; a code, a 6-digit number and the QR text (arcadelink://host/code?k=key[&a=via]) out; via = this arcade's https address when the site has no node of its own. The user's other device scans it, shows the same number (the first 4 bytes of sha256(\"ARCADE/link\\0\" + code + \"\\0\" + key), mod 1,000,000) and sends the 12 words sealed to that key.";
+    "id.link_send" Public "code, sealed" "The other device's sealed message for the new browser (sealed to its key: this arcade only passes it on), once per code.";
+    "id.link_poll" Public "code" "The new browser collects what was sent: waiting, done (once: sealed and the key it is sealed to), expired or unknown.";
+    "id.link_answer" Local "qr, send?" "The desktop app as the other device of a device link: an arcadelink:// text in. Without send: the site, the 6-digit number to compare with the new browser's and the @tag that would go. With send: the active account's 12 words sealed to the new browser's X25519 key (only it can open them) and sent to the arcade holding the link.";
+    "id.box_put" Public "box, msg" "A sealed message for the other end of an ARCADE ID signing pairing (box: 32 hex characters only the two ends know; up to 16 waiting, 60,000 characters each, ten minutes). This arcade only passes it on.";
+    "id.box_take" Public "box" "Everything waiting in a box, oldest first; the box is emptied.";
+    "id.sign_pair" Local "qr, send?" "Pair a website with this app so it can ask the app to sign (an arcadesign:// code in). Without send: the site, the 6-digit number to compare and the account and Dogecoin address it would use. With send: paired; the site learns that address. The words never leave the app.";
+    "id.sign_sites" Local "" "Websites paired with this app for signing.";
+    "id.sign_forget" Local "id" "Unpair a website.";
+    "id.sign_pending" Local "" "What paired websites are asking this app to sign: a message, or a PSBT with the coins it signs, every output, the fee and whether a signed coin carries an inscription.";
+    "id.sign_decide" Local "id, ok" "Sign a waiting request (ok: true) or say no; the website gets the answer.";
+    "id.answer" Local "code, chain?, send?" "Sign in to a Digi-ID site with this arcade's wallet (the active account), as a phone wallet such as Coinomi does: a digiid:// code in. Without send: the site's name, where the answer goes and this wallet's key for that site (SLIP-0013, never a key that holds coins; the same one the web wallet makes from the same words), to show first. With send: signed and sent to the site. chain: dgb (Digi-ID, the default) or another chain this wallet holds (ARCADE ID).";
+    "id.relay" Public "uri, address, signature, chain?" "A website's user signed a Digi-ID code in the browser; the site's server passes the answer here and the arcade sends it to the code's site (a page may not post to another site; a server may). Only a well-formed code, signed by that address, once, and only to a public internet address (never this computer or its network; no redirects).";
+    "vault.put" Public "tag, address, pubkey, blob, signature" "Password accounts: keep @tag's sealed record here (the 12 words sealed under the password in the browser: {kdf: PBKDF2-SHA512, iterations, salt, nonce, sealed}; nothing here can open it). address = the one @tag names on chain, or for a free @tag a home-chain address (kept as a reservation, first come, until a claim on chain; a claim by anybody else ends it); signature = its Core signmessage (ARCADE's prefix) over \"ARCADE vault @tag address pubkey sha256\", sha256 of the record as {kdf, iterations, salt, nonce, sealed} JSON. Replaces an older one.";
+    "vault.get" Public "tag, here?" "@tag's sealed record {tag, address, pubkey, blob, from?}: kept here, else (unless here) from the arcade that holds it. The shape of the original arcades' /signin/<tag>: a website serving it there lets other arcades find accounts made on it.";
+    "vault.delete" Public "tag, signature" "Drop @tag's sealed record here (\"stop using a password\"): signature = @tag's address signing \"ARCADE vault delete @tag address sha256\" of the record kept. The account then opens on this site with ARCADE ID or its 12 words.";
     "tx.coins" Public "addresses, chain?" "Spendable coins of up to 500 addresses (confirmed, not spent by a waiting transaction, and unconfirmed outputs), to build a transaction for a browser to sign; mining rewards not mature yet listed apart (immature, spendable_after). Home or installed chain, Addresses index on.";
     "tx.activity" Public "addresses, since?, chain?" "What changed for up to 500 addresses: history rows above height since, and waiting transactions paying or spending them; height to pass as since next time.";
     "tx.fee" Public "chain?" "The fee rate (per 1000 bytes) and dust limit this arcade builds transactions with.";
@@ -113,6 +132,8 @@ cmds! {
     "tag.list" Read "" "Your tag claims and their progress.";
     "faucet.ask" Wallet "index?, tag?" "Ask the mesh for test coins.";
     "faucet.arc" Wallet "address" "The user faucet: ask the mesh to top a website user's ARCADE address up to 0.05 ARCADE, in two coins (once per address a day; a website calls it when a user signs in). This arcade's own wallet gets 1 ARCADE once from the node faucet instead.";
+    "ledger.write_chains" Read "" "Where this wallet can write its posts, acts and messages (ARCADE, Pepecoin testnet, and Pepecoin, Dogecoin, DigiByte where kept or borrowed): each with its balance, which is the default now, and whether ARCADE is stalled (writes then go to Pepecoin testnet). feed.post, feed.act, follow and msg.send take chain to pick one.";
+    "ledger.lent" Read "" "Chains whose posts, acts, messages and profiles are also read from other arcades (their copy here borrowed or still catching up): rows held per table and how fresh.";
     "faucet.arc_status" Read "" "The ARCADE top-up asks this arcade knows and how many it paid today; node_faucet: node-gift asks, gifts paid today, nodes known paid, and this arcade's own gift.";
     // Messaging
     "msg.me" Read "" "Your messaging key, fingerprint and whether it is published.";
@@ -181,6 +202,8 @@ cmds! {
     "a.search" Read "q" "Published profiles and @tags matching a name or @tag, for the address book.";
     "a.contact_add" Wallet "tag | address" "Add someone to your address book from their published profile.";
     "a.contact_delete" Wallet "id" "Remove an address book entry.";
+    "a.wallets" Read "tag? | address?" "The wallet addresses someone has proven they hold on the ARCADE chain (every coin; A:// op 7), yours when neither; for yours also what would be proven now.";
+    "a.wallets_publish" Wallet "force?" "Publish proofs of this wallet's addresses on every coin and of each imported wallet (each signs with its own key), when they differ from the chain's; done by itself after a profile is published.";
     "a.post" Wallet "text" "Post to your followers on the ARCADE chain.";
     "a.posts" Read "tag? | address? | following?, limit?" "Posts, newest first.";
     "ledger.balances" Read "address" "An address's arcade token balances on the ARCADE chain (free, reserved, offered, accepted).";
@@ -222,6 +245,7 @@ cmds! {
     "explorer.dogefeed_address" Public "chain?, address, direction?, type?, cursor?, limit?, counts?" "An address on D://: its counts (posts, likes given and received, followers, following, tips, linked keys) and activity (direction out: what it did; in: what paid it).";
     "explorer.dogefeed_keys" Public "chain?" "The D:// registrars this arcade checks records against: DogeFeed's, this arcade's own, and any the operator added.";
     "explorer.held" Public "chain?, address, offset?, limit?, order?" "The ord inscriptions an address holds, a page at a time by number (order old or new; limit 100, at most 500), without content: {total, items: [{id, n, h, ct, size, at, p}]}.";
+    "explorer.msg_rows" Public "chain?, table (post, act, cand or profile), after?, limit?" "A page of one posts-and-messages table in key order after `after` (hex): {rows: [{k, v, t}], more, indexed}. What an arcade whose own copy is borrowed or catching up reads instead.";
     "explorer.names" Public "chain?" "Names.";
     "explorer.name" Public "chain?, name" "One name.";
     "explorer.maps" Public "chain?" "Maps.";

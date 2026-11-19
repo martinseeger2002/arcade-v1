@@ -268,9 +268,9 @@
       return;
     }
     try {
-      const r = await api("msg.send", { to, text, file: attached || undefined });
+      const r = await api("msg.send", { to, text, file: attached || undefined, chain: $("mx-chain").value || undefined });
       $("mx-text").value = ""; $("mx-file").value = ""; attached = null; $("mx-fileinfo").textContent = "";
-      note(`Sent in ${r.txids.length} transaction${r.txids.length === 1 ? "" : "s"} (fee ${PEP(r.fee)}). It shows on their side once it's in a block.`);
+      note(`Sent in ${r.txids.length} transaction${r.txids.length === 1 ? "" : "s"} (fee ${chainFee($("mx-chain"), r.fee)}). It shows on their side once it's in a block.`);
       open = r.to.key; composing = false; draw();
     } catch (err) { note(err.message, true); }
     btn.disabled = false;
@@ -284,7 +284,8 @@
   $("mx-newgroup").onclick = () => { composing = "group"; open = null; view = "groups"; draw(); };
   $("mx-new").onclick = () => { composing = true; open = null; $("mx-to").value = ""; $("mx-towho").textContent = ""; draw(); $("mx-to").focus(); };
   document.querySelectorAll("#mx-views button").forEach((b) => b.addEventListener("click", () => { view = b.dataset.v; draw(); }));
-  document.querySelector('nav button[data-tab="messages"]').addEventListener("click", () => draw());
+  document.querySelector('nav button[data-tab="messages"]').addEventListener("click", () => { draw(); chainPicker($("mx-chain")); });
+  chainPicker($("mx-chain"));
 
   window.arcadeMessages = { draw };
   refreshBadge();

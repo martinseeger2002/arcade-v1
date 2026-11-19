@@ -316,7 +316,7 @@ function openExplorer(page, id) {
 async function refreshWallet() {
   const ch = picked();
   $("w-none").hidden = state.wallet; $("w-main").hidden = !state.wallet;
-  if ($("w-more").open) { drawAccounts(); drawLinks(ch); }
+  if (W.tab === "functions") { drawAccounts(); drawLinks(ch); }
   if (!state.wallet) return;
   if (W.chain !== ch.key) {
     Object.assign(W, { chain: ch.key, sel: null, view: null, viewKey: "", dd: null, ddAt: 0 });
@@ -501,6 +501,10 @@ function assetChanged() {
 
 function drawPane(ch) {
   document.querySelectorAll(".wl-tabs button").forEach((b) => b.classList.toggle("on", b.dataset.wt === W.tab));
+  // Functions: ARCADE ID, accounts, sign-in and linked wallets (not a list of this wallet's rows).
+  const fn = W.tab === "functions";
+  $("w-functions").hidden = !fn; $("w-pane").hidden = fn;
+  if (fn) { $("w-note").hidden = true; drawAccounts(); drawLinks(ch); aidSites(); return; }
   const v = W.view, w = cur();
   const pane = $("w-pane");
   $("w-note").textContent = (v && v.note) || ""; $("w-note").hidden = !(v && v.note);
@@ -674,7 +678,6 @@ $("o-add").addEventListener("click", async () => {
   } catch (e) { msg(m, e.message, "bad"); }
   finally { b.disabled = false; }
 });
-$("w-more").addEventListener("toggle", () => { if ($("w-more").open) { drawAccounts(); drawLinks(picked()); } });
 $("w-link").addEventListener("click", async () => {
   try {
     const r = await api("wallet.link", { chain: picked().key, wif: $("w-wif").value, tag: $("w-ltag").value });
@@ -709,6 +712,145 @@ $("w-pubaddr-send").addEventListener("click", async () => {
   } catch (e) { msg($("w-msg"), e.message, "bad"); }
   finally { b.disabled = false; }
 });
+// ARCADE ID (Functions tab, and the ARCADE ID button by the wallet picker, which shows the same panel over the page).
+// A code pasted or scanned: digiid:// signs in to that site (id.answer), arcadelink:// opens this account in a new
+// browser (id.link_answer), arcadesign:// pairs a site that will ask this app to sign (id.sign_pair). Each shows what
+// it would do first (no send), and goes on only on a second click. Paired sites' requests wait in id.sign_pending,
+// each shown with what it does, signed or refused with id.sign_decide.
+const aidKind = () => { const c = $("w-aid-code").value.trim(); return c.startsWith("arcadelink://") ? "link" : c.startsWith("arcadesign://") ? "sign" : "digiid"; };
+const aidDoge = (k) => (k == null ? "?" : (Number(k) / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 })) + " DOGE";
+$("w-aid-code").addEventListener("input", () => { $("w-aid-chain").hidden = aidKind() !== "digiid"; $("w-aid-confirm").hidden = true; });
+$("w-aid-check").addEventListener("click", async () => {
+  const b = $("w-aid-check");
+  b.disabled = true; $("w-aid-confirm").hidden = true; msg($("w-aid-msg"), "");
+  try {
+    const kind = aidKind(), code = $("w-aid-code").value;
+    if (kind === "link") {
+      const r = await api("id.link_answer", { qr: code });
+      $("w-aid-text").textContent = `Open ${r.tag ? "@" + r.tag : "this account"} in a new browser on ${r.host}? Only if that screen shows ${r.number}. Anyone you send this to can spend this account's coins, so only send it to your own browser.`;
+      $("w-aid-send").textContent = `The number is ${r.number}: send`;
+    } else if (kind === "sign") {
+      const r = await api("id.sign_pair", { qr: code });
+      $("w-aid-text").textContent = `Let ${r.host} ask this app to sign, as ${r.tag ? "@" + r.tag : "this account"} (Dogecoin ${r.address})? Only if that screen shows ${r.number}. Your words stay here: the site only gets your address, and you approve every signature in this app.`;
+      $("w-aid-send").textContent = `The number is ${r.number}: pair`;
+    } else {
+      const r = await api("id.answer", { code, chain: $("w-aid-chain").value });
+      $("w-aid-text").textContent = `Sign in to ${r.host} as ${r.address}${r.plain_http ? " (a test address over plain http)" : ""}? Only go on if ${r.host} is the site you're signing in to.`;
+      $("w-aid-send").textContent = `Sign in to ${r.host}`;
+    }
+    $("w-aid-confirm").hidden = false;
+  } catch (e) { msg($("w-aid-msg"), e.message, "bad"); }
+  finally { b.disabled = false; }
+});
+$("w-aid-cancel").addEventListener("click", () => { $("w-aid-confirm").hidden = true; });
+$("w-aid-send").addEventListener("click", async () => {
+  const b = $("w-aid-send");
+  const kind = aidKind();
+  b.disabled = true; msg($("w-aid-msg"), kind === "link" ? "Sending…" : kind === "sign" ? "Pairing…" : "Signing in…");
+  try {
+    const code = $("w-aid-code").value;
+    if (kind === "link") {
+      const r = await api("id.link_answer", { qr: code, send: true });
+      msg($("w-aid-msg"), `Sent: ${r.tag ? "@" + r.tag : "your account"} opens in the browser on ${r.host}.`, "ok");
+    } else if (kind === "sign") {
+      const r = await api("id.sign_pair", { qr: code, send: true });
+      msg($("w-aid-msg"), `Paired with ${r.host}. When it asks you to sign, the request shows up here.`, "ok");
+      aidSites();
+    } else {
+      const r = await api("id.answer", { code, chain: $("w-aid-chain").value, send: true });
+      msg($("w-aid-msg"), `Signed in to ${r.host}: the site's page continues by itself.`, "ok");
+    }
+    $("w-aid-confirm").hidden = true; $("w-aid-code").value = ""; $("w-aid-chain").hidden = false;
+  } catch (e) { msg($("w-aid-msg"), e.message, "bad"); }
+  finally { b.disabled = false; }
+});
+
+// The camera: this device's (desktop, laptop, or a phone opening this window over the home network).
+let aidStream = null, aidScanning = false, aidJsqr = null;
+function aidCamStop() { aidScanning = false; if (aidStream) aidStream.getTracks().forEach((t) => t.stop()); aidStream = null; $("aid-cam").hidden = true; }
+function aidLoadJsqr() {
+  return aidJsqr || (aidJsqr = new Promise((ok, no) => { const s = document.createElement("script"); s.src = "jsqr.js"; s.onload = () => ok(window.jsQR); s.onerror = () => no(new Error("the QR reader didn't load")); document.head.append(s); }));
+}
+$("aid-cam-stop").addEventListener("click", aidCamStop);
+$("w-aid-scan").addEventListener("click", async () => {
+  msg($("w-aid-msg"), "");
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { msg($("w-aid-msg"), "This window can't use a camera here: paste the code instead (a camera needs https or this computer's own address).", "bad"); return; }
+  try {
+    aidStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+  } catch (e) { msg($("w-aid-msg"), "The camera wasn't allowed or isn't there: " + (e.message || e.name), "bad"); return; }
+  const v = $("aid-video"); v.srcObject = aidStream; $("aid-cam").hidden = false; await v.play().catch(() => {});
+  const detector = "BarcodeDetector" in window ? new window.BarcodeDetector({ formats: ["qr_code"] }) : null;
+  const decode = detector ? null : await aidLoadJsqr().catch(() => null);
+  const canvas = document.createElement("canvas"), ctx = canvas.getContext("2d", { willReadFrequently: true });
+  aidScanning = true;
+  const tick = async () => {
+    if (!aidScanning) return;
+    let text = "";
+    try {
+      if (v.videoWidth) {
+        if (detector) { const got = await detector.detect(v); text = got[0] ? got[0].rawValue : ""; }
+        else if (decode) { canvas.width = v.videoWidth; canvas.height = v.videoHeight; ctx.drawImage(v, 0, 0); const img = ctx.getImageData(0, 0, canvas.width, canvas.height); const got = decode(img.data, img.width, img.height); text = got ? got.data : ""; }
+      }
+    } catch (e) { /* the next frame */ }
+    if (/^(digiid|arcadelink|arcadesign):\/\//.test(text)) { aidCamStop(); $("w-aid-code").value = text; $("w-aid-code").dispatchEvent(new Event("input")); $("w-aid-check").click(); return; }
+    setTimeout(tick, 250);
+  };
+  tick();
+});
+
+// What paired sites ask: one card each, with what it does, and Sign / Refuse.
+const aidShown = new Set();
+function aidCard(r) {
+  const head = h("div", { class: "aid-req-head" }, h("b", {}, r.site), ` asks ${r.account ? "@" + r.account : "this account"} to sign`);
+  const body = [];
+  if (r.kind === "message") {
+    body.push(h("div", { class: "aid-sub" }, "A message (it proves you hold this address; it moves no coins):"), h("pre", { class: "aid-msgtext" }, r.message));
+  } else {
+    const net = Number(r.to_you || 0) - Number(r.from_you || 0);
+    body.push(h("div", {}, `Spends ${aidDoge(r.from_you)} of your coins; ${aidDoge(r.to_you)} comes back to you; fee ${r.fee == null ? "unknown (not every coin's transaction is given)" : aidDoge(r.fee)}. You ${net < 0 ? "pay " + aidDoge(-net) : "receive " + aidDoge(net)} in all.`));
+    if (r.inscriptions) body.push(h("div", { class: "msg bad" }, `${r.inscriptions} of the coins you sign carries an inscription (or no arcade could tell it doesn't). Only go on if this is meant to move or list it: a name or Doginal sent by mistake can't be taken back.`));
+    const rows = r.outputs.map((o) => h("tr", {}, h("td", {}, String(o.index)), h("td", { class: "mono" }, o.to + (o.mine ? " (you)" : "")), h("td", { class: "num" }, aidDoge(o.value))));
+    body.push(h("table", { class: "aid-outs" }, h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "Pays to"), h("th", { class: "num" }, "Amount"))), h("tbody", {}, rows)));
+    const signs = r.inputs.filter((i) => i.sign).map((i) => `#${i.index} ${aidDoge(i.value)} (${i.hash_type})`).join(", ");
+    body.push(h("div", { class: "aid-sub" }, `Signs your coin${r.inputs.filter((i) => i.sign).length === 1 ? "" : "s"} ${signs}.${r.finalize ? "" : " The site finishes the transaction."}`));
+  }
+  const out = h("p", { class: "msg" });
+  const go = (ok) => async (ev) => {
+    ev.target.disabled = true;
+    try { await api("id.sign_decide", { id: r.id, ok }); msg(out, ok ? "Signed and sent to the site." : "Refused: the site was told no.", ok ? "ok" : ""); setTimeout(aidPending, 1500); }
+    catch (e) { msg(out, e.message, "bad"); ev.target.disabled = false; }
+  };
+  return h("div", { class: "aid-req warn" }, head, body, h("div", { class: "row" }, h("button", { class: "primary", onclick: go(true) }, "Sign"), h("button", { onclick: go(false) }, "Refuse")), out);
+}
+async function aidPending() {
+  let list = [];
+  try { list = await api("id.sign_pending"); } catch (e) { return; }
+  $("w-aid-dot").hidden = !list.length;
+  const box = $("aid-pending");
+  const ids = list.map((r) => r.id).join(",");
+  if (box.dataset.ids !== ids) { box.dataset.ids = ids; box.replaceChildren(...list.map(aidCard)); }
+  // A new request opens the ARCADE ID panel by itself.
+  if (list.some((r) => !aidShown.has(r.id))) { list.forEach((r) => aidShown.add(r.id)); if ($("aid-modal").hidden && W.tab !== "functions") aidOpen(); }
+}
+async function aidSites() {
+  let list = [];
+  try { list = await api("id.sign_sites"); } catch (e) { return; }
+  const box = $("aid-sites");
+  if (!list.length) { box.replaceChildren("None yet."); return; }
+  box.replaceChildren(...list.map((s) => h("div", { class: "row" }, h("span", {}, `${s.host} · ${s.tag ? "@" + s.tag : s.address}`),
+    h("button", { class: "small", onclick: async () => { await api("id.sign_forget", { id: s.id }).catch(() => {}); aidSites(); } }, "Unpair"))));
+}
+function aidOpen() {
+  $("aid-slot").append($("aid-panel"));
+  $("aid-modal").hidden = false; aidSites();
+}
+function aidClose() { aidCamStop(); $("aid-home").append($("aid-panel")); $("aid-modal").hidden = true; }
+$("w-aid-open").addEventListener("click", aidOpen);
+$("aid-close").addEventListener("click", aidClose);
+$("aid-modal").addEventListener("click", (e) => { if (e.target === $("aid-modal")) aidClose(); });
+setInterval(aidPending, 3000);
+aidPending();
+
 $("w-signin").addEventListener("click", async () => {
   const b = $("w-signin");
   b.disabled = true; msg($("w-msg"), "Finding the arcade that holds your account and opening it (this takes a few seconds)…");

@@ -594,7 +594,11 @@ fn answers(recv: &mut dyn FnMut(Instant) -> Result<Frame, String>, total: Durati
 
 /// `svc.ask {to, service, body, timeout?}` without streaming: every answer collected (bytes as base64).
 pub fn ask_cmd(node: &Node, req: &Value, stream: Option<&mut dyn FnMut(Value) -> Result<(), String>>) -> Result<Value, String> {
-    let to = req["to"].as_str().unwrap_or("").to_string();
+    // "self": this arcade (its own helper), for callers that don't know their node id, such as app windows.
+    let to = match req["to"].as_str().unwrap_or("") {
+        "self" => node.id_hex(),
+        t => t.to_string(),
+    };
     let service = req["service"].as_str().unwrap_or("").to_string();
     let total = Duration::from_secs(req["timeout"].as_u64().unwrap_or(600).clamp(1, ASK_TIME.as_secs()));
     let body = req["body"].clone();

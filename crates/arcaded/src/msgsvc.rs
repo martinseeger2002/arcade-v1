@@ -164,7 +164,7 @@ fn rescan_group(node: &Node, gid: &str) -> Result<(), String> {
         let c = chain.chain_no;
         let mut cursor = None;
         loop {
-            let batch = arcade_ledger::messages::candidates(&node.chain, c, cursor, 500).map_err(|e| e.to_string())?;
+            let batch = candidates_on(node, chain, cursor, 500)?;
             if batch.is_empty() {
                 break;
             }
@@ -172,7 +172,7 @@ fn rescan_group(node: &Node, gid: &str) -> Result<(), String> {
                 if cand["kind"] == env::SINGLE as u64 {
                     let payload = hex::decode(cand["payload"].as_str().unwrap_or("")).unwrap_or_default();
                     if let Ok(o) = env::open_single(&secret, &payload) {
-                        take(node, &me, &o, Some(gid.to_string()), cand, *h, block_time_on(node, c, *h))?;
+                        take(node, &me, &o, Some(gid.to_string()), cand, *h, cand_time(node, c, *h, cand))?;
                     }
                 }
                 cursor = Some((*h, *p));
@@ -209,13 +209,13 @@ pub fn scan(node: &Node) -> Result<usize, String> {
             .filter(|v| v.len() == 8)
             .map(|v| (u32::from_be_bytes(v[..4].try_into().unwrap()), u32::from_be_bytes(v[4..].try_into().unwrap())));
         loop {
-            let batch = arcade_ledger::messages::candidates(&node.chain, c, cursor, 500).map_err(|e| e.to_string())?;
+            let batch = candidates_on(node, chain, cursor, 500)?;
             if batch.is_empty() {
                 break;
             }
             for (h, p, cand) in &batch {
                 let payload = hex::decode(cand["payload"].as_str().unwrap_or("")).unwrap_or_default();
-                let at = block_time_on(node, c, *h);
+                let at = cand_time(node, c, *h, cand);
                 match cand["kind"].as_u64().unwrap_or(0) as u8 {
                     env::SINGLE | env::API => {
                         if let Some((o, g)) = open_any(&k.secret, &groups, |s| env::open_single(s, &payload)) {
@@ -286,6 +286,32 @@ pub fn scan(node: &Node) -> Result<usize, String> {
     Ok(opened)
 }
 
+/// Message candidates of one ledger chain after `after`: this arcade's own, or, where it can't read the chain for
+/// itself yet, what arcades that keep it hold (crate::lentrows). The scan's cursor is the same (height, position)
+/// either way, so it goes on from there once this arcade's own copy has caught up.
+fn candidates_on(node: &Node, p: &'static arcade_chain::params::ChainParams, after: Option<(u32, u32)>, limit: usize) -> Result<Vec<(u32, u32, Value)>, String> {
+    let own = arcade_ledger::messages::candidates(&node.chain, p.chain_no, after, limit).map_err(|e| e.to_string())?;
+    if !crate::lentrows::lent(node, p) {
+        return Ok(own);
+    }
+    // Both in (height, position) order, one row per place, this arcade's own first.
+    let mut all: std::collections::BTreeMap<(u32, u32), Value> = crate::lentrows::candidates(node, p, after, limit).into_iter().map(|(h, q, v)| ((h, q), v)).collect();
+    for (h, q, v) in own {
+        all.insert((h, q), v);
+    }
+    Ok(all.into_iter().take(limit).map(|((h, q), v)| (h, q, v)).collect())
+}
+
+/// A candidate's block time: the lender's word for one read from it (`_t`), else this arcade's header.
+fn cand_time(node: &Node, c: u16, h: u32, cand: &Value) -> u64 {
+    cand["_t"].as_u64().unwrap_or_else(|| block_time_on(node, c, h))
+}
+
+/// The profile published for `address` on ledger chain `p` (this arcade's own index, or lenders', crate::lentrows).
+pub(crate) fn profile_on(node: &Node, p: &'static arcade_chain::params::ChainParams, address: &str) -> Option<Value> {
+    arcade_ledger::index::profile(&node.chain, p.chain_no, address).ok().flatten().or_else(|| crate::lentrows::lent(node, p).then(|| crate::lentrows::profile(node, p, address)).flatten())
+}
+
 fn block_time_on(node: &Node, c: u16, h: u32) -> u64 {
     node.chain.hash_at(c, h).ok().flatten().and_then(|hash| node.chain.header(c, &hash).ok().flatten()).map(|r| r.header.time as u64).unwrap_or_else(arcade_app::now)
 }
@@ -321,8 +347,10 @@ fn profiles_by_key(node: &Node) -> BTreeMap<String, Value> {
     for chain in node.ledger_chains() {
         let c = chain.chain_no;
         let pre = KeyBuf::new().u16(c).done();
-        for (_, v) in node.chain.store(c).read(|r| r.scan_prefix(arcade_ledger::index::PROFILE, &pre)).unwrap_or_default() {
-            let Ok(mut v) = serde_json::from_slice::<Value>(&v) else { continue };
+        // Lenders' first where this arcade can't read the chain for itself yet, then its own (which win, coming later).
+        let mut rows: Vec<Value> = if crate::lentrows::lent(node, chain) { crate::lentrows::rows(node, chain, "profile") } else { Vec::new() };
+        rows.extend(node.chain.store(c).read(|r| r.scan_prefix(arcade_ledger::index::PROFILE, &pre)).unwrap_or_default().into_iter().filter_map(|(_, v)| serde_json::from_slice::<Value>(&v).ok()));
+        for mut v in rows {
             if let Some(a) = v["address"].as_str().map(|a| node.home_address(a)) {
                 v["address"] = json!(a);
             }
@@ -384,7 +412,7 @@ pub fn who(node: &Node, name: &str) -> Result<Value, String> {
     // The home chain's profile first, then the older chain's (a key announced there before the switch).
     let prof = node.ledger_chains().into_iter().rev().find_map(|chain| {
         let here = crate::hometag::address_on(chain, &address)?;
-        arcade_ledger::index::profile(&node.chain, chain.chain_no, &here).ok().flatten().filter(|p| p["stated"] == true || p["address"] == here.as_str())
+        profile_on(node, chain, &here).filter(|p| p["stated"] == true || p["address"] == here.as_str())
     });
     let Some(prof) = prof else {
         return Err(format!("{n} has not published a messaging key yet, so messages can't be sealed to them"));
@@ -558,11 +586,68 @@ fn coins_text(p: &arcade_chain::params::ChainParams, sats: u64) -> String {
 }
 
 pub fn send_payloads_with(node: &Node, payloads: &[Vec<u8>], extra: Vec<arcade_wallet::tx::TxOutSpec>) -> Result<(Vec<String>, u64), String> {
-    let p = node.ledger_home();
+    // The chain the writer chose (`chain` on the request, crate::api), else the write home. ARCADE chosen and stalled
+    // fails over like the default; a mainnet coin chosen is written there or not at all (failover to test chains only).
+    let p = match write_on() {
+        Some(p) if crate::arcsvc::runs(p) => node.write_home(),
+        Some(p) => p,
+        None => node.write_home(),
+    };
     if crate::arcsvc::runs(p) {
         return send_payloads_arc(node, p, payloads, extra);
     }
-    send_payloads_coin(node, payloads, extra)
+    send_payloads_coin(node, p, payloads, extra)
+}
+
+thread_local! {
+    /// The chain this request writes its records to (`chain` on feed.post, feed.act, follow, msg.send).
+    static WRITE_ON: std::cell::Cell<Option<&'static arcade_chain::params::ChainParams>> = const { std::cell::Cell::new(None) };
+}
+
+fn write_on() -> Option<&'static arcade_chain::params::ChainParams> {
+    WRITE_ON.with(|w| w.get())
+}
+
+/// The chains this wallet can write its posts, acts and messages to (Martin 2026-11-17, option C): ARCADE, Pepecoin
+/// testnet, and Pepecoin, Dogecoin and DigiByte where kept here or borrowed. In the order offered.
+pub fn write_chains(node: &Node) -> Vec<&'static arcade_chain::params::ChainParams> {
+    let mut out: Vec<&'static arcade_chain::params::ChainParams> = crate::arcsvc::defined().filter(|p| crate::arcsvc::runs(p)).into_iter().collect();
+    out.push(node.params);
+    for k in crate::chains::MESSAGE_CHAINS {
+        if let Some(p) = crate::chains::find(k) {
+            if node.extra.lock().unwrap().contains_key(p.key) || crate::borrow::is_borrowed(p.key) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Run `f` writing to `chain` (a key from [`write_chains`]; None: the write home).
+pub fn with_write_on<T>(node: &Node, chain: Option<&str>, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let chosen = match chain.map(str::trim).filter(|c| !c.is_empty()) {
+        None => None,
+        Some(k) => Some(write_chains(node).into_iter().find(|p| p.key.eq_ignore_ascii_case(k)).ok_or_else(|| format!("posts and messages can't be written to {k} here: pick one of {}", write_chains(node).iter().map(|p| p.key).collect::<Vec<_>>().join(", ")))?),
+    };
+    let before = WRITE_ON.with(|w| w.replace(chosen));
+    let out = f();
+    WRITE_ON.with(|w| w.set(before));
+    out
+}
+
+/// `ledger.write_chains`: where this wallet can write, with its balance there and which is the default now.
+pub fn write_chains_status(node: &Node) -> Value {
+    let def = node.write_home();
+    json!(write_chains(node).iter().map(|p| {
+        let addr = sender_key(node).ok().and_then(|(a, _, _)| crate::hometag::address_on(p, &a));
+        // From this arcade's own lists only (its copy, its borrowed copy): never a lender asked while a menu waits.
+        let bal = addr.as_ref().and_then(|a| arcade_ledger::address::script_for_address(p, a)).map(|sc| {
+            let coins = if crate::arcsvc::runs(p) { crate::claims::arc_coins(node, p, &sc) } else { coins_on(node, p, &sc) };
+            coins.iter().map(|c| c.value).sum::<u64>()
+        });
+        json!({"key": p.key, "name": p.name, "unit": crate::explorer::unit(p), "default": p.chain_no == def.chain_no,
+               "test": p.key.ends_with("test"), "stalled": crate::arcsvc::runs(p) && crate::arcsvc::stalled(), "address": addr, "balance": bal})
+    }).collect::<Vec<_>>())
 }
 
 /// The ARCADE chain as the ledger home (HOMECHAIN.md phase 3): each record a transaction into its own pool, spending
@@ -615,8 +700,30 @@ fn send_payloads_arc(node: &Node, p: &'static arcade_chain::params::ChainParams,
 }
 
 /// A coin chain as the ledger home (an arcade without the ARCADE chain).
-fn send_payloads_coin(node: &Node, payloads: &[Vec<u8>], mut extra: Vec<arcade_wallet::tx::TxOutSpec>) -> Result<(Vec<String>, u64), String> {
-    let p = node.ledger_home();
+/// A coin chain's spendable coins of `script`: Pepecoin testnet as before; another chain kept here (its coins, minus
+/// those its pool spends) or borrowed. Inscribed coins stay out (crate::ordsafe).
+fn coins_on(node: &Node, p: &'static arcade_chain::params::ChainParams, script: &[u8]) -> Vec<arcade_wallet::tx::Utxo> {
+    if p.chain_no == node.params.chain_no {
+        return crate::claims::spendable(node, script);
+    }
+    let coins = if crate::borrow::is_borrowed(p.key) {
+        crate::borrow::spendable(node, p, script)
+    } else {
+        node.chain.coins_for_script(p, script).unwrap_or_default().into_iter()
+            .filter(|(op, _, _)| node.chain.mempool_spender(p.chain_no, op).ok().flatten().is_none() && !node.pending_spent.lock().unwrap().contains(op))
+            .map(|(op, value, _)| arcade_wallet::tx::Utxo { outpoint: op, value, script: script.to_vec() }).collect()
+    };
+    crate::ordsafe::keep_free(node, p, coins)
+}
+
+fn send_payloads_coin(node: &Node, p: &'static arcade_chain::params::ChainParams, payloads: &[Vec<u8>], mut extra: Vec<arcade_wallet::tx::TxOutSpec>) -> Result<(Vec<String>, u64), String> {
+    // A coin chain: Pepecoin testnet (an arcade without ARCADE, or ARCADE stalled), or a mainnet coin chosen.
+    let (fee_kb, dust) = if p.chain_no == node.params.chain_no {
+        (crate::claims::FEE_PER_KB, crate::claims::DUST)
+    } else {
+        let fp = crate::coinsend::fee_policy(p);
+        (fp.fallback_per_kb.max(fp.floor_per_kb), fp.dust)
+    };
     let (_, _, sk) = sender_key(node)?;
     let pk = arcade_wallet::secp256k1::PublicKey::from_secret_key(arcade_wallet::secp256k1::SECP256K1, &sk);
     let script = arcade_wallet::keys::p2pkh_script_for(&pk);
@@ -625,11 +732,11 @@ fn send_payloads_coin(node: &Node, payloads: &[Vec<u8>], mut extra: Vec<arcade_w
     // Check the whole batch can be paid for before sending any of it: running out partway
     // leaves some people with the message and others without (a group invite half sent).
     if payloads.len() > 1 {
-        let coins = crate::claims::spendable(node, &script);
+        let coins = coins_on(node, p, &script);
         let have: u64 = coins.iter().map(|c| c.value).sum();
         let mut need = 0u64;
         for pl in payloads {
-            let tx = arcade_wallet::tx::build_arcade(p, &arcade_wallet::tx::any_data(pl), extra.clone(), &sk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST, arcade_app::now() as u32)
+            let tx = arcade_wallet::tx::build_arcade(p, &arcade_wallet::tx::any_data(pl), extra.clone(), &sk, &coins, fee_kb, dust, arcade_app::now() as u32)
                 .map_err(|e| format!("could not build the message transaction: {e}"))?;
             let ins: u64 = tx.inputs.iter().filter_map(|i| coins.iter().find(|c| c.outpoint == i.prevout).map(|c| c.value)).sum();
             let back: u64 = tx.outputs.iter().filter(|o| o.script_pubkey == script).map(|o| o.value).sum();
@@ -643,12 +750,20 @@ fn send_payloads_coin(node: &Node, payloads: &[Vec<u8>], mut extra: Vec<arcade_w
         }
     }
     for pl in payloads {
-        let coins = crate::claims::spendable(node, &script);
-        let tx = arcade_wallet::tx::build_arcade(p, &arcade_wallet::tx::any_data(pl), std::mem::take(&mut extra), &sk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST, arcade_app::now() as u32)
+        let coins = coins_on(node, p, &script);
+        let tx = arcade_wallet::tx::build_arcade(p, &arcade_wallet::tx::any_data(pl), std::mem::take(&mut extra), &sk, &coins, fee_kb, dust, arcade_app::now() as u32)
             .map_err(|e| format!("could not build the message transaction: {e}"))?;
         let ins: u64 = tx.inputs.iter().filter_map(|i| coins.iter().find(|c| c.outpoint == i.prevout).map(|c| c.value)).sum();
         let outs: u64 = tx.outputs.iter().map(|o| o.value).sum();
         fees += ins.saturating_sub(outs);
+        // A mainnet coin borrowed here: sent by its lenders (Pepecoin testnet keeps its own way, borrowed or not).
+        if p.chain_no != node.params.chain_no && crate::borrow::is_borrowed(p.key) {
+            if let Err((why, _)) = crate::borrow::broadcast_tx(node, p, &tx) {
+                return Err(if txids.is_empty() { format!("the transaction was refused ({why}); nothing was sent") } else { format!("only {} of {} transactions went out ({why})", txids.len(), payloads.len()) });
+            }
+            txids.push(tx.txid.to_hex());
+            continue;
+        }
         // Our own pool must take it (no coin spent twice), or nobody else will.
         if !crate::mempoolshare::add(node, p, &tx) {
             return Err(if txids.is_empty() {

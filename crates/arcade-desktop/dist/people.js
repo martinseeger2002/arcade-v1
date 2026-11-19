@@ -50,7 +50,13 @@
         h("div", {}, h("b", {}, String(p.following ?? 0)), h("span", { class: "s" }, "following"))),
       h("div", { class: "pp-addrs", style: "margin-top:12px" },
         h("div", { class: "pp-addr" }, h("span", { class: "k" }, "ARCADE"), h("span", { class: "mono" }, p.address)),
-        ...Object.entries(pr.a || {}).map(([k, v]) => h("div", { class: "pp-addr" }, h("span", { class: "k" }, k), h("span", { class: "mono" }, v)))),
+        // Proven on the chain (A:// wallet proofs: each address signed with its own key), then any the profile only
+        // states.
+        ...(p.wallets || []).map((w) => h("div", { class: "pp-addr", title: `Signed by this address's own key (block ${w.height})` },
+          h("span", { class: "k" }, w.coin), h("span", { class: "mono" }, w.address), h("span", { class: "pp-ok" }, "✓ verified"))),
+        ...Object.entries(pr.a || {}).filter(([, v]) => !(p.wallets || []).some((w) => w.address === v)).map(([k, v]) =>
+          h("div", { class: "pp-addr", title: "Stated on the profile, not signed by its key" },
+            h("span", { class: "k" }, k), h("span", { class: "mono" }, v), h("span", { class: "pp-no" }, "not verified")))),
       p.from_home ? h("p", { class: "s" }, `Shown from ${p.from_home.chain} until it is published on ARCADE.`) : (p.height != null ? h("p", { class: "s" }, `Published at block ${p.height} · version ${p.versions}.`) : ""),
     ];
   }

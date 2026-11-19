@@ -330,6 +330,13 @@ pub fn hold_frame(node: &Node) -> Frame {
         }
         chains.insert(p.net.into(), v);
     }
+    // The ARCADE chain this arcade runs (its own service, not among the installed coins): every arcade running it keeps
+    // its whole chain and its ledger, posts, messages and profiles (crate::lentrows reads them from such holders).
+    if let (Some(p), Some(h)) = (crate::arcsvc::defined().filter(|p| crate::arcsvc::runs(p)), crate::arcsvc::height()) {
+        if !chains.contains_key(p.net) {
+            chains.insert(p.net.into(), json!({"mode": "full", "h": h, "blocks": "all", "ord": "all", "tok": "all", "ix": ["ledger", "messages", "profiles"]}));
+        }
+    }
     // o/at/sig: whose hold this is and when, signed, so it can be passed on across the mesh
     // (on_hold).
     let mut h = json!({"t": "sh", "op": "hold", "chains": chains, "o": node.id_hex(), "at": arcade_app::now()});
@@ -683,7 +690,12 @@ pub fn ask_holders_with(node: &Node, p: &ChainParams, kind: &str, unit: u64, wha
 pub fn answer(node: &Node, link: &mut Link, h: &Value) -> Result<(), LinkError> {
     let id = h["id"].clone();
     let res: Result<Value, String> = (|| {
-        let p = arcade_chain::params::by_net(h["net"].as_str().unwrap_or("")).and_then(|q| node.chain_params(q.key)).ok_or("chain not here")?;
+        let net = h["net"].as_str().unwrap_or("");
+        // (The ARCADE chain isn't in by_net: its parameters are the running one's, by its key, which is its net.)
+        let p = arcade_chain::params::by_net(net)
+            .and_then(|q| node.chain_params(q.key))
+            .or_else(|| crate::arcsvc::defined().filter(|p| p.net == net && crate::arcsvc::runs(p)))
+            .ok_or("chain not here")?;
         let arg = h["arg"].as_str().unwrap_or("");
         // Index data only for arcades whose operator has a proven @handle (handlegate.rs).
         if crate::handlegate::is_gated_question(h["what"].as_str().unwrap_or(""), arg) && crate::handlegate::proven(&link.peer_id).is_none() {
@@ -778,7 +790,9 @@ pub fn on_hold(node: &Node, from: &str, h: &Value) {
     let mut clean = Map::new();
     let mut runs_left = HOLD_RUNS_ALL;
     for (k, v) in c.iter().take(32) {
-        if arcade_chain::params::by_net(k).is_some() {
+        // (The ARCADE chain's networks too: they aren't in by_net, as their parameters are made at start, and without
+        // them no arcade was ever known to hold ARCADE, so nothing could be read from one: crate::lentrows.)
+        if arcade_chain::params::by_net(k).is_some() || arcade_chain::params::ARCADE_CHAINS.iter().any(|(_, n)| n == k) {
             let ix: Vec<Value> = v["ix"].as_array().map(|a| a.iter().take(16).filter(|x| x.as_str().is_some_and(|s| s.len() <= 16)).cloned().collect()).unwrap_or_default();
             // Only the fields read here, each in its form and size (anything else is dropped).
             let mode = v["mode"].as_str().filter(|m| m.len() <= 16);
@@ -1245,12 +1259,24 @@ pub fn ask_explorer(node: &Node, p: &ChainParams, ix: &str, cmd: &str, req: &Val
     // Linked holders first (their link is up; dialing may not work from the same network).
     let mut holders = index_holders(node, p.net, ix);
     holders.sort_by_key(|(id, _)| !is_linked(node, id));
-    for (id, _) in holders.into_iter().take(4) {
+    // Four tries; an arcade that refuses by the handle gate (a release before a read was opened, such as
+    // explorer.tag for a first handle) doesn't count: the next is asked, up to twelve in all.
+    let (mut tries, mut asked) = (0, 0);
+    for (id, _) in holders.into_iter() {
+        if tries >= 4 || asked >= 12 {
+            break;
+        }
+        asked += 1;
         let Some(r) = ask_holder(node, p, &id, &q) else { continue };
         match r {
             Ok(v) => return Ok((v, id)),
-            Err(e) if is_linked(node, &id) => last = format!("arcade {}: {e}", &id[..id.len().min(8)]),
-            Err(_) => {} // dialing failed: the introduction asked for above makes a link
+            Err(e) if is_linked(node, &id) => {
+                if !e.contains(crate::handlegate::NEED) {
+                    tries += 1;
+                }
+                last = format!("arcade {}: {e}", &id[..id.len().min(8)]);
+            }
+            Err(_) => tries += 1, // dialing failed: the introduction asked for above makes a link
         }
     }
     Err(last)

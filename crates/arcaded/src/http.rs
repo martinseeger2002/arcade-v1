@@ -668,6 +668,7 @@ fn handle(node: &Node, mut s: TcpStream, conf: &Conf) {
             "app" => Some(include_str!("shims/app.js")),
             "realtime" => Some(include_str!("shims/realtime.js")),
             "groups" => Some(include_str!("shims/groups.js")),
+            "feed" => Some(include_str!("shims/feed.js")),
             "access" => Some(include_str!("shims/access.js")),
             "contacts" => Some(include_str!("shims/contacts.js")),
             "owner" => Some(include_str!("shims/owner.js")),

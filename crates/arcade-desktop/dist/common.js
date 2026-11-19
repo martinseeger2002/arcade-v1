@@ -154,6 +154,29 @@ const coinNum = (sats, locale) => (sats / 1e8).toLocaleString(locale, { maximumF
 const HOME = { key: "peptest", name: "Pepecoin testnet", known: false };
 const homeTicker = () => TICKERS[HOME.key] || HOME.key;
 const homeCoins = (sats) => coinNum(sats) + " " + homeTicker();
+
+// Where a post, act or message is written (Martin 2026-11-17, option C): ARCADE by default, Pepecoin testnet while
+// ARCADE is stalled, and Pepecoin, Dogecoin or DigiByte when picked (real coins). Fills <select> `sel`; its value is the
+// `chain` to send ("" = the default). Kept as the operator left it while the choices stay the same.
+const SCHEME = { arctest: "a://", peptest: "p://", pep: "p://", doge: "d://", dgb: "g://" };
+async function chainPicker(sel) {
+  if (!sel) return;
+  let list = [];
+  try { list = await api("ledger.write_chains"); } catch (e) { sel.hidden = true; return; }
+  const was = sel.value;
+  sel.replaceChildren(...list.map((c) => {
+    const o = document.createElement("option");
+    o.value = c.default ? "" : c.key;
+    const bal = c.balance == null ? "" : ` · ${coinNum(c.balance)} ${c.unit}`;
+    o.textContent = `${SCHEME[c.key] || ""} ${c.name}${c.default ? " (default)" : ""}${c.test ? "" : " · real coins"}${bal}${c.stalled ? " · stalled" : ""}`;
+    return o;
+  }));
+  if ([...sel.options].some((o) => o.value === was)) sel.value = was;
+  sel.hidden = list.length < 2;
+  sel.title = "Where it is written. ARCADE by default; Pepecoin testnet while ARCADE is stalled.";
+}
+// The fee in the chosen chain's coin (`chain` "" = the default chain's).
+const chainFee = (sel, sats) => { const t = sel && sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : ""; const u = (t.match(/· [\d.,]+ (\S+)/) || [])[1]; return u ? coinNum(sats) + " " + u : homeCoins(sats); };
 async function loadHome() {
   if (HOME.known) return HOME;
   try {

@@ -13,9 +13,19 @@ fn arcade(node: &Node) -> Option<&'static ChainParams> {
     crate::arcsvc::defined().filter(|p| crate::arcsvc::runs(p) && p.chain_no != node.ledger_home().chain_no)
 }
 
-/// The chains asked, in order: ARCADE, then the ledger home.
+/// The chains asked, in order: ARCADE, then the ledger home; with ARCADE as the home, Pepecoin testnet too (its tags
+/// count again since writes fail over there while ARCADE is stalled, Martin 2026-11-17).
 fn chains(node: &Node) -> Vec<&'static ChainParams> {
-    arcade(node).into_iter().chain([node.ledger_home()]).collect()
+    let mut out: Vec<&'static ChainParams> = arcade(node).into_iter().chain([node.ledger_home()]).collect();
+    if !out.iter().any(|p| p.chain_no == node.params.chain_no) {
+        out.push(node.params);
+    }
+    out
+}
+
+/// The time of block `h` on chain `c` (0 when unknown).
+fn block_time(node: &Node, c: u16, h: u32) -> u64 {
+    node.chain.hash_at(c, h).ok().flatten().and_then(|hash| node.chain.header(c, &hash).ok().flatten()).map(|r| r.header.time as u64).unwrap_or(0)
 }
 
 /// An address's key hash (any chain's p2pkh form).
@@ -31,7 +41,17 @@ pub fn address_on(p: &ChainParams, address: &str) -> Option<String> {
 /// Who holds `tag`: the chain it was found on and its owner's address there (ARCADE first).
 pub fn owner(node: &Node, tag: &str) -> Option<(&'static ChainParams, String)> {
     let tag = tag.trim().trim_start_matches('@').to_lowercase();
-    chains(node).into_iter().find_map(|p| tag_row(&node.chain, p.chain_no, &tag).ok().flatten().map(|row| (p, row.address)))
+    // Held on several chains: the same key's (the snapshot carried it) is one holder; different keys, the earliest
+    // claim by block time wins (one namespace on every ledger chain).
+    let rows: Vec<(&'static ChainParams, String, u64)> = chains(node)
+        .into_iter()
+        .filter_map(|p| tag_row(&node.chain, p.chain_no, &tag).ok().flatten().map(|row| (p, row.address.clone(), block_time(node, p.chain_no, row.block_height))))
+        .collect();
+    let first = rows.first()?.clone();
+    if rows.iter().all(|r| key_hash(&r.1) == key_hash(&first.1)) {
+        return Some((first.0, first.1));
+    }
+    rows.into_iter().filter(|r| r.2 > 0).min_by_key(|r| r.2).or(Some(first)).map(|r| (r.0, r.1))
 }
 
 /// The @tag held by the key of `address` (given in any chain's form): ARCADE first, then the ledger home.

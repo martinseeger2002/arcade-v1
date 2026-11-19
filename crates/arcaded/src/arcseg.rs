@@ -75,19 +75,32 @@ pub fn forget(gone: &[Item]) {
     POOL.lock().unwrap().items.retain(|(e, _)| !gone.contains(e));
 }
 
-/// Items for a peer, when it is due them: all of them, one after another.
-pub fn due_for(peer: &str) -> Option<Vec<u8>> {
+/// The most item bytes in one "it" frame: under the mesh's 64 KB frame limit with room for the frame's head. One
+/// blob of every waiting item went over it once the pool grew past 64 KB, and the link dropped it whole, so
+/// arcades that don't write blocks never got their audit answers into one and were never paid.
+pub const ITEMS_FRAME: usize = 48 * 1024;
+
+/// Items for a peer, when it is due them: all of them, one after another, cut into blobs of at most
+/// ITEMS_FRAME bytes (an item is never split; one bigger than that goes alone). Empty when none are due.
+pub fn due_for(peer: &str) -> Vec<Vec<u8>> {
     let mut p = POOL.lock().unwrap();
     if p.items.is_empty() {
-        return None;
+        return Vec::new();
     }
     let v = p.version;
     let due = p.told.get(peer).is_none_or(|(seen, at)| *seen != v || at.elapsed() >= SEND_EVERY);
     if !due {
-        return None;
+        return Vec::new();
     }
     p.told.insert(peer.to_string(), (v, Instant::now()));
-    Some(p.items.iter().flat_map(|(e, _)| e.clone()).collect())
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    for (e, _) in &p.items {
+        match out.last_mut() {
+            Some(last) if last.len() + e.len() <= ITEMS_FRAME => last.extend_from_slice(e),
+            _ => out.push(e.clone()),
+        }
+    }
+    out
 }
 
 /// Items a peer sent: each kept when its signature is right (the chain checks the rest).
@@ -749,11 +762,11 @@ mod tests {
         let a = entry(0, 1);
         assert!(add(a.clone()));
         assert!(!add(a.clone()), "the same item once");
-        assert!(due_for("peer-x").is_some());
-        assert!(due_for("peer-x").is_none(), "not again until something changes or 30 s pass");
+        assert!(!due_for("peer-x").is_empty());
+        assert!(due_for("peer-x").is_empty(), "not again until something changes or 30 s pass");
         let b = entry(RANGE, 2);
         add(b.clone());
-        assert!(due_for("peer-x").is_some(), "a new item: sent again");
+        assert!(!due_for("peer-x").is_empty(), "a new item: sent again");
         forget(&[a.clone(), b.clone()]);
         assert!(!waiting().contains(&a) && !waiting().contains(&b));
         // Unsigned items from a peer are not kept.
@@ -761,6 +774,29 @@ mod tests {
         a.encode(&mut blob);
         assert_eq!(on_items(&params::TESTNET, &blob), 0);
     }
+    #[test]
+    fn a_pool_over_a_frame_goes_out_in_several_frames_and_comes_back_whole() {
+        // Distinct entries until the pool is well past one mesh frame (each about 200 bytes; the pool keeps 500).
+        let items: Vec<Item> = (0..400u64).map(|i| entry(RANGE * (1_000 + i), 7)).collect();
+        for i in &items {
+            add(i.clone());
+        }
+        let blobs = due_for("peer-big");
+        assert!(blobs.len() > 1, "cut into several frames");
+        assert!(blobs.iter().all(|b| b.len() <= ITEMS_FRAME), "each under the frame limit");
+        // Every item comes back out whole, in order, from the blobs one after another.
+        let mut back = Vec::new();
+        for b in &blobs {
+            let mut r = Reader::new(b);
+            while !r.is_empty() {
+                back.push(Item::decode(&mut r).unwrap());
+            }
+        }
+        let mine: Vec<Item> = back.into_iter().filter(|i| items.contains(i)).collect();
+        assert_eq!(mine, items);
+        forget(&items);
+    }
+
     /// An open segment from height 0 under `arc` with `n` small units sealed.
     fn open_with(arc: &std::path::Path, owner: &[u8; 32], n: usize) -> crate::arcseal::Open {
         let mut o = crate::arcseal::Open::start_at(arc, &params::TESTNET, "peptest", 0, 0, &mut |a, b| std::fs::rename(a, b)).unwrap();

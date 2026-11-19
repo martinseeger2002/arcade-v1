@@ -91,7 +91,11 @@ try {
         '--target=x86_64-pc-windows-msvc',
         '-fms-compatibility',
         '-fms-extensions',
-        '-fms-compatibility-version=19.33'
+        '-fms-compatibility-version=19.33',
+        # Newer Visual Studio headers (yvals_core.h, STL1000) refuse any Clang older than the one
+        # they were made with. bindgen only reads the headers to make bindings and compiles
+        # nothing, so the check is switched off here; the C++ itself is still built by MSVC.
+        '-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH'
     )
     foreach ($inc in ($env:INCLUDE -split ';')) {
         if (-not $inc) { continue }

@@ -938,7 +938,10 @@ impl Indexer for OrdIndexer {
 
             // 2. Locations: inscriptions carried by the inputs, then the birth (offset 0, last).
             let mut carried: Vec<(u64, [u8; 36])> = Vec::new();
-            let mut from: Vec<([u8; 36], Hash256)> = Vec::new();
+            // Where each carried inscription came from, by id (the first input carrying it). A map, not a list searched
+            // per inscription: a sweep of an output holding hundreds of thousands of inscriptions made that search
+            // quadratic, and the JB20B's Dogecoin sat on one block for hours (2026-11-17, block 6461721 on).
+            let mut from: std::collections::HashMap<[u8; 36], Hash256> = std::collections::HashMap::new();
             let mut base = 0u64;
             for (j, input) in tx.inputs.iter().enumerate() {
                 for (key, _) in l.scan(LOC, &loc_prefix(c, &input.prevout.txid, input.prevout.vout))? {
@@ -948,7 +951,7 @@ impl Indexer for OrdIndexer {
                     iid.copy_from_slice(&key[n - 36..]);
                     l.del(LOC, &key)?;
                     carried.push((base + off, iid));
-                    from.push((iid, input.prevout.txid));
+                    from.entry(iid).or_insert(input.prevout.txid);
                 }
                 base += ctx.prevouts[pos].get(j).map(|x| x.value).unwrap_or(0);
             }
@@ -997,7 +1000,7 @@ impl Indexer for OrdIndexer {
                             let who = holder(p, &tx.outputs[vout as usize].script_pubkey);
                             if is_birth {
                                 landed = Some(who);
-                            } else if let Some((_, ft)) = from.iter().find(|f| f.0 == *iid) {
+                            } else if let Some(ft) = from.get(iid) {
                                 for h in &self.hooks {
                                     h.moved(l, c, &Moved { params: p, iid, from_txid: ft, txid: &txid, to: Some(who.clone()) })?;
                                 }
@@ -1014,7 +1017,7 @@ impl Indexer for OrdIndexer {
                         }
                         moves.push_str(&format!("X {s}\n"));
                         if !is_birth {
-                            if let Some((_, ft)) = from.iter().find(|f| f.0 == *iid) {
+                            if let Some(ft) = from.get(iid) {
                                 for h in &self.hooks {
                                     h.moved(l, c, &Moved { params: p, iid, from_txid: ft, txid: &txid, to: None })?;
                                 }

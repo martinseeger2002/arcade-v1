@@ -18,6 +18,7 @@ use crate::node::Node;
 use arcade_chain::params::ChainParams;
 use arcade_ledger::cards::{self, Card};
 use arcade_store::KeyBuf;
+use std::sync::Mutex;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -492,6 +493,48 @@ fn social(acts: &[Value], fx: &Fixes, txids: &BTreeSet<String>, me: &str) -> Val
            "score": nl as f64 - nd as f64 + 0.5 * comments.len() as f64 + stars_score})
 }
 
+/// Apps every arcade has installed from the start (Martin 2026-11-17): the Browser, and the Feed, which the Feed tab
+/// became. Each: its app id, and whether its Feed switch starts on (the Feed app posts in the operator's name, as the
+/// tab did). Added once each, as soon as its card is known here: an operator who removes one keeps it removed.
+pub const DEFAULT_APPS: &[(&str, bool)] = &[
+    ("peptest:nWKJgSeAZSmfRCxZnwVgtYyPNowQT5X1Gk:browser", false),
+    ("arctest:aSBD9BhXG2sNtCmy4MW8LnonVgD78LSSqD:feed", true),
+];
+
+/// Install the [`DEFAULT_APPS`] not added before (at most one look through the cards a minute: the first may come
+/// before the chains holding them are read).
+pub fn add_defaults(node: &Node) {
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let done: Vec<String> = meta_get(node, "apps_defaults").as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    let todo: Vec<&(&str, bool)> = DEFAULT_APPS.iter().filter(|d| !done.iter().any(|x| x == d.0)).collect();
+    if todo.is_empty() {
+        return;
+    }
+    {
+        let mut l = LAST.lock().unwrap();
+        if l.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60)) {
+            return;
+        }
+        *l = Some(std::time::Instant::now());
+    }
+    let apps = gather(node);
+    let mut done = done;
+    let mut ids = installed_ids(node);
+    for (id, feed) in todo {
+        let Some(a) = apps.iter().find(|a| !a.removed && app_id(a.chain.key, &a.versions[0].creator, &a.versions[0].card.key()) == *id) else { continue };
+        if !ids.iter().any(|x| x["id"] == *id) {
+            ids.push(json!({"id": id, "at": arcade_app::now(), "card": a.versions[0].card.to_json(), "default": true}));
+            let _ = node.app.event("apps", &format!("installed {} (one of the apps every arcade starts with)", a.versions[0].card.name));
+        }
+        if *feed {
+            let _ = set_perms(node, id, &json!({"feed": true}));
+        }
+        done.push(id.to_string());
+    }
+    let _ = meta_put(node, "apps_installed", &json!(ids));
+    let _ = meta_put(node, "apps_defaults", &json!(done));
+}
+
 fn installed_ids(node: &Node) -> Vec<Value> {
     meta_get(node, "apps_installed").as_array().cloned().unwrap_or_default()
 }
@@ -603,6 +646,7 @@ pub fn store(node: &Node, sort: &str, q: &str, show_flagged: bool, category: &st
 
 /// The apps installed here, each at its newest version.
 pub fn installed(node: &Node) -> Value {
+    add_defaults(node);
     let ids = installed_ids(node);
     let apps = gather(node);
     let fl = flags(node, &apps);
@@ -680,12 +724,12 @@ pub fn card(node: &Node, chain: &str, txid: &str) -> Result<Value, String> {
 /// Per-app permission switches (only the ones its card claims matter).
 pub fn perms(node: &Node, id: &str) -> Value {
     let v = meta_get(node, &format!("appperm:{id}"));
-    if v.is_object() { v } else { json!({"wallet": false, "contacts": false, "groups": false, "media": false, "pictures": false, "notify": false}) }
+    if v.is_object() { v } else { json!({"wallet": false, "contacts": false, "groups": false, "feed": false, "media": false, "pictures": false, "notify": false}) }
 }
 
 pub fn set_perms(node: &Node, id: &str, set: &Value) -> Result<Value, String> {
     let mut v = perms(node, id);
-    for k in ["wallet", "contacts", "groups", "media", "pictures", "notify"] {
+    for k in ["wallet", "contacts", "groups", "feed", "media", "pictures", "notify"] {
         if let Some(b) = set[k].as_bool() {
             v[k] = json!(b);
         }

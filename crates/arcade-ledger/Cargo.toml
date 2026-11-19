@@ -12,6 +12,7 @@ arcade-msg = { version = "0.1.0", path = "../arcade-msg" }
 bs58 = { version = "0.5.1", features = ["check"] }
 hex = "0.4.3"
 regex = "1.13.1"
+secp256k1 = { version = "0.29", features = ["global-context", "recovery"] }
 serde = "1.0.229"
 serde_json = "1.0.154"
 sha2 = "0.11.1"

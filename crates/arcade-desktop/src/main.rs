@@ -18,10 +18,13 @@ const APP_WINDOW_COMMANDS: &[&str] = &[
     "apps.node", "apps.owner", "apps.owner_send", "apps.perms", "apps.storage",
     "chains.list", "explorer.inscription", "explorer.ledger_inscription",
     "contacts.delete", "contacts.list", "contacts.save", "msg.who",
+    // arcade.feed (the Feed app): reads, and posts, acts, follows and mutes behind the app's Feed switch (appwindow.js).
+    "feed", "feed.act", "feed.channels", "feed.file", "feed.post", "feed.settings", "follow", "follows", "ledger.write_chains",
+    "mute.add", "mute.remove", "start.status",
     "group.add", "group.app_list", "group.app_read", "group.create", "group.leave", "group.open", "group.say", "group.seal",
     "inscribe", "inscribe.estimate", "prize.claim", "prize.seed",
     "realtime.fast", "realtime.join", "realtime.lanes", "realtime.leave", "realtime.media", "realtime.poll", "realtime.send",
-    "ring.get", "ring.send",
+    "ring.get", "ring.send", "svc.ask", "svc.offers",
     "trade.fill", "trade.items", "trade.leg", "trade.open", "trade.watch", "trade.who",
     "wallet.approve", "wallet.deny", "wallet.preview", "wallet.requests",
 ];

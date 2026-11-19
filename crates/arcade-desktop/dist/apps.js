@@ -3,7 +3,7 @@
 (() => {
   const PEP = homeCoins;
   const ago = (t) => { if (!t) return "waiting"; const s = Date.now() / 1000 - t; return s < 3600 ? `${Math.max(1, Math.round(s / 60))}m ago` : s < 172800 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`; };
-  const PERMS = [["wallet", "Wallet access"], ["contacts", "Contacts"], ["groups", "Group chats"], ["media", "Camera & microphone"], ["pictures", "Pictures in the app"], ["notify", "Notifications"]];
+  const PERMS = [["wallet", "Wallet access"], ["contacts", "Contacts"], ["groups", "Group chats"], ["feed", "Feed (posts in your name)"], ["media", "Camera & microphone"], ["pictures", "Pictures in the app"], ["notify", "Notifications"]];
   let view = "mine", sort = "popular", query = "", cat = "", base = "http://127.0.0.1:8420", detail = null;
   // Category labels by key, from the last App Store answer (apps.store "categories").
   let CATS = {};
@@ -235,7 +235,7 @@
     const f = (ph, attrs = {}) => h("input", { placeholder: ph, ...attrs });
     const name = f("Name (required, up to 60)"), version = f("Version, e.g. 1.0"), players = f("Players, e.g. 1-4"), genre = f("Genre, e.g. Puzzle"), family = f("Family (rooms shared across versions; letters, digits . _ : -)");
     const desc = h("textarea", { rows: 3, placeholder: "Description (up to 280)" });
-    const FLAGS = [["multiplayer", "Multiplayer"], ["wallet", "Uses the wallet"], ["contacts", "Reads contacts"], ["groups", "Group chats"], ["media", "Camera & microphone"], ["pictures", "Draws pictures"], ["notify", "Rings while closed"]];
+    const FLAGS = [["multiplayer", "Multiplayer"], ["wallet", "Uses the wallet"], ["contacts", "Reads contacts"], ["groups", "Group chats"], ["feed", "Posts on the feed"], ["media", "Camera & microphone"], ["pictures", "Draws pictures"], ["notify", "Rings while closed"]];
     const boxes = FLAGS.map(([k, l]) => h("label", { class: "ap-perm" }, h("input", { type: "checkbox", value: k }), " ", l));
     const page = h("input", { type: "file", accept: ".html,.htm,text/html" }), cov = h("input", { type: "file", accept: "image/*" });
     const est = h("div", { class: "s" });

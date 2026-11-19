@@ -121,6 +121,12 @@ fn frame(rec: Value) -> Value {
 pub fn ask(node: &Node, addr: &str) -> Result<Value, String> {
     let addr = addr.trim();
     let now = arcade_app::now();
+    // ARCADE stalled: the user's writes go to Pepecoin testnet meanwhile, so the same key's address there gets test PEP.
+    if crate::arcsvc::stalled() {
+        if let Some(pep) = crate::hometag::address_on(node.params, addr) {
+            let _ = crate::faucet::ask_if_needed(node, &pep, "");
+        }
+    }
     // Without the chain here the address is checked by its form only (the payer checks again).
     let p = crate::arcsvc::defined().ok_or("this arcade doesn't know the ARCADE chain")?;
     script_of(p, addr)?;
@@ -178,6 +184,13 @@ pub fn node_gift_ask(node: &Node) {
     if !node.app.has_wallet().unwrap_or(false) || node.links.lock().unwrap().is_empty() {
         state().lock().unwrap().node_asked = 0;
         return;
+    }
+    // ARCADE stalled (or this copy still syncing): writes go to Pepecoin testnet, so test PEP pays for them meanwhile
+    // (the welcome faucet, once per address while needed).
+    if crate::arcsvc::stalled() {
+        if let Ok((k, _)) = node.app.tag_key(node.params, 0) {
+            let _ = crate::faucet::ask_if_needed(node, &k.address, "");
+        }
     }
     let Some(p) = crate::arcsvc::defined() else { return };
     let Ok((k, _)) = node.app.tag_key(p, 0) else { return };

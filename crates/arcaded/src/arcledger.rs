@@ -496,7 +496,7 @@ fn scan(node: &Node, c: u16, table: &str, pre: &[u8]) -> Vec<(Vec<u8>, Value)> {
 }
 
 /// The address an A:// call is about: `address`, else `tag`'s owner, else this wallet's.
-fn who(node: &Node, req: &Value) -> Result<String, String> {
+pub fn who(node: &Node, req: &Value) -> Result<String, String> {
     let p = chain()?;
     if let Some(a) = req["address"].as_str().filter(|a| !a.is_empty()) {
         return Ok(a.to_string());
@@ -517,7 +517,9 @@ fn card(node: &Node, c: u16, address: &str) -> Value {
         + arcade_ledger::address::decode_base58check(address).filter(|(_, h)| h.len() == 20).map_or(0, |(_, h)| count(&format!("#{}", hex::encode(h))));
     let following = scan(node, c, arcade_ledger::engine::A_FOLLOW, &arcade_store::KeyBuf::new().u16(c).bytes(address.as_bytes()).u8(0).done()).len();
     json!({"address": address, "tag": tag, "profile": prof.as_ref().map(|p| p["v"].clone()), "height": prof.as_ref().map(|p| p["h"].clone()),
-           "versions": prof.as_ref().map_or(json!(0), |p| p["n"].clone()), "followers": followers, "following": following})
+           "versions": prof.as_ref().map_or(json!(0), |p| p["n"].clone()), "followers": followers, "following": following,
+           // Every address it has proven it holds (A:// op 7, crate::walletproofs), on every coin.
+           "wallets": crate::walletproofs::cards(node, c, address)})
 }
 
 /// `a.profile {tag | address}`: a profile card as the ARCADE chain's ledger holds it (this wallet's when neither).
@@ -577,7 +579,10 @@ pub fn a_profile_set(node: &Node, req: &Value) -> Result<Value, String> {
         return Err(format!("the profile is {} bytes; 1,000 at most", body.len()));
     }
     let (txid, fee) = send(node, &arcade_ledger::aproto::payload(arcade_ledger::aproto::OP_PROFILE, body.as_bytes()))?;
-    Ok(json!({"txid": txid, "fee": fee, "bytes": body.len()}))
+    // Its wallet proofs go with it, by themselves (Martin 2026-11-18); when they can't yet, the background look sends
+    // them later.
+    let wallets = crate::walletproofs::publish(node, false).unwrap_or_else(|e| json!({"sent": false, "why": e}));
+    Ok(json!({"txid": txid, "fee": fee, "bytes": body.len(), "wallets": wallets}))
 }
 
 /// `a.follow {tag}` / `a.unfollow {tag}`.

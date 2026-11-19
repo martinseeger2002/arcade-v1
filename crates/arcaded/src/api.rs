@@ -102,6 +102,10 @@ pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {
     if let Some(tag) = req["as"].as_str().filter(|_| cmd.starts_with("ledger.") || cmd.starts_with("a.") || cmd.starts_with("arc.blob_publish")) {
         return crate::arcledger::with_sign_as(Some(tag.to_string()), || dispatch_inner(node, req));
     }
+    // `"chain": key` on a post, act, follow or message: written there (crate::msgsvc::write_chains; option C).
+    if let Some(chain) = req["chain"].as_str().filter(|_| matches!(cmd, "feed.post" | "feed.act" | "follow" | "msg.send")) {
+        return crate::msgsvc::with_write_on(node, Some(chain), || dispatch_inner(node, req));
+    }
     let out = dispatch_inner(node, req);
     // A command that can change a chain or the wallet: chains.list's copy is made again.
     use crate::commands::Perm;
@@ -273,6 +277,9 @@ fn dispatch_inner(node: &Node, req: &Value) -> Result<Value, String> {
         }
         // Messaging (home chain): the Messages tab and anything else that wants it.
         "msg.me" => crate::msgsvc::me(node),
+        "ledger.write_chains" => Ok(crate::msgsvc::write_chains_status(node)),
+        // Posts, acts, message candidates and profiles read from lenders for chains this arcade can't read itself yet.
+        "ledger.lent" => Ok(crate::lentrows::status(node)),
         "msg.stats" => Ok(arcade_ledger::messages::counts(&node.chain, node.ledger_home().chain_no)),
         "msg.scan" => Ok(json!({"opened": crate::msgsvc::scan(node)?})),
         "msg.who" => crate::msgsvc::who(node, &s("name").ok_or("name required (@tag or address)")?),
@@ -393,6 +400,25 @@ fn dispatch_inner(node: &Node, req: &Value) -> Result<Value, String> {
         }
         "realtime.ice" => Ok(crate::turnsvc::ice(node, &s("tag").unwrap_or_default(), req["lan"] == true)),
         "realtime.cert" => crate::realtime::cert(node, &s("address").ok_or("address required")?),
+        "id.start" => crate::siteid::start(&s("host").ok_or("host required")?, s("path").as_deref(), req["http"] == true),
+        "id.callback" => crate::siteid::callback(&s("address").ok_or("address required")?, &s("uri").ok_or("uri required")?, &s("signature").ok_or("signature required")?, s("chain").as_deref()),
+        "id.poll" => crate::siteid::poll(&s("nonce").ok_or("nonce required")?),
+        "id.link_start" => crate::siteid::link_start(&s("key").ok_or("key required")?, &s("host").ok_or("host required")?, s("via").as_deref()),
+        "id.box_put" => crate::sitesign::box_put(&s("box").ok_or("box required")?, &s("msg").ok_or("msg required")?),
+        "id.box_take" => crate::sitesign::box_take(&s("box").ok_or("box required")?),
+        "id.sign_pair" => crate::sitesign::pair(node, &s("qr").ok_or("qr required")?, req["send"] == true),
+        "id.sign_sites" => crate::sitesign::sites(node),
+        "id.sign_forget" => crate::sitesign::forget(node, &s("id").ok_or("id required")?),
+        "id.sign_pending" => crate::sitesign::pending(),
+        "id.sign_decide" => crate::sitesign::decide(node, &s("id").ok_or("id required")?, req["ok"] == true),
+        "id.link_answer" => crate::siteid::link_answer(node, &s("qr").ok_or("qr required")?, req["send"] == true),
+        "id.link_send" => crate::siteid::link_send(&s("code").ok_or("code required")?, &s("sealed").ok_or("sealed required")?),
+        "id.link_poll" => crate::siteid::link_poll(&s("code").ok_or("code required")?),
+        "id.answer" => crate::siteid::answer(node, &s("code").ok_or("code required")?, s("chain").as_deref(), req["send"] == true),
+        "id.relay" => crate::siteid::relay(&s("uri").ok_or("uri required")?, &s("address").ok_or("address required")?, &s("signature").ok_or("signature required")?, s("chain").as_deref()),
+        "vault.put" => crate::siteid::vault_put(node, req),
+        "vault.get" => crate::siteid::vault_get(node, &s("tag").ok_or("tag required")?, req["here"] == true),
+        "vault.delete" => crate::siteid::vault_delete(node, &s("tag").ok_or("tag required")?, &s("signature").ok_or("signature required")?),
         "tx.coins" => crate::sitesvc::coins(node, req),
         "tx.activity" => crate::sitesvc::activity(node, req),
         "tx.fee" => crate::sitesvc::fee(node, req),
@@ -492,6 +518,8 @@ fn dispatch_inner(node: &Node, req: &Value) -> Result<Value, String> {
         "a.search" => crate::arcledger::a_search(node, &s("q").unwrap_or_default()),
         "a.contact_add" => crate::arcledger::a_contact_add(node, &req),
         "a.contact_delete" => crate::arcledger::a_contact_delete(node, &s("id").ok_or("id required")?),
+        "a.wallets" => crate::walletproofs::a_wallets(node, &req),
+        "a.wallets_publish" => crate::walletproofs::publish(node, req["force"] == true),
         "a.post" => crate::arcledger::a_post(node, &s("text").ok_or("text required")?),
         "a.posts" => crate::arcledger::a_posts(node, &req),
         "ledger.balances" => crate::arcledger::balances(node, &s("address").ok_or("address required")?),

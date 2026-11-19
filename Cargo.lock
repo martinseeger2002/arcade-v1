@@ -195,6 +195,7 @@ dependencies = [
  "bs58",
  "hex",
  "regex",
+ "secp256k1",
  "serde",
  "serde_json",
  "sha2 0.11.1",

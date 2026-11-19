@@ -867,6 +867,24 @@ static OWN_PROOF: Mutex<Option<Hash256>> = Mutex::new(None);
 static RACE_PROOF: Mutex<Option<Hash256>> = Mutex::new(None);
 
 /// The ARCADE chain's tip here, if it runs.
+/// No ARCADE block for this long on this arcade's copy: writes fail over to Pepecoin testnet (Martin 2026-11-17, option C:
+/// a stuck ARCADE, or a copy still syncing, must not stop handles, posts, messages or new arcades).
+pub const STALL_SECS: u64 = 20 * 60;
+
+/// Whether the ARCADE chain running here can't take writes now: its newest block (on this arcade's copy) is older than
+/// [`STALL_SECS`], or it doesn't run. Writes go to Pepecoin testnet meanwhile; reads span both.
+pub fn stalled() -> bool {
+    match svc() {
+        Some(s) => {
+            let t = s.st.lock().unwrap().chain.tip().time;
+            // ARCADE_STALL_SECS: a shorter wait for tests (a failover tried without stopping the chain).
+            let limit = std::env::var("ARCADE_STALL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(STALL_SECS);
+            arcade_app::now().saturating_sub(t) > limit
+        }
+        None => true,
+    }
+}
+
 pub fn tip_id() -> Option<Hash256> {
     svc().map(|s| s.st.lock().unwrap().chain.tip().id)
 }
@@ -930,6 +948,12 @@ fn prove_in_pieces_of(dir: &std::path::Path, challenge: &arcade_arc::merkle::Has
         })
         .unwrap_or_default();
     let done: u64 = runs.iter().map(|r| r.steps).sum();
+    // Finished before a restart (kept since 2026-11-17: the GX10 restarted for an update 32 s after its draw seed's
+    // proof of 75 minutes was done, and it was made again from nothing while ARCADE waited at block 1399).
+    if !runs.is_empty() && done == steps && runs.len() <= most && runs.iter().all(|r| r.steps > 0) && ChiaVdf.verify_pot(challenge, steps, &join(&runs), most) {
+        eprintln!("arc: the proof of time ({steps} steps) was finished before the restart: taken as it is");
+        return Some(join(&runs));
+    }
     let fits = !runs.is_empty() && runs.len() < most && done < steps && runs.iter().all(|r| r.steps > 0);
     if !runs.is_empty() && !(fits && ChiaVdf.verify_pot(challenge, done, &join(&runs), most)) {
         eprintln!("arc: saved pieces of the proof of time don't check: starting it over");
@@ -944,7 +968,8 @@ fn prove_in_pieces_of(dir: &std::path::Path, challenge: &arcade_arc::merkle::Has
         let from = runs.last().map(|r| r.output.clone()).unwrap_or_else(|| ChiaVdf::start().to_vec());
         runs.push(ChiaVdf.run(challenge, &from, n)?);
         done += n;
-        if done < steps {
+        // Saved after every piece, the last too: a finished proof outlives a restart (it was removed here).
+        {
             let mut raw = Vec::with_capacity(runs.len() * SEGMENT_BYTES);
             for r in &runs {
                 raw.extend_from_slice(&r.steps.to_le_bytes());
@@ -957,7 +982,7 @@ fn prove_in_pieces_of(dir: &std::path::Path, challenge: &arcade_arc::merkle::Has
             }
         }
     }
-    let _ = std::fs::remove_file(&file);
+    // Kept: its directory's cleanup removes it once nothing has added to it for PIECES_STALE.
     Some(join(&runs))
 }
 
@@ -1232,6 +1257,11 @@ pub fn define(node: &Arc<Node>, settings: &std::path::Path) -> Result<(), String
 /// The chain came from `--arc-local` settings (a closed test network).
 static LOCAL: AtomicBool = AtomicBool::new(false);
 
+/// Whether the ARCADE chain here is a closed local test network (`--arc-local`).
+pub fn local() -> bool {
+    LOCAL.load(Ordering::Relaxed)
+}
+
 /// Done once per arcade: [`undo_auto_btc`] ran.
 const AUTO_BTC_UNDONE: &[u8] = b"btc_light_auto_undone";
 
@@ -1393,6 +1423,8 @@ fn run(node: &Arc<Node>, def: &Def) -> Result<(), String> {
     // Rules version 4 (ARCADE #10): pushes checked against their base from its first height (the rules rise, so
     // that's where `params::rules_v4` turns true).
     arcade_ledger::repos::set_base_check_from(p.chain_no, params::rules_v4_from(&net));
+    // A:// op 7, wallet proofs (crate::walletproofs), known from one height on each network.
+    arcade_ledger::aproto::set_wallets_from(p.chain_no, crate::walletproofs::known_from(p.net));
     // The home chain's ledger, carried in (§15 step 19) right after block 0, before any record (`carry_in`). A store
     // that has blocks but no note of it built its ledger without the snapshot (its copy made again under an old
     // arcade's app-store flag, or from before the note): its ledger rows go and are made again, the snapshot first,
@@ -2136,7 +2168,7 @@ pub fn tick(_node: &Node, link: &mut Link) -> Result<(), LinkError> {
     // Time keepers' frames this peer hasn't had (crate::arckeep).
     crate::arckeep::tick(&link.peer_id.clone(), link)?;
     // Storage items waiting for a block (crate::arcseg).
-    if let Some(blob) = crate::arcseg::due_for(&link.peer_id) {
+    for blob in crate::arcseg::due_for(&link.peer_id) {
         let mut f = frame(svc, "it", json!({}));
         f.blob = blob;
         link.send(&f)?;
@@ -3524,7 +3556,12 @@ mod tests {
         let cut = prove_in_pieces_of(dir.path(), &c, steps, most, piece).unwrap();
         assert_eq!(cut.output, whole.output, "the same squaring however it is cut");
         assert!(ChiaVdf.verify_pot(&c, steps, &cut, most) && !ChiaVdf.verify_pot(&c, steps, &cut, 1));
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "nothing left once it is done");
+        // Kept once done: a restart right after (an update) takes it as it is, instead of making it again.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the finished proof is kept");
+        let t = std::time::Instant::now();
+        let kept = prove_in_pieces_of(dir.path(), &c, steps, most, piece).unwrap();
+        assert_eq!((kept.output.clone(), kept.proof.clone()), (cut.output.clone(), cut.proof.clone()), "the same proof, read back");
+        assert!(t.elapsed() < Duration::from_secs(2));
         // A restart after the first piece: it is saved, and the proof carries on from it.
         let first = ChiaVdf.run(&c, &ChiaVdf::start(), piece).unwrap();
         let save = |runs: &[&arcade_arc::time::Segment]| {
@@ -3556,7 +3593,7 @@ mod tests {
         let long_ago = std::time::SystemTime::now() - PIECES_STALE - Duration::from_secs(60);
         std::fs::File::options().write(true).open(dir.path().join("old-1")).unwrap().set_modified(long_ago).unwrap();
         prove_in_pieces_of(dir.path(), &c, steps, most, piece).unwrap();
-        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).filter(|n| !n.starts_with(&hex::encode(c))).collect();
         assert_eq!(left, ["running-1"]);
         std::fs::remove_file(dir.path().join("running-1")).unwrap();
         // With a cap of 2 runs, a long proof is cut in no more than 2.
@@ -3601,7 +3638,9 @@ mod tests {
         assert_eq!(draw_seed(&NET4, &proof.output), draw_seed(&NET4, &whole.output));
         assert!(Clock::Vdf.verify_pot(&c, steps, &proof, most));
         assert!(!Clock::Vdf.verify(&c, steps, &proof), "one run only below rules version 4");
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "nothing left once it is done");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "kept once done (a restart takes it as it is)");
+        let again = prove_in_pieces_of(&dir, &c, steps, most, piece).unwrap();
+        assert_eq!(again.output, proof.output, "read back after a restart");
         assert!(pot_dir.join("a-block-proof-1").exists(), "the block's own pieces are not the seed's to remove");
     }
 }

@@ -24,7 +24,6 @@
   <button data-tab="home" class="on">Home</button>
   <button data-tab="wallet">Wallet</button>
   <button data-tab="messages">Messages</button>
-  <button data-tab="feed">Feed</button>
   <button data-tab="people">People</button>
   <button data-tab="apps">Apps</button>
   <button data-tab="explorer">Explorer</button>
@@ -51,6 +50,7 @@
 
   <!-- Wallet -->
   <section id="wallet" class="tab">
+    <div id="aid-modal" class="aid-modal" hidden><div class="aid-sheet"><div class="aid-head"><b>ARCADE ID</b><button class="small" id="aid-close" title="Close">✕</button></div><div id="aid-slot"></div></div></div>
     <p class="msg" id="w-loading">Loading the wallet…</p>
     <div id="w-none" hidden>
       <h1>Wallet</h1>
@@ -76,6 +76,7 @@
           <span id="w-logo"></span>
           <span class="wl-who" id="w-who"></span>
           <select id="w-pick" title="Which wallet"></select>
+          <button class="small aid-open" id="w-aid-open" title="ARCADE ID: sign in to sites, open your account in a new browser, approve what a site asks you to sign">ARCADE ID<span class="aid-dot" id="w-aid-dot" hidden></span></button>
         </div>
         <div class="wl-bal"><span id="w-trust"></span><span id="w-bal">—</span> <span class="wl-unit" id="w-unit"></span></div>
         <div class="wl-sub" id="w-sub"></div>
@@ -132,12 +133,34 @@
         <button data-wt="activity" class="on">Activity</button>
         <button data-wt="tokens">Tokens</button>
         <button data-wt="nfts">NFTs</button>
+        <button data-wt="functions">Functions</button>
       </div>
       <div id="w-pane"></div>
       <p class="wl-hint" id="w-note" hidden></p>
 
-      <details id="w-more">
-        <summary>Accounts, sign-in and linked wallets</summary>
+      <div id="w-functions" hidden>
+        <h2>ARCADE ID</h2>
+        <div id="aid-home"><div id="aid-panel">
+          <div id="aid-pending"></div>
+          <p class="note">Paste or scan a code from a site: <b>digiid://</b> signs you in to it (a key made for that one site), <b>arcadesign://</b> lets it ask this app to sign (you approve each one here; your words never leave this app), <b>arcadelink://</b> opens this account in a new browser. Check the site's name before you go on. ARCADE ID is built on <a href="https://www.digi-id.io" target="_blank" rel="noopener">Digi-ID</a>, created by the DigiByte community.</p>
+          <div class="row">
+            <input id="w-aid-code" placeholder="digiid://…, arcadesign://… or arcadelink://…" autocomplete="off" spellcheck="false">
+            <select id="w-aid-chain" title="the key to answer a Digi-ID code with">
+              <option value="dgb">DigiByte (Digi-ID)</option><option value="pep">Pepecoin</option><option value="doge">Dogecoin</option>
+              <option value="ltc">Litecoin</option><option value="btc">Bitcoin</option>
+            </select>
+            <button id="w-aid-scan" title="Read the QR code with this device's camera">Scan</button>
+            <button id="w-aid-check">Check</button>
+          </div>
+          <div id="aid-cam" hidden><video id="aid-video" playsinline muted></video><div class="row"><button id="aid-cam-stop">Stop camera</button></div></div>
+          <div id="w-aid-confirm" class="warn" hidden>
+            <div id="w-aid-text"></div>
+            <div class="row"><button class="primary" id="w-aid-send">Sign in</button><button id="w-aid-cancel">Cancel</button></div>
+          </div>
+          <p class="msg" id="w-aid-msg"></p>
+          <h3>Sites that can ask this app to sign</h3>
+          <div id="aid-sites" class="note">None yet.</div>
+        </div></div>
         <h2>Accounts</h2>
         <table><thead><tr><th>Account</th><th>Address</th><th>From</th><th></th></tr></thead><tbody id="w-accs"></tbody></table>
         <details id="w-signin-box">
@@ -165,7 +188,7 @@
           <div id="w-pubaddr-text"></div>
           <div class="row"><button class="primary" id="w-pubaddr-send">Publish now</button><button id="w-pubaddr-cancel">Cancel</button></div>
         </div>
-      </details>
+      </div>
     </div>
     <p class="msg" id="w-msg"></p>
   </section>
@@ -194,6 +217,7 @@
           <div class="row">
             <label class="small-file">Attach a file <input type="file" id="mx-file"></label>
             <span class="s" id="mx-fileinfo"></span>
+            <select id="mx-chain" hidden></select>
             <button class="primary" id="mx-send">Send</button>
           </div>
         </form>
@@ -201,29 +225,6 @@
         <p class="note">Messages are sealed on the Pepecoin testnet chain to the other person's key, and a copy to yours, so they come back when you restore your 12 words. Each one is a transaction with a small fee; old Dogecoin Arcade accounts can read and reply.</p>
       </div>
     </div>
-  </section>
-
-  <!-- Feed: public posts on the home chain, the original arcade's feed -->
-  <section id="feed" class="tab">
-    <h1>Feed</h1>
-    <div class="fd-compose card">
-      <textarea id="fd-text" rows="3" placeholder="Post publicly (shows your @tag)…"></textarea>
-      <div class="row">
-        <input id="fd-postch" placeholder="channel (main)" style="width:10em">
-        <label class="small-file">Attach <input type="file" id="fd-file"></label>
-        <button class="primary" id="fd-post">Post</button>
-      </div>
-    </div>
-    <div class="row">
-      <div class="mx-views" id="fd-orders"><button data-o="popular" class="on">Popular</button><button data-o="new">New</button><button data-o="friends">Friends</button></div>
-      <select id="fd-channel"></select>
-      <label class="s"><input type="checkbox" id="fd-hidemuted"> hide muted</label>
-      <label class="s"><input type="checkbox" id="fd-contacts"> contacts only</label>
-    </div>
-    <div class="row" id="fd-tagbar" hidden>Posts by <b id="fd-tagname"></b> <button class="small" id="fd-alltags">Everyone</button></div>
-    <p class="msg" id="fd-msg"></p>
-    <div id="fd-list" class="fd-list"></div>
-    <div class="row"><button id="fd-prev">Newer</button><span class="s" id="fd-page"></span><button id="fd-next">Older</button></div>
   </section>
 
   <!-- People: A:// on the ARCADE chain: your profile, follows, the address book (people.js) -->
@@ -482,7 +483,6 @@
 <script src="chains.js"></script>
 <script src="explorer.js"></script>
 <script src="messages.js"></script>
-<script src="feed.js"></script>
 <script src="people.js"></script>
 <script src="apitab.js"></script>
 <script src="apps.js"></script>

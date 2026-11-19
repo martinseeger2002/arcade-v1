@@ -62,13 +62,8 @@ fn settle(acts: impl Iterator<Item = Value>, key: impl Fn(&Value) -> Option<Stri
 
 pub fn followers_of(node: &Node, address: &str) -> Vec<String> {
     let Some(t) = target_of(address) else { return vec![] };
-    // Every ledger chain's acts on the target (it names a key hash, the same on each), oldest chain first.
-    let mut acts: Vec<Value> = node.ledger_chains().into_iter().flat_map(|p| m::acts_on(&node.chain, p.chain_no, &t)).map(|mut a| {
-        if let Some(f) = a["from"].as_str().map(|f| node.home_address(f)) {
-            a["from"] = json!(f);
-        }
-        a
-    }).collect();
+    // Every ledger chain's acts on the target (it names a key hash, the same on each), in one order by block time.
+    let mut acts: Vec<Value> = crate::feedsvc::ledger_acts_on(node, &t);
     acts.extend(waiting(node).into_iter().filter(|a| a["target"] == t.as_str()));
     settle(acts.into_iter(), |a| a["from"].as_str().filter(|f| *f != address).map(String::from))
 }

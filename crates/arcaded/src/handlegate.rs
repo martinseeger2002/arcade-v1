@@ -14,8 +14,10 @@
 //! is told to claim one), and doesn't fetch the old arcades' lx/dx index copies either.
 //!
 //! Not gated: chain data (blocks, headers, transactions, coins, borrowing), the reads that
-//! deliver apps and sites, and `explorer.ord_outpoints`, which keeps inscribed coins out of a
-//! wallet's sends. An operator's own arcade always shows its own indexes.
+//! deliver apps and sites, `explorer.ord_outpoints`, which keeps inscribed coins out of a
+//! wallet's sends, and `explorer.tag` (Martin 2026-11-17): whether one @name is taken and by which
+//! address, which a new operator needs to claim a first handle at all (on Pepecoin testnet while
+//! ARCADE is stalled, its own copy still syncing). An operator's own arcade always shows its own indexes.
 
 use crate::node::Node;
 use serde_json::{json, Value};
@@ -33,8 +35,10 @@ pub const GATED_READS: &[&str] = &[
     "explorer.inscriptions", "explorer.inscription", "explorer.inscription_types", "explorer.tokens", "explorer.token",
     "explorer.names", "explorer.name", "explorer.maps", "explorer.map", "explorer.ledger", "explorer.ledger_tokens",
     "explorer.ledger_token", "explorer.ledger_inscriptions", "explorer.ledger_inscription", "explorer.ledger_bytes",
-    "explorer.tag", "explorer.search", "explorer.collections", "explorer.collection", "explorer.collection_of",
+    "explorer.search", "explorer.collections", "explorer.collection", "explorer.collection_of",
     "explorer.held",
+    // Posts, acts, message candidates and profiles, read by an arcade whose own copy is borrowed or catching up.
+    "explorer.msg_rows",
     // DogeFeed's D:// records (the dogefeed index), as the other indexes; its registrar keys are public setup, not
     // index data, and stay open.
     "explorer.dogefeed", "explorer.dogefeed_tx", "explorer.dogefeed_inscription", "explorer.dogefeed_address",

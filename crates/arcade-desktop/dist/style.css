@@ -576,7 +576,10 @@ button.linkish { border: 0; background: none; padding: 0; font-size: 11px; color
 #people label.k { display: block; margin: 12px 0 4px; }
 #people input:not([type=file]):not([type=checkbox]), #people textarea { width: 100%; }
 .pp-addrs { display: grid; gap: 6px; }
-.pp-addr { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; align-items: center; }
+.pp-addr { display: grid; grid-template-columns: 90px minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.pp-addr .mono { overflow-wrap: anywhere; min-width: 0; }
+.pp-ok { color: var(--accent); font-size: 12px; white-space: nowrap; }
+.pp-no { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .pp-fee { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
 .pp-banner { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 10px; padding: 10px 12px; margin: 10px 0 14px; }
 .pp-lock { border: 1px solid var(--accent); border-radius: 10px; padding: 10px 12px; margin: 10px 0 14px; }
@@ -609,3 +612,20 @@ button.linkish { border: 0; background: none; padding: 0; font-size: 11px; color
 .vouch.red { background: var(--trust-red, #b3261e); }
 .vouch-line { font-size: 12.5px; color: var(--muted); margin: 4px 0; }
 .vouch-line.yellow, .vouch-line.red { color: var(--ink); background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; padding: 4px 8px; }
+
+/* ARCADE ID: the button by the wallet picker, its panel over the page, and what paired sites ask to sign. */
+.aid-open { position: relative; white-space: nowrap; }
+.aid-dot { position: absolute; top: -4px; right: -4px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+.aid-modal { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow: auto; }
+.aid-sheet { background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 14px; width: 100%; max-width: 640px; padding: 16px; box-shadow: 0 12px 40px rgba(0, 0, 0, .35); }
+.aid-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.aid-head #aid-close { margin-left: auto; }
+#aid-cam video { width: 100%; max-height: 50vh; border-radius: 10px; background: #000; }
+.aid-req { margin: 0 0 12px; display: grid; gap: 8px; }
+.aid-req-head { font-size: 1.05em; }
+.aid-msgtext { white-space: pre-wrap; word-break: break-all; max-height: 12em; overflow: auto; margin: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+.aid-outs { width: 100%; }
+.aid-outs td.mono { font-family: var(--mono); word-break: break-all; }
+#w-aid-code { flex: 1; min-width: 16em; }
+.aid-sub { color: var(--muted); font-size: .92em; }
+.aid-req .msg:empty, #w-aid-msg:empty { display: none; }
