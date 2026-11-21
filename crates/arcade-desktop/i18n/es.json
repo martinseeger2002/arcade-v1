@@ -832,7 +832,6 @@
  "The web API at": "La API web en",
  "The whole chain is kept: its blocks and coins, with every address's history. Removing it later deletes its blocks from this arcade; coins stay on the chain and your wallet keeps its keys.": "Se guarda la cadena completa: sus bloques y monedas, con el historial de cada dirección. Quitarla después elimina sus bloques de este arcade; las monedas siguen en la cadena y tu cartera conserva sus claves.",
  "The whole mempool, read from a lender's node (newest 500 shown).": "Toda la mempool, leída del nodo de un prestamista (se muestran las 500 más recientes).",
- "The words of this window, in one of the six languages of the United Nations. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "Los textos de esta ventana, en uno de los seis idiomas de las Naciones Unidas. El cambio es inmediato. La elección es propia de esta ventana, como su aspecto: la app de escritorio y cada navegador eligen por su cuenta. El texto que aún no tiene traducción se muestra en inglés.",
  "Themes are apps from the App Store's Themes category. One changes how this window looks and is laid out (an application window with menus, or a desktop with windows and a taskbar), never what it does: every screen is still this one's. It is checked before it is worn: its text must be readable, and its style can only reach its own frame. This window keeps its own choice; the desktop app and each browser choose for themselves.": "Los temas son apps de la categoría Temas de la Tienda de apps. Un tema cambia cómo se ve y se organiza esta ventana (una ventana de aplicación con menús, o un escritorio con ventanas y una barra de tareas), nunca lo que hace: cada pantalla sigue siendo de esta ventana. Se comprueba antes de aplicarlo: su texto debe ser legible y su estilo solo puede llegar a su propio marco. Esta ventana guarda su propia elección; la app de escritorio y cada navegador eligen por su cuenta.",
  "Theme…": "Tema…",
  "These cards look like an earlier app by someone else, so the App Store hides them until you decide. Trusted publishers are never held back.": "Estas tarjetas se parecen a una app anterior de otra persona, así que la Tienda de apps las oculta hasta que decidas. Los editores de confianza nunca se retienen.",
@@ -1447,5 +1446,6 @@
  "{0} logical": "{0} lógicos",
  "{0} cores": "{0} núcleos",
  "reported": "declarado",
- "measured": "medido"
+ "measured": "medido",
+ "The language of this window's words. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "El idioma de los textos de esta ventana. El cambio es inmediato. La elección es propia de esta ventana, como su aspecto: la app de escritorio y cada navegador eligen por su cuenta. El texto que aún no tiene traducción se muestra en inglés."
 }

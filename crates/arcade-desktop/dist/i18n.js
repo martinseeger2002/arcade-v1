@@ -7,8 +7,8 @@
 // Loaded before every other script, in the main window and in app windows.
 "use strict";
 const I18N = (() => {
-  // The six languages of the United Nations, each by its own name (shown as is, never translated).
-  const LANGS = { en: "English", ar: "العربية", "zh-Hans": "中文（简体）", fr: "Français", ru: "Русский", es: "Español" };
+  // The window's languages (the six of the United Nations, then German), each by its own name (shown as is, never translated).
+  const LANGS = { en: "English", ar: "العربية", "zh-Hans": "中文（简体）", fr: "Français", ru: "Русский", es: "Español", de: "Deutsch" };
   const RTL = new Set(["ar"]);                 // written right to left: the window mirrors (dir="rtl")
   const STORE = "arcade.lang";                 // this window's choice (localStorage), like its look (theme.js)
   const COLLECT = "arcade.i18n.collect";       // "1": keep the texts that found no translation (I18N.dump())

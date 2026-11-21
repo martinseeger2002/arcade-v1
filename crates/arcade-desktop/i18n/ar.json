@@ -832,7 +832,6 @@
  "The web API at": "واجهة API للويب على",
  "The whole chain is kept: its blocks and coins, with every address's history. Removing it later deletes its blocks from this arcade; coins stay on the chain and your wallet keeps its keys.": "تُحفظ السلسلة كاملة: كتلها وعملاتها، مع سجل كل عنوان. إزالتها لاحقًا تحذف كتلها من هذا الـ arcade؛ وتبقى العملات على السلسلة وتحتفظ محفظتك بمفاتيحها.",
  "The whole mempool, read from a lender's node (newest 500 shown).": "مجمع المعاملات كاملًا، مقروءًا من عقدة مُعير (يُعرض أحدث 500).",
- "The words of this window, in one of the six languages of the United Nations. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "كلمات هذه النافذة، بإحدى لغات الأمم المتحدة الست. يتغيّر فورًا. الاختيار خاص بهذه النافذة، مثل مظهرها: يختار تطبيق سطح المكتب وكل متصفح لأنفسهم. النص الذي لا ترجمة له بعد يظهر بالإنجليزية.",
  "Themes are apps from the App Store's Themes category. One changes how this window looks and is laid out (an application window with menus, or a desktop with windows and a taskbar), never what it does: every screen is still this one's. It is checked before it is worn: its text must be readable, and its style can only reach its own frame. This window keeps its own choice; the desktop app and each browser choose for themselves.": "السمات تطبيقات من فئة السمات في متجر التطبيقات. تغيّر السمة شكل هذه النافذة وتخطيطها (نافذة تطبيق بقوائم، أو سطح مكتب بنوافذ وشريط مهام)، لا ما تفعله أبدًا: كل شاشة تبقى شاشة هذه النافذة. يُتحقق منها قبل ارتدائها: يجب أن يكون نصها مقروءًا، ولا يصل أسلوبها إلا إلى إطارها. تحتفظ هذه النافذة باختيارها؛ ويختار تطبيق سطح المكتب وكل متصفح لأنفسهم.",
  "Theme…": "السمة…",
  "These cards look like an earlier app by someone else, so the App Store hides them until you decide. Trusted publishers are never held back.": "هذه البطاقات تشبه تطبيقًا أقدم لشخص آخر، لذا يخفيها متجر التطبيقات حتى تقرر. الناشرون الموثوقون لا يُحجبون أبدًا.",
@@ -1447,5 +1446,6 @@
  "{0} logical": "{0} منطقية",
  "{0} cores": "{0} أنوية",
  "reported": "مُبلَّغ عنه",
- "measured": "مقيس"
+ "measured": "مقيس",
+ "The language of this window's words. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "لغة كلمات هذه النافذة. يتغيّر فورًا. الاختيار خاص بهذه النافذة، مثل مظهرها: يختار تطبيق سطح المكتب وكل متصفح لأنفسهم. النص الذي لا ترجمة له بعد يظهر بالإنجليزية."
 }

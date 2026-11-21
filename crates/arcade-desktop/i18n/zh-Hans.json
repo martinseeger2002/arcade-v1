@@ -832,7 +832,6 @@
  "The web API at": "Web API 地址：",
  "The whole chain is kept: its blocks and coins, with every address's history. Removing it later deletes its blocks from this arcade; coins stay on the chain and your wallet keeps its keys.": "保存整条链：它的区块和币，以及每个地址的历史。以后移除它会从本 arcade 删除其区块；币仍在链上，你的钱包保留其密钥。",
  "The whole mempool, read from a lender's node (newest 500 shown).": "完整的内存池，从出借方的节点读取（显示最新 500 笔）。",
- "The words of this window, in one of the six languages of the United Nations. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "此窗口的文字，可选联合国六种正式语言之一。切换立即生效。这个选择只属于此窗口，就像它的外观一样：桌面应用和每个浏览器各自选择。尚无翻译的文字以英文显示。",
  "Themes are apps from the App Store's Themes category. One changes how this window looks and is laid out (an application window with menus, or a desktop with windows and a taskbar), never what it does: every screen is still this one's. It is checked before it is worn: its text must be readable, and its style can only reach its own frame. This window keeps its own choice; the desktop app and each browser choose for themselves.": "主题是应用商店“主题”类别中的应用。主题会改变此窗口的外观和布局（带菜单的应用窗口，或带窗口和任务栏的桌面），但绝不改变它的功能：每个界面仍是本窗口自己的。主题在使用前会经过检查：文字必须清晰可读，样式只能作用于它自己的框架。此窗口保留自己的选择；桌面应用和每个浏览器各自选择。",
  "Theme…": "主题…",
  "These cards look like an earlier app by someone else, so the App Store hides them until you decide. Trusted publishers are never held back.": "这些卡片看起来像别人更早发布的应用，所以应用商店会先隐藏它们，由你决定。受信任的发布者不会被拦下。",
@@ -1447,5 +1446,6 @@
  "{0} logical": "{0} 个逻辑核心",
  "{0} cores": "{0} 核",
  "reported": "自报",
- "measured": "实测"
+ "measured": "实测",
+ "The language of this window's words. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "此窗口文字所用的语言。切换立即生效。这个选择只属于此窗口，就像它的外观一样：桌面应用和每个浏览器各自选择。尚无翻译的文字以英文显示。"
 }
