@@ -14,6 +14,12 @@ A light 2D platform fighter for the Arcade App Store, published by @yourfirstnam
 Fighters are rendered from the ARCADE cast's 3D models (sprite sheets in `assets/`, left-facing sheets for the
 characters with lettering).
 
+## Published
+
+Version 0.1 is on the ARCADE testnet (`arctest`), published by @yourfirstname: app page
+`e6f2c16e605395a34068cb6a414a79828b056c985c683350178818a37fc22dd0` (`/app/arctest/<id>`), 58 pieces, sha256
+`f78ee012525bfbc26e735c37d2132a61aceb1f6991cdfb110ef941652272e5ab` (= `dist/knockout.html` built from this folder).
+
 ## Build
 
     python3 tools/build.py      # -> dist/knockout.html
