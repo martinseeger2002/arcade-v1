@@ -1,0 +1,74 @@
+{
+ "who": "buster",
+ "cell": [
+  96,
+  96
+ ],
+ "ground": 10,
+ "anims": {
+  "idle": {
+   "row": 0,
+   "frames": 4
+  },
+  "run": {
+   "row": 1,
+   "frames": 6
+  },
+  "jump": {
+   "row": 2,
+   "frames": 2
+  },
+  "fall": {
+   "row": 3,
+   "frames": 1
+  },
+  "crouch": {
+   "row": 4,
+   "frames": 1
+  },
+  "jab": {
+   "row": 5,
+   "frames": 3
+  },
+  "smash": {
+   "row": 6,
+   "frames": 3
+  },
+  "upair": {
+   "row": 7,
+   "frames": 2
+  },
+  "kick": {
+   "row": 8,
+   "frames": 2
+  },
+  "special": {
+   "row": 9,
+   "frames": 4
+  },
+  "upspecial": {
+   "row": 10,
+   "frames": 2
+  },
+  "shield": {
+   "row": 11,
+   "frames": 1
+  },
+  "hurt": {
+   "row": 12,
+   "frames": 2
+  },
+  "tumble": {
+   "row": 13,
+   "frames": 2
+  },
+  "splat": {
+   "row": 14,
+   "frames": 1
+  },
+  "win": {
+   "row": 15,
+   "frames": 2
+  }
+ }
+}
