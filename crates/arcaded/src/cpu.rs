@@ -320,17 +320,43 @@ mod tests {
 #[cfg(test)]
 mod pace_tests {
     use super::*;
+
+    // Rest seconds after 1 s of work at Low on a machine of `all` cores: 3 / low_cores - 1, never below zero.
+    fn expected_rest_secs(all: usize) -> f64 {
+        let low = Level::Low.cores_of(all) as f64;
+        (HEAVY_LOOPS / low - 1.0).max(0.0)
+    }
+
     #[test]
     fn rest_is_none_at_full_and_with_cores_to_spare() {
         let w = std::time::Duration::from_secs(1);
         LEVEL.store(index(Level::Full), Ordering::Relaxed);
         assert_eq!(rest_for(w), std::time::Duration::ZERO);
         LEVEL.store(index(Level::Low), Ordering::Relaxed);
-        // On a machine with 12+ cores low leaves 3 to share: no rest. On a smaller one, rest in proportion.
+        // Low gives a quarter of the cores (at least 1) to the three heavy loops. Rest per second of
+        // work is 3 / those cores - 1, never below zero: 2 s on 4-7 cores, 0.5 s on 8-11, none at 12+.
+        let low = Level::Low.cores_of(all_cores());
+        let expected = std::time::Duration::from_secs_f64(expected_rest_secs(all_cores()));
         let r = rest_for(w);
-        if all_cores() / 4 >= 3 { assert_eq!(r, std::time::Duration::ZERO); } else { assert!(r >= std::time::Duration::from_secs(2)); }
+        assert!(r.abs_diff(expected) <= std::time::Duration::from_millis(1), "rest {r:?}, expected {expected:?}");
+        if low < 3 {
+            assert!(r > std::time::Duration::ZERO);
+        } else {
+            assert_eq!(r, std::time::Duration::ZERO);
+        }
+        // The three loops together stay within Low's cores: 3 * w / (w + r) <= low.
+        let used = HEAVY_LOOPS * w.as_secs_f64() / (w + r).as_secs_f64();
+        assert!(used <= low as f64 + 1e-9, "used {used} cores vs low {low}");
         assert_eq!(proof_threads(), 1);
         LEVEL.store(index(Level::Balanced), Ordering::Relaxed);
         assert_eq!(proof_threads(), 2);
+    }
+
+    #[test]
+    fn expected_rest_for_4_8_12_and_16_cores() {
+        assert_eq!(expected_rest_secs(4), 2.0);
+        assert_eq!(expected_rest_secs(8), 0.5);
+        assert_eq!(expected_rest_secs(12), 0.0);
+        assert_eq!(expected_rest_secs(16), 0.0);
     }
 }
