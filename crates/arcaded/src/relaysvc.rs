@@ -856,6 +856,46 @@ fn pick_relay(st: &G, peer: &str, now: u64) -> Option<String> {
     v.first().map(|r| (*r).clone())
 }
 
+/// Most relays an svc offer names.
+pub const MAX_HINTS: usize = 3;
+
+/// Can an arcade anywhere dial `addr` (host:port)? Not a private, loopback or link-local IP, nor a LAN-only name.
+pub(crate) fn dialable_anywhere(addr: &str) -> bool {
+    let Some((host, port)) = addr.rsplit_once(':') else { return false };
+    if port.parse::<u16>().map_or(true, |p| p == 0) {
+        return false;
+    }
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v)) => !(v.is_private() || v.is_loopback() || v.is_link_local() || v.is_unspecified() || v.octets()[0] == 100 && (64..128).contains(&v.octets()[1])),
+        Ok(std::net::IpAddr::V6(v)) => !(v.is_loopback() || v.is_unspecified() || (v.segments()[0] & 0xfe00) == 0xfc00 || (v.segments()[0] & 0xffc0) == 0xfe80),
+        Err(_) => !host.is_empty() && host.contains('.') && !host.ends_with(".local") && !host.ends_with(".lan") && host != "localhost",
+    }
+}
+
+/// The relays this arcade can be reached through, each with an address anyone can dial, for its svc offers: a buyer
+/// with no link to us dials one, and the relay links us (Martin 2026-11-24: a new home arcade couldn't reach sellers
+/// that have no public address and no relay of its own listed them). Relays first by id, so an offer holds still.
+pub fn reach_hints(node: &Node) -> Vec<Value> {
+    let mut relays: Vec<String> = g().lock().unwrap().relays.keys().cloned().collect();
+    relays.sort();
+    let mut out = Vec::new();
+    for r in relays {
+        if out.len() >= MAX_HINTS {
+            break;
+        }
+        if let Some((a, _)) = crate::meshsvc::known_dials(node, &r).into_iter().find(|(a, _)| dialable_anywhere(a)) {
+            out.push(json!({"id": r, "at": a}));
+        }
+    }
+    out
+}
+
+/// Is arcade `peer` listed by a relay we're linked to (so `want` can ask for it)?
+pub fn listed(peer: &str) -> bool {
+    g().lock().unwrap().relays.values().any(|ids| ids.iter().any(|i| i == peer))
+}
+
 /// Arcades this one needs a link to: those lending a chain it borrows (their offer heard within 3 hours), unlinked.
 fn needed(node: &Node) -> BTreeSet<String> {
     let me = node.id_hex();
@@ -1370,6 +1410,17 @@ pub fn set(node: &Node, req: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dialable_anywhere_leaves_out_home_addresses() {
+        for a in ["8.8.8.8:8421", "relay.example.com:8421", "[2606:4700::1111]:8421"] {
+            assert!(dialable_anywhere(a), "{a}");
+        }
+        for a in ["192.168.1.5:8421", "10.0.0.1:8421", "172.16.4.4:8421", "127.0.0.1:8421", "100.64.1.1:8421", "169.254.1.1:8421",
+                  "[fd00::1]:8421", "[fe80::1]:8421", "[::1]:8421", "box.local:8421", "localhost:8421", "nas:8421", "8.8.8.8:0", "8.8.8.8", ":8421"] {
+            assert!(!dialable_anywhere(a), "{a}");
+        }
+    }
 
     #[test]
     fn civil_dates() {
