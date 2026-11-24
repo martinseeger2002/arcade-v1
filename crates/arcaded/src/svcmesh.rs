@@ -10,7 +10,9 @@
 //! - **Ask.** `svc.ask {to, service, body}` (`"stream": true` on the socket: one line per answer as it comes). The
 //!   asker's ARCADE account signs a grant naming the service, the arcade asked and its address, so the helper is told
 //!   `who` asks (an address it can keep credit for); an arcade with no ARCADE wallet asks with `who` null.
-//! - **Offers.** `svc.offers {service?}`: every arcade's offer, with its @tag, public name, pay_to and link state.
+//! - **Offers.** `svc.offers {service?}`: every arcade's offer, with its @tag, public name, pay_to and link state;
+//!   `out_of_reach` when an ask here couldn't link it in the last 15 minutes (those go last). An offer from an arcade
+//!   with no public name carries `via`: relays it can be reached through, each with an address anyone can dial.
 //! - **Paying.** `svc.pay {to, amount, memo}` (ARCADE, a memo of up to 80 bytes) and `svc.paid {txid, memo?}` (is it in
 //!   a block, what it paid this arcade's address, whether the memo is in it).
 //!
@@ -37,6 +39,8 @@ const ASK_TIME: Duration = Duration::from_secs(1200);
 const GAP_TIME: Duration = Duration::from_secs(180);
 /// How long an asker waits for a link to an arcade it isn't linked to.
 const REACH_WAIT: Duration = Duration::from_secs(25);
+/// How long `reach` waits when the link comes through a relay: dialing the relay, its offer, then the relayed link.
+const RELAY_WAIT: Duration = Duration::from_secs(60);
 /// Offers: said again this often while their helper is attached, kept this long after.
 const OFFER_EVERY: Duration = Duration::from_secs(600);
 const OFFER_KEEP: u64 = 1800;
@@ -302,6 +306,13 @@ fn sign_offer(node: &Node, service: &str, body: Option<&Value>) -> Value {
         "t": "sv", "op": "offer", "s": service, "o": node.id_hex(), "at": now_s(), "tag": tag,
         "name": crate::meshsvc::public_name(node), "pay_to": crate::arcledger::own_address(node).ok(), "body": body,
     });
+    // No public name: the relays we can be reached through, so an arcade with no link to us still can (reach).
+    if o["name"].is_null() && body.is_some() {
+        let via = crate::relaysvc::reach_hints(node);
+        if !via.is_empty() {
+            o["via"] = json!(via);
+        }
+    }
     arcade_mesh::canon::sign_json(&node.identity, &mut o, &["sig"], b"");
     o
 }
@@ -377,10 +388,14 @@ pub fn list_offers(node: &Node, req: &Value) -> Result<Value, String> {
         return Err("service: 1-32 of a-z, 0-9 and -".into());
     }
     let me = node.id_hex();
-    Ok(json!(offers(node, service).into_iter().map(|o| {
+    // Arcades we couldn't reach lately go last (a stable sort: the order otherwise holds).
+    let mut all = offers(node, service);
+    all.sort_by_key(|o| o["o"].as_str().is_some_and(|id| id != me && out_of_reach(id)));
+    Ok(json!(all.into_iter().map(|o| {
         let id = o["o"].as_str().unwrap_or("").to_string();
         json!({"service": o["s"], "arcade": id, "here": id == me, "tag": o["tag"], "name": o["name"], "pay_to": o["pay_to"], "at": o["at"],
-               "linked": id == me || crate::crvia::linked(&id), "offer": o["body"]})
+               "linked": id == me || crate::crvia::linked(&id), "out_of_reach": id != me && out_of_reach(&id),
+               "via": o["via"].as_array().map(|v| v.len()).unwrap_or(0), "offer": o["body"]})
     }).collect::<Vec<_>>()))
 }
 
@@ -519,10 +534,44 @@ fn my_grant(node: &Node, service: &str, arcade: &str) -> Option<Value> {
 
 // ---------------------------------------------------------------- asking (from this arcade)
 
+/// The relays an offer of `arcade`'s names (`via`), as (relay id, address anyone can dial), at most MAX_HINTS.
+fn offer_relays(arcade: &str) -> Vec<(String, String)> {
+    let s = st().lock().unwrap();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for x in s.offers.iter().filter(|((_, o), _)| o == arcade).map(|(_, x)| x) {
+        for v in x["via"].as_array().into_iter().flatten() {
+            let (Some(id), Some(at)) = (v["id"].as_str().filter(|i| crate::udpsvc::is_hex(i, 64)), v["at"].as_str().filter(|a| a.len() <= 255)) else { continue };
+            if id != arcade && crate::relaysvc::dialable_anywhere(at) && !out.iter().any(|(i, _)| i == id) && out.len() < crate::relaysvc::MAX_HINTS {
+                out.push((id.to_string(), at.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Arcades `reach` couldn't link lately (id -> unix time), so offers can show them as out of reach for now.
+fn unreached() -> std::sync::MutexGuard<'static, HashMap<String, u64>> {
+    static U: LazyLock<Mutex<HashMap<String, u64>>> = LazyLock::new(Default::default);
+    U.lock().unwrap()
+}
+
+/// How long a failed reach marks an arcade out of reach in `svc.offers`.
+const UNREACHED_FOR: u64 = 15 * 60;
+
+/// Did `reach` fail to link `arcade` within UNREACHED_FOR (and no link has come up since)?
+fn out_of_reach(arcade: &str) -> bool {
+    let now = now_s();
+    let mut u = unreached();
+    u.retain(|_, t| *t + UNREACHED_FOR > now);
+    u.contains_key(arcade) && !crate::crvia::linked(arcade)
+}
+
 /// Make sure there is a mesh link to `arcade`: its public name from any offer of its, every address we know it by
-/// (peer book, its "hi"), a relay that lists it, a UDP introduction, all at once, up to REACH_WAIT.
+/// (peer book, its "hi"), a relay that lists it, a relay its offer names (dialed first, then asked), a UDP
+/// introduction, all at once, up to REACH_WAIT (RELAY_WAIT when a relay is on the way: its link takes longer).
 fn reach(node: &Node, arcade: &str) -> Result<(), String> {
     if crate::crvia::linked(arcade) {
+        unreached().remove(arcade);
         return Ok(());
     }
     let name = st().lock().unwrap().offers.iter().filter(|((_, o), _)| o == arcade).find_map(|(_, x)| x["name"].as_str().filter(|n| !n.is_empty()).map(String::from));
@@ -531,19 +580,34 @@ fn reach(node: &Node, arcade: &str) -> Result<(), String> {
     }
     // An arcade that restarted is still where it was: its link dropped, but its address works (seen 2026-11-19).
     let known = crate::meshsvc::dial_known(&node.self_arc(), arcade);
-    let relayed = crate::relaysvc::want(node, arcade);
+    // Its relays, from its offer: linked to one, that relay lists it and `want` asks it for a link.
+    let hinted = offer_relays(arcade);
+    for (id, at) in &hinted {
+        if !crate::crvia::linked(id) {
+            crate::meshsvc::dial(&node.self_arc(), at.clone());
+        }
+    }
+    let mut relayed = crate::relaysvc::want(node, arcade);
     crate::udpsvc::want(arcade);
-    let end = Instant::now() + REACH_WAIT;
+    let wait = if relayed || !hinted.is_empty() || crate::relaysvc::listed(arcade) { RELAY_WAIT } else { REACH_WAIT };
+    let end = Instant::now() + wait;
     while Instant::now() < end {
         if crate::crvia::linked(arcade) {
+            unreached().remove(arcade);
             return Ok(());
+        }
+        // A relay linked meanwhile (one its offer names) lists it only once linked: ask then.
+        if !relayed && crate::relaysvc::listed(arcade) {
+            relayed = crate::relaysvc::want(node, arcade);
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+    unreached().insert(arcade.to_string(), now_s());
     Err(match (&name, relayed) {
         (Some(n), _) => format!("can't reach that arcade: no link to it at {n} or through a relay yet; try again in a minute"),
         (None, _) if known > 0 => format!("can't reach that arcade: no link yet at the {} we know it by{}; try again in a minute", if known == 1 { "address" } else { "addresses" }, if relayed { " or through a relay" } else { "" }),
         (None, true) => "can't reach that arcade: a relay is linking us; try again in a minute".to_string(),
+        (None, false) if !hinted.is_empty() => "can't reach that arcade: the relays its offer names didn't link us to it; try again in a minute".to_string(),
         (None, false) => "can't reach that arcade yet: it has no public name, no relay we use lists it, and no link of ours introduced it; try again in a minute".to_string(),
     })
 }
@@ -762,6 +826,38 @@ pub fn link_down(peer: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An offer's `via` gives the relays to dial: only well-formed ids with addresses anyone can dial, not the
+    /// seller itself, each relay once, at most MAX_HINTS; and a failed reach marks the arcade out of reach.
+    #[test]
+    fn offer_relays_and_out_of_reach() {
+        let seller = "5e".repeat(32);
+        let (r1, r2) = ("a1".repeat(32), "a2".repeat(32));
+        let via = json!([
+            {"id": r1, "at": "relay.example.com:8421"},
+            {"id": r1, "at": "9.9.9.9:8421"},
+            {"id": r2, "at": "192.168.1.5:8421"},
+            {"id": seller, "at": "8.8.8.8:8421"},
+            {"id": "not hex", "at": "8.8.4.4:8421"},
+            {"id": "a3".repeat(32), "at": "8.8.4.4:8421"},
+            {"id": "a4".repeat(32), "at": "1.1.1.1:8421"},
+            {"id": "a5".repeat(32), "at": "1.0.0.1:8421"},
+        ]);
+        st().lock().unwrap().offers.insert(("models".into(), seller.clone()), json!({"o": seller, "via": via}));
+        assert_eq!(offer_relays(&seller), vec![
+            (r1.clone(), "relay.example.com:8421".to_string()),
+            ("a3".repeat(32), "8.8.4.4:8421".to_string()),
+            ("a4".repeat(32), "1.1.1.1:8421".to_string()),
+        ]);
+        assert!(offer_relays(&"5f".repeat(32)).is_empty(), "no offer, no relays");
+        st().lock().unwrap().offers.remove(&("models".into(), seller.clone()));
+
+        assert!(!out_of_reach(&seller));
+        unreached().insert(seller.clone(), now_s());
+        assert!(out_of_reach(&seller));
+        unreached().insert(seller.clone(), now_s() - UNREACHED_FOR - 1);
+        assert!(!out_of_reach(&seller), "a failure long ago is forgotten");
+    }
 
     #[test]
     fn service_names() {
