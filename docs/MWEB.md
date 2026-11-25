@@ -29,6 +29,18 @@ amount checked on the contiguous ranges (pool at the tip 512,572.75 LTC). Testne
 branch report. Unit tests use mainnet block 2,844,114 (one kernel with a peg-in and a peg-out)
 and damage it in each way the checks must catch.
 
+## Init installs (docs/INITSYNC.md)
+
+INITSYNC refuses init installs for ltc, ltctest and jkc because nothing checked the extension
+block. After this branch the stored-block checks (`check_block_body`) tie the MWEB **header** to
+the HogEx and the kernels' peg-ins and peg-outs to the canonical outputs, and `rules::replay`
+(the init build's step 3) checks the HogEx amounts block by block. Still unchecked: that the
+body's inputs, outputs and kernels are the ones the header's MMR roots commit to (needs the whole
+MWEB state: an MMR over every MWEB output and kernel ever made, plus the leafset). A normal
+(non-init) sync doesn't check that either, so the gap is the same both ways; whether that is
+enough to lift the refusal is a separate decision. Keeping the MMRs (kernel MMR: append-only,
+cheap; output MMR + leafset: about the size of the MWEB UTXO set) is the next step that closes it.
+
 ## The operator switch (`mweb.status`, `mweb.set`)
 
 Off by default. Turning it on needs `accept: <notice version>`: the Options tab shows the notice
