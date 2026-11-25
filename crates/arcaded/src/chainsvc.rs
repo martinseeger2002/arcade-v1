@@ -240,14 +240,23 @@ pub fn run(node: Arc<Node>) {
 /// Read announcements for up to `dur`: fetch announced transactions into the mempool;
 /// return early when a new block is announced (the caller then syncs it).
 fn listen(node: &Node, peer: &mut Peer, dur: Duration) -> Result<(), String> {
+    listen_chain(node, node.params, peer, dur, || {
+        !node.block_outbox.lock().unwrap().is_empty() || !node.tx_outbox.lock().unwrap().is_empty()
+    })
+}
+
+/// [`listen`] for chain `p` (the home chain or an installed one, whose peer was dialed with relay on): announced
+/// transactions go into its mempool (and to the mesh, crate::mempoolshare); back early when a block is announced or
+/// `back()` says so. Installed chains slept between rounds instead, so their pools held only the arcades' own
+/// transactions and a lender shared an empty one (Kiko 2026-11-25: the mempool "rain" was dry).
+pub(crate) fn listen_chain(node: &Node, p: &'static arcade_chain::params::ChainParams, peer: &mut Peer, dur: Duration, back: impl Fn() -> bool) -> Result<(), String> {
     use arcade_chain::encode::Reader;
     use arcade_chain::p2p::getdata_payload;
-    let p = node.params;
     let deadline = std::time::Instant::now() + dur;
     peer.set_read_timeout(Duration::from_secs(2)).map_err(|e| e.to_string())?;
     let res = (|| {
         while std::time::Instant::now() < deadline {
-            if !node.block_outbox.lock().unwrap().is_empty() || !node.tx_outbox.lock().unwrap().is_empty() {
+            if back() {
                 return Ok(());
             }
             let m = match peer.recv() {
@@ -294,14 +303,63 @@ fn listen(node: &Node, peer: &mut Peer, dur: Duration) -> Result<(), String> {
     })();
     let _ = peer.set_read_timeout(Duration::from_secs(20));
     let _ = node.chain.mempool_expire(p, arcade_app::now(), 14 * 24 * 3600);
-    // Once at start and then every hour: pooled transactions the network would refuse go.
-    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-    let due = LAST.lock().unwrap().is_none_or(|t| t.elapsed() > Duration::from_secs(3600));
+    // Once at start and then every hour, per chain: pooled transactions the network would refuse go.
+    static LAST: std::sync::Mutex<Option<std::collections::HashMap<u16, std::time::Instant>>> = std::sync::Mutex::new(None);
+    let due = {
+        let mut g = LAST.lock().unwrap();
+        let m = g.get_or_insert_with(Default::default);
+        let due = m.get(&p.chain_no).is_none_or(|t| t.elapsed() > Duration::from_secs(3600));
+        if due {
+            m.insert(p.chain_no, std::time::Instant::now());
+        }
+        due
+    };
     if due {
-        *LAST.lock().unwrap() = Some(std::time::Instant::now());
         for (txid, why) in crate::mempoolshare::recheck(node, p) {
             let _ = node.app.event("wallet", &format!("dropped waiting transaction {txid}: {why}"));
         }
     }
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arcade_chain::p2p::{encode_message, getdata_payload, read_message, version_payload};
+    use std::io::Write;
+
+    /// An installed chain's coin peer announces a waiting transaction: listen_chain asks for it, pools it, and comes
+    /// back as soon as a block is announced (Kiko 2026-11-25: installed chains' pools stayed empty).
+    #[test]
+    fn listening_pools_announced_transactions_and_returns_on_a_block() {
+        use arcade_wallet::tx::{sign_keyhash, TxOutSpec};
+        let (t, coins) = crate::mempoolshare::tests::funded();
+        let outs = vec![TxOutSpec { value: 1400, script: crate::sitesvc::tests::p2pkh(5) }];
+        let good = sign_keyhash(t.p, 1, &coins[..1], &outs, &crate::mempoolshare::tests::key(), 0).unwrap();
+        let (raw, txid) = (good.raw.clone(), good.txid);
+        let p = t.p;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let _ = read_message(&mut s, p.magic).unwrap();
+            s.write_all(&encode_message(p.magic, "version", &version_payload(p, None, 1, true))).unwrap();
+            s.write_all(&encode_message(p.magic, "verack", &[])).unwrap();
+            s.write_all(&encode_message(p.magic, "inv", &getdata_payload(1, &[txid]))).unwrap();
+            loop {
+                let Ok(m) = read_message(&mut s, p.magic) else { return };
+                if m.command == "getdata" {
+                    s.write_all(&encode_message(p.magic, "tx", &raw)).unwrap();
+                    s.write_all(&encode_message(p.magic, "inv", &getdata_payload(2, &[arcade_chain::Hash256([7; 32])]))).unwrap();
+                }
+            }
+        });
+        let mut peer = Peer::connect_with(p, &addr, Duration::from_secs(5), true).unwrap();
+        let started = std::time::Instant::now();
+        listen_chain(&t.node, p, &mut peer, Duration::from_secs(20), || false).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10), "back on the block announcement");
+        let pool = t.node.chain.mempool(p.chain_no).unwrap();
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool[0].1, good.raw);
+    }
 }
