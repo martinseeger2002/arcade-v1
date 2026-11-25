@@ -447,7 +447,9 @@ fn pin_of(node: &Node, p: &'static ChainParams) -> (Value, String) {
 pub fn source_of(node: &Node, p: &'static ChainParams) -> String {
     if crate::borrow::is_borrowed(p.key) {
         return match crate::borrow::lenders(node, p).first() {
-            Some(l) => format!("borrowed:{}", &l[..l.len().min(16)]),
+            // A node id is cut to 16 like everywhere; an address ("192.168.1.25:8421") stays whole.
+            Some(l) if l.len() > 16 && l.bytes().all(|b| b.is_ascii_hexdigit()) => format!("borrowed:{}", &l[..16]),
+            Some(l) => format!("borrowed:{l}"),
             None => "borrowed".into(),
         };
     }

@@ -2015,7 +2015,8 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
                 last_mesh = std::time::Instant::now();
             }
         }
-        let Some(mut peer) = Node::dial_first(p, &node.coin_candidates(p), false) else {
+        // Relay on: the peer announces its unconfirmed transactions, pooled while synced (below).
+        let Some(mut peer) = Node::dial_first(p, &node.coin_candidates(p), true) else {
             set(format!("no {} peer reachable; retrying", p.name));
             // New blocks come from the arcade mesh then: the indexes still walk what is stored.
             walk_indexes(&node, &run, 40);
@@ -2110,7 +2111,15 @@ fn follow(node: Arc<Node>, run: Arc<ChainRun>) {
                 format!("syncing {tip}")
             });
             if h == 0 && b == 0 && !more {
-                std::thread::sleep(Duration::from_secs(15));
+                // At the tip: the network's waiting transactions into this chain's mempool until a block is
+                // announced (or 15 s), as the home chain does.
+                let stop = &run.stop;
+                let r = crate::chainsvc::listen_chain(&node, p, &mut peer, Duration::from_secs(15), || stop.load(Ordering::Relaxed));
+                let _ = peer.set_read_timeout(Duration::from_secs(20));
+                if let Err(e) = r {
+                    set(format!("listen: {e}"));
+                    continue 'outer;
+                }
             }
         }
     }
