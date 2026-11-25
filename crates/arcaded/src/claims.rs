@@ -644,7 +644,7 @@ pub fn find_own_tag(node: &Node, now: bool) -> Option<String> {
 
 /// The @handle already recorded for this wallet: its tag key on the chain claims go to (ARCADE),
 /// else on the ledger home.
-fn recorded_tag(node: &Node) -> Option<String> {
+pub(crate) fn recorded_tag(node: &Node) -> Option<String> {
     [claim_home(node).chain_no, node.params.chain_no].into_iter().find_map(|c| node.app.tag_keys(c).unwrap_or_default().into_iter().find_map(|k| k.tag))
 }
 

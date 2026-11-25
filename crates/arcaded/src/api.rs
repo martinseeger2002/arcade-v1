@@ -195,9 +195,27 @@ fn handle(node: Arc<Node>, s: UnixStream) {
 /// Make this arcade's wallet: new words, or restored from `phrase` (with its @handle, when the
 /// chain already shows it). New and restored wallets alike ask the mesh for a test coin.
 pub fn create_wallet(node: &Node, phrase: Option<&str>) -> Result<Value, String> {
-    let p = node.params;
     let restored = phrase.is_some();
     let words = node.app.create_wallet(phrase).map_err(|e| e.to_string())?;
+    // The wallet is saved: answer now. Finding a restored wallet's @handle can take minutes on a fresh install (its
+    // tag index behind, other arcades asked over the mesh for each key slot), and a caller waiting for it gave up with
+    // "timed out" though the words were right (a Kiko laptop, 2026-11-24). The handle comes in the background, shown
+    // once found (Home, wallet.status); the faucet asks follow it.
+    let tag = if restored { crate::claims::recorded_tag(node) } else { None };
+    match node.try_arc() {
+        Some(n) => {
+            let _ = std::thread::Builder::new().name("wallet after create".into()).spawn(move || after_create(&n, restored));
+        }
+        // A bare node (tests): no thread to hand it to.
+        None => after_create(node, restored),
+    }
+    Ok(json!({"phrase": if restored { Value::Null } else { json!(words) }, "restored": restored, "tag": tag}))
+}
+
+/// What follows a new or restored wallet, off the caller's clock: its @handle found on chain (restored), else test
+/// coins for the first handle, and this arcade's ARCADE from the node faucet.
+fn after_create(node: &Node, restored: bool) {
+    let p = node.params;
     // A restored wallet's @handle, found on chain right away (else after a later sync round).
     let tag = if restored { crate::claims::find_own_tag(node, true) } else { None };
     // Test coins for the first handle come by themselves: asked for now, so they are
@@ -215,7 +233,6 @@ pub fn create_wallet(node: &Node, phrase: Option<&str>) -> Result<Value, String>
     }
     // And this arcade's 1 ARCADE from the node faucet (crate::arcfaucet), asked now rather than at the next round.
     crate::arcfaucet::node_gift_ask(node);
-    Ok(json!({"phrase": if restored { Value::Null } else { json!(words) }, "restored": restored, "tag": tag}))
 }
 
 pub fn dispatch(node: &Node, req: &Value) -> Result<Value, String> {

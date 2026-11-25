@@ -382,6 +382,11 @@ impl Node {
         v
     }
 
+    /// This node as an Arc, when it runs as one (not a bare node in a test).
+    pub fn try_arc(&self) -> Option<std::sync::Arc<Node>> {
+        self.me.get().and_then(|w| w.upgrade())
+    }
+
     pub fn self_arc(&self) -> std::sync::Arc<Node> {
         self.me.get().and_then(|w| w.upgrade()).expect("node is running")
     }
