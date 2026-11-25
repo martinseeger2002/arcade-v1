@@ -825,8 +825,8 @@
   async function vOmni() {
     const size = 50, page = pageOf();
     const r = await xapi("explorer.omni", { chain: chain.key, offset: (page - 1) * size, n: size });
-    const i = r.info || {};
-    const st = [["Omni block", fmt(i.block)], ["Properties", fmt(r.total)], ["Omni transactions", fmt(i.totaltransactions)], ["Version", i.omnicoreversion || i.mastercoreversion || "—"]];
+    const i = r.info || {}, s = r.status || {};
+    const st = [["Omni block", fmt(i.block) + (s.synced === false ? ` · ${fmt(s.behind)} behind` : "")], ["Properties", fmt(r.total)], ["Omni transactions", fmt(i.totaltransactions)], ["Version", i.omnicoreversion || i.mastercoreversion || "—"]];
     return h("div", {},
       h("div", { class: "x-stats" }, st.map(([k, v]) => h("div", { class: "x-stat" }, h("div", { class: "k" }, k), h("div", { class: "v" }, v)))),
       omniLook(),

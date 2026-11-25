@@ -19,6 +19,8 @@ pub const CHAINS: &[&str] = &["ltctest", "ltcregtest"];
 const READS: &[&str] = &[
     "omni_getinfo", "omni_listproperties", "omni_getproperty", "omni_getallbalancesforid", "omni_gettransaction",
     "omni_listblocktransactions", "omni_getallbalancesforaddress", "omni_getnonfungibletokens",
+    // omnilite-standalone's own: its network and how far behind the node it is (omnilited has no such call).
+    "omnilite_getstatus",
 ];
 
 fn key(chain: &str) -> Vec<u8> {
@@ -71,11 +73,12 @@ pub fn set(node: &Node, chain: &str, url: &str, cookie: &str) -> Result<Value, S
             return Err("path is the sidecar's API cookie file (…/.cookie)".into());
         }
         let v = json!({"url": url, "cookie": cookie});
-        let info = call(&v, "omni_getinfo", json!([]))?;
+        call(&v, "omni_getinfo", json!([]))?;
+        // The network, where the sidecar says it (omnilite-standalone); omnilited doesn't, and is taken as named.
         let want = if chain == "ltctest" { "test" } else { "regtest" };
-        if let Some(n) = info["network"].as_str().or(info["chain"].as_str()) {
-            if !n.contains(want) && !(want == "test" && n.contains("testnet")) {
-                return Err(format!("that sidecar reads {n}, not {chain}"));
+        if let Some(n) = call(&v, "omnilite_getstatus", json!([])).ok().and_then(|s| s["network"].as_str().map(String::from)) {
+            if n != want {
+                return Err(format!("that sidecar reads Litecoin {n}, not {chain}"));
             }
         }
         v
@@ -119,12 +122,14 @@ pub fn answer(node: &Node, cmd: &str, req: &Value) -> Result<Value, String> {
     let mut v = match cmd {
         "explorer.omni" => {
             let info = call(&sc, "omni_getinfo", json!([]))?;
+            // Still catching up (omnilite-standalone): how far, for the page to say so.
+            let status = call(&sc, "omnilite_getstatus", json!([])).unwrap_or(Value::Null);
             let mut props = call(&sc, "omni_listproperties", json!([]))?.as_array().cloned().unwrap_or_default();
             // Newest first.
             props.sort_by_key(|p| std::cmp::Reverse(p["propertyid"].as_u64().unwrap_or(0)));
             let total = props.len();
             let items: Vec<Value> = props.into_iter().skip(off).take(n(50, 200)).collect();
-            json!({"info": info, "total": total, "items": items})
+            json!({"info": info, "status": status, "total": total, "items": items})
         }
         "explorer.omni_property" => {
             let id = pid()?;
@@ -180,7 +185,7 @@ mod tests {
         for m in ["omni_send", "omni_funded_send", "omni_sendrawtx", "sendtoaddress", "dumpprivkey"] {
             assert!(call(&sc, m, json!([])).unwrap_err().contains("not a read"), "{m}");
         }
-        assert!(READS.iter().all(|m| m.starts_with("omni_get") || m.starts_with("omni_list")));
+        assert!(READS.iter().all(|m| m.starts_with("omni_get") || m.starts_with("omni_list") || *m == "omnilite_getstatus"));
     }
 
     #[test]
