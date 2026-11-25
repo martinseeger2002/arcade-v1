@@ -431,6 +431,21 @@ fn open_mailbox(msg_secret: &[u8; 32], b64: &str) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
+    /// Restoring from 12 words answers once the wallet is saved, not after the @handle search (which on a fresh install
+    /// asks other arcades and took longer than Kiko's setup waited, 2026-11-24).
+    #[test]
+    fn restoring_from_words_answers_at_once() {
+        let t = crate::sitesvc::tests::setup();
+        let words = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let at = std::time::Instant::now();
+        let r = crate::api::create_wallet(&t.node, Some(words)).unwrap();
+        assert!(at.elapsed() < std::time::Duration::from_secs(2), "took {:?}", at.elapsed());
+        assert_eq!(r["restored"], true);
+        assert!(r["phrase"].is_null(), "a restored wallet's words aren't sent back");
+        assert!(t.node.app.has_wallet().unwrap());
+        assert_eq!(t.node.app.phrase().unwrap(), words);
+    }
+
     #[test]
     fn mailbox_key_is_unchanged() {
         // python3: hashlib.blake2b(bytes([3]*32) + b"arcade-mailbox/1", digest_size=32)
