@@ -191,6 +191,13 @@ impl AppDb {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
         let kp = dir.join("secret.key");
+        // An empty secret.key: the first start was cut off (a reset, a power cut) after the file's name reached the
+        // disk but before its bytes did (a Kiko laptop, 2026-11-24). Nothing locked with that key can be read again.
+        // With nothing locked in the database but the check value, that start never got anywhere: the database is
+        // set aside (kept, never deleted) and the arcade starts new. With more locked in it, say so and stop.
+        if kp.exists() && std::fs::read_to_string(&kp)?.trim().is_empty() {
+            set_aside_after_empty_key(&dir)?;
+        }
         let key: [u8; 32] = if kp.exists() {
             let h = std::fs::read_to_string(&kp)?;
             hex::decode(h.trim()).ok().and_then(|v| v.try_into().ok()).ok_or(AppError::BadSecret)?
@@ -561,7 +568,48 @@ impl AppDb {
     }
 }
 
+/// `<dir>/secret.key` is empty: set the database aside and remove the empty key, when the database holds nothing
+/// locked with that key but the check value (a first start cut off early); otherwise an error saying what happened.
+fn set_aside_after_empty_key(dir: &Path) -> Result<()> {
+    let db_path = dir.join("arcade.mdbx");
+    if db_path.exists() {
+        let locked = {
+            let store = Store::open(&db_path, &APP_SCHEMA)?;
+            store.read(|r| r.scan_prefix(SECRETS, b""))?.into_iter().filter(|(k, _)| k.as_slice() != b"check").count()
+        };
+        if locked > 0 {
+            return Err(AppError::Other(format!(
+                "secret.key in {} is empty (its first write was cut off), and arcade.mdbx holds {locked} secret(s) locked with the lost key: \
+                 they can't be read. Restore secret.key from a backup, or move the folder aside to start a new arcade",
+                dir.display()
+            )));
+        }
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        for name in ["arcade.mdbx", "arcade.mdbx-lck"] {
+            let p = dir.join(name);
+            if p.exists() {
+                std::fs::rename(&p, dir.join(format!("{name}.empty-key-{stamp}")))?;
+            }
+        }
+    }
+    std::fs::remove_file(dir.join("secret.key"))?;
+    sync_dir(dir);
+    Ok(())
+}
+
+/// Flush a folder's entries (a new or renamed file's name) to the disk. Unix only; best effort.
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
 /// Write `data` to a new file that only this user can read. Linux: mode 0600.
+/// The file's bytes and its name are flushed to the disk before this returns: a power cut right after must not leave
+/// a name with no bytes (an empty secret.key next to a database locked with the key it lost; Kiko laptop 2026-11-24).
 /// Windows: the inherited ACL is replaced with one grant for the current user.
 pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
@@ -569,12 +617,18 @@ pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     {
         use std::os::unix::fs::OpenOptionsExt;
         let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
-        return f.write_all(data);
+        f.write_all(data)?;
+        f.sync_all()?;
+        if let Some(dir) = path.parent() {
+            sync_dir(dir);
+        }
+        return Ok(());
     }
     #[cfg(windows)]
     {
         let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
         f.write_all(data)?;
+        f.sync_all()?;
         drop(f);
         if let Err(e) = restrict_to_current_user(path) {
             let _ = std::fs::remove_file(path);
@@ -815,6 +869,31 @@ mod tests {
         let raw = std::fs::read(d.path().join("arcade.mdbx")).unwrap();
         let first = phrase.split(' ').next().unwrap();
         assert!(!raw.windows(phrase.len()).any(|w| w == phrase.as_bytes()), "{first}...");
+    }
+
+    #[test]
+    fn an_empty_secret_key_from_a_cut_off_first_start_starts_new() {
+        let d = tempfile::tempdir().unwrap();
+        drop(AppDb::open(d.path()).unwrap());
+        // The key's bytes never reached the disk: only the check value is locked in the database.
+        std::fs::write(d.path().join("secret.key"), b"").unwrap();
+        let db = AppDb::open(d.path()).unwrap();
+        assert!(db.secret("check").unwrap().is_some());
+        assert_eq!(std::fs::read_to_string(d.path().join("secret.key")).unwrap().trim().len(), 64);
+        let kept: Vec<String> = std::fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).filter(|n| n.contains(".empty-key-")).collect();
+        assert!(kept.iter().any(|n| n.starts_with("arcade.mdbx.empty-key-")), "the old database is kept: {kept:?}");
+        drop(db);
+
+        // More locked in it (a wallet, say): refused with what happened, and nothing is moved.
+        let d = tempfile::tempdir().unwrap();
+        let db = AppDb::open(d.path()).unwrap();
+        db.put_secret("phrase", b"twelve words").unwrap();
+        drop(db);
+        std::fs::write(d.path().join("secret.key"), b"\n").unwrap();
+        let e = AppDb::open(d.path()).err().expect("refused").to_string();
+        assert!(e.contains("is empty") && e.contains("1 secret"), "{e}");
+        assert!(d.path().join("arcade.mdbx").exists());
+        assert!(d.path().join("secret.key").exists());
     }
 
     #[test]
