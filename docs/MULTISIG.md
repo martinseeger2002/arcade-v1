@@ -105,6 +105,11 @@ same as a single-sig one; consolidation matters more on BTC/LTC.
    Core and hardware wallets already speak `wsh(sortedmulti)`. For the Dogecoin family support outside ARCADE is thin,
    so ARCADE app + paper phrase is the realistic set.
 
+All three co-signer models (1–3) are designed for from the start: the vault record names each co-signer as
+`{xpub, origin, where}` with `where` = this arcade's own key, an account on this arcade, or another arcade's
+mesh id, so a vault made in phase 4 for one person can gain co-signers on other accounts or arcades without a new
+format. They are *built* in that order (phases 4–6).
+
 Taproot (MuSig2 key path, or `tr(…, multi_a)` script path) is **later**: smaller and private, but MuSig2 needs a
 two-round nonce exchange with strict no-reuse rules and its own audit. Only BTC/LTC/DGB/BEL/JKC benefit.
 
@@ -116,7 +121,7 @@ two-round nonce exchange with strict no-reuse rules and its own audit. Only BTC/
 | Inscriptions / ords held | A vault address can **hold** inscriptions; `ordsafe` keeps them out of plain sends, same as today | indexes track outputs, not key types |
 | Inscribing *from* a vault | Later: the commit spends vault coins (co-signed); the reveal lock stays a single fresh key; the inscription lands on a vault address | reveal-lock signing is a special case today |
 | DRC-20 / tokens | Hold: yes. Transfer: later (two co-signed txs) | |
-| APROTO records, @tags, feed | **No.** Authors and tags stay single keys | a record's author is one signer; a vault posting would need every co-signer for every like |
+| APROTO records, @tags, feed | Not in the first phases; **a vault @tag is a later phase** (8). The ledger already takes a P2SH first input as a sender, so the protocol side may need little; the work is the waiting-for-M flow for posts, likes and tips | every action waits for M signatures |
 | Digi-ID, ARCADE ID sign-in, app-signs-each-action | **Identity stays single-key.** A site may *request a vault spend*; the app signs its share and the PSBT waits for the others | sign-in answers in seconds; multisig can't |
 | Swaps, trade legs, HTLCs | Not from vaults in v1 | they need SINGLE\|ANYONECANPAY or time paths; review separately |
 | Earn ARCADE payout | A vault address on the ARCADE chain can be the payout address **today** | `pay_to` accepts P2SH |
@@ -158,17 +163,21 @@ Each phase is one PR, aimed at ≤ ~400 lines (code, not counting test vectors),
 | 5 | Spend: `vault.propose` (coin control picks coins, builds PSBT), `vault.sign`, `vault.finalize` → `tx.broadcast`; approval card shows outputs, change check, fee | ~400 | 2-of-3 spend on `peptest` and `ltctest` with keys on two arcades + paper; refuses: change to foreign script, wrong chain, missing prev tx |
 | 6 | Co-signing over the mesh: send/receive PSBTs in sealed boxes; "waiting for N more" state; several users on one arcade | ~400 | three arcades, one offline for a day; replayed and tampered PSBTs refused |
 | 7 | Chains out: BTC/DGB/BEL/JKC `wsh`; ARCADE-chain vaults (Earn payout to a vault); mainnet behind a switch after external review | ~250 | per-chain address + spend vectors; regtest where we have it |
-| 8 | Later: PSBT file/QR for hardware wallets (BTC/LTC); inscribing and DRC-20 transfers from a vault; Taproot (`multi_a`, then MuSig2) with its own review | separate | |
+| 8 | Later: PSBT file/QR for hardware wallets (BTC/LTC); inscribing and DRC-20 transfers from a vault; a vault-owned @tag and records; any M-of-N; Taproot (`multi_a`, then MuSig2) with its own review | separate | |
 
 Start on the **Dogecoin family (legacy `sh(sortedmulti)`) tested on Pepecoin testnet**: it is most of our users, the
 legacy sighash code already exists, and the same code covers Doge, PEP, LKY, Flop, Shic, WJK and the ARCADE chain.
 P2WSH follows in phase 1's own verify work and phase 7's chain list.
 
-## 5. Open questions
+## 5. Decisions (2026-11-24)
 
-- Q1. First co-signer model: one person's devices (recommended) or several people from day one?
-- Q2. First chain family: Dogecoin-family P2SH (recommended) or BTC/LTC P2WSH (better tooling)?
-- Q3. Default shape offered: 2-of-3 only at first, or any M-of-N up to the cap?
+- Co-signers: all three models (one person's devices, several people on one arcade, people on different arcades) are
+  planned in the format from the start; built in that order.
+- First chain family: Dogecoin family, legacy `sh(sortedmulti)`, tested on Pepecoin testnet.
+- Shape: **2-of-3 only** at first; any M-of-N later.
+- Vault @tags / records: **yes, in a later phase** (8), not in the first ones.
+
+## 6. Open questions
+
 - Q4. Derivation for legacy P2SH vaults: BIP48 with type `0'` (ours) vs BIP45 `m/45'` (older, used by some wallets).
-- Q5. Should a vault ever own an @tag or author records? (Proposed: no.)
 - Q6. Where the descriptor backup lives: user-only (text/QR) or also an encrypted copy on the mesh.
