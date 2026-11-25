@@ -45,7 +45,7 @@ fn wrap_name(w: Wrap) -> &'static str {
     }
 }
 
-fn master(node: &Node) -> Result<XPriv, String> {
+pub(crate) fn master(node: &Node) -> Result<XPriv, String> {
     let phrase = node.app.phrase().map_err(|e| e.to_string())?;
     let seed = seed_from_phrase(&phrase).map_err(|e| e.to_string())?;
     XPriv::master(&seed[..]).map_err(|e| e.to_string())
@@ -63,7 +63,7 @@ pub(crate) fn list_raw(node: &Node) -> Vec<Value> {
     node.app.vaults().ok().flatten().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
-fn save(node: &Node, l: &[Value]) -> Result<(), String> {
+pub(crate) fn save(node: &Node, l: &[Value]) -> Result<(), String> {
     node.app.put_vaults(json!(l).to_string().as_bytes()).map_err(|e| e.to_string())
 }
 
@@ -168,7 +168,7 @@ pub fn import(node: &Node, chain_key: &str, descriptor: &str, name: &str, backup
     store(node, p, d, name, backup, false)
 }
 
-fn find(node: &Node, id: &str) -> Result<(Value, &'static ChainParams, Descriptor), String> {
+pub(crate) fn find(node: &Node, id: &str) -> Result<(Value, &'static ChainParams, Descriptor), String> {
     let v = list_raw(node).into_iter().find(|v| v["id"] == id).ok_or("no such vault")?;
     let p = crate::chains::find(v["chain"].as_str().unwrap_or("")).ok_or("the vault's chain isn't known here")?;
     let d = Descriptor::parse(v["descriptor"].as_str().unwrap_or(""))?;
@@ -208,35 +208,89 @@ fn watch(node: &Node, p: &ChainParams) -> Option<Watch> {
     (installed && node.chain.addresses_on(p.chain_no).unwrap_or(false)).then_some(Watch::Here)
 }
 
-/// The vault's unspent coins and balance: every address up to [`GAP`] past the last receive address given out,
-/// on both branches.
-pub fn coins(node: &Node, id: &str) -> Result<Value, String> {
-    let (v, p, d) = find(node, id)?;
-    let w = watch(node, p).ok_or_else(|| format!("this arcade doesn't keep addresses for {} (install it with its address index, or borrow it)", p.name))?;
-    let upto = v["receive_next"].as_u64().unwrap_or(0) as u32 + GAP;
+/// Every address of a vault up to [`GAP`] past the last receive address given out, on both branches:
+/// (change, index, address, script).
+fn addresses(v: &Value, p: &ChainParams, d: &Descriptor) -> Result<Vec<(bool, u32, String, Vec<u8>)>, String> {
+    let upto = v["receive_next"].as_u64().unwrap_or(0).max(v["change_next"].as_u64().unwrap_or(0)) as u32 + GAP;
     let mut out = Vec::new();
-    let mut balance = 0u64;
     for change in [false, true] {
         for i in 0..upto {
-            let script = d.at(change, i)?.output_script(d.wrap);
-            let found: Vec<(String, u32, u64, Option<u32>)> = match w {
-                Watch::Here => node
-                    .chain
-                    .coins_for_script(p, &script)
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .map(|(op, value, h)| (op.txid.to_hex(), op.vout, value, Some(h)))
-                    .collect(),
-                Watch::Borrowed => crate::borrow::spendable(node, p, &script).into_iter().map(|u| (u.outpoint.txid.to_hex(), u.outpoint.vout, u.value, None)).collect(),
-            };
-            for (txid, vout, value, height) in found {
-                balance += value;
-                out.push(json!({"txid": txid, "vout": vout, "value": value, "height": height,
-                                "address": d.address(p, change, i)?, "change": change, "index": i}));
+            let ms = d.at(change, i)?;
+            out.push((change, i, ms.address(p, d.wrap)?, ms.output_script(d.wrap)));
+        }
+    }
+    Ok(out)
+}
+
+/// Every vault script of the account in use on a chain: the borrowed-chain follower reads blocks for these too
+/// (crate::borrow::follow), kept apart from the wallet's own coins.
+pub fn scripts_on(node: &Node, p: &ChainParams) -> Vec<Vec<u8>> {
+    list_raw(node)
+        .into_iter()
+        .filter(|v| v["chain"] == p.key)
+        .filter_map(|v| {
+            let d = Descriptor::parse(v["descriptor"].as_str()?).ok()?;
+            addresses(&v, p, &d).ok()
+        })
+        .flatten()
+        .map(|(_, _, _, s)| s)
+        .collect()
+}
+
+/// The vault's unspent coins and balance, at every address [`addresses`] gives. On a borrowed chain: the coins
+/// followed here, and with `lenders` also a lender's scan (coins from before borrowing started).
+pub(crate) fn coins_with(node: &Node, id: &str, lenders: bool) -> Result<Value, String> {
+    let (v, p, d) = find(node, id)?;
+    let w = watch(node, p).ok_or_else(|| format!("this arcade doesn't keep addresses for {} (install it with its address index, or borrow it)", p.name))?;
+    let all = addresses(&v, p, &d)?;
+    // A followed coin's block (none while its transaction waits).
+    let heights = if matches!(w, Watch::Borrowed) { crate::borrow::coin_heights(node, p.key) } else { Default::default() };
+    let mut found: Vec<(arcade_chain::OutPoint, u64, Option<u32>, usize)> = Vec::new();
+    for (n, (_, _, _, script)) in all.iter().enumerate() {
+        match w {
+            Watch::Here => {
+                for (op, value, h) in node.chain.coins_for_script(p, script).map_err(|e| e.to_string())? {
+                    found.push((op, value, Some(h), n));
+                }
+            }
+            Watch::Borrowed => {
+                for u in crate::borrow::spendable(node, p, script) {
+                    found.push((u.outpoint, u.value, heights.get(&u.outpoint).copied(), n));
+                }
             }
         }
     }
-    Ok(json!({"id": id, "chain": p.key, "balance": balance, "coins": out, "borrowed": matches!(w, Watch::Borrowed), "looked_at": upto}))
+    let mut note = None;
+    if matches!(w, Watch::Borrowed) && lenders {
+        let addrs: Vec<String> = all.iter().map(|x| x.2.clone()).collect();
+        match crate::borrow::lender_coins(node, p, &addrs) {
+            Ok(lent) => {
+                for c in lent {
+                    if let Some(n) = all.iter().position(|x| x.3 == c.script) {
+                        if !found.iter().any(|f| f.0 == c.op) {
+                            found.push((c.op, c.value, (c.height > 0).then_some(c.height), n));
+                        }
+                    }
+                }
+            }
+            Err(e) => note = Some(format!("no lender's coin scan: {e}")),
+        }
+    }
+    let balance: u64 = found.iter().map(|f| f.1).sum();
+    let coins: Vec<Value> = found
+        .iter()
+        .map(|(op, value, height, n)| {
+            let (change, i, a, _) = &all[*n];
+            json!({"txid": op.txid.to_hex(), "vout": op.vout, "value": value, "height": height, "address": a, "change": change, "index": i})
+        })
+        .collect();
+    Ok(json!({"id": id, "chain": p.key, "balance": balance, "coins": coins, "borrowed": matches!(w, Watch::Borrowed),
+              "looked_at": all.len() / 2, "note": note}))
+}
+
+/// A vault's coins and balance (on a borrowed chain, a lender's scan too).
+pub fn coins(node: &Node, id: &str) -> Result<Value, String> {
+    coins_with(node, id, true)
 }
 
 /// The account's vaults (on one chain, or all), with balances where this arcade keeps that chain's addresses.
@@ -249,7 +303,8 @@ pub fn list(node: &Node, chain_key: Option<&str>) -> Value {
         })
         .map(|mut v| {
             let id = v["id"].as_str().unwrap_or("").to_string();
-            v["balance"] = coins(node, &id).ok().map(|c| c["balance"].clone()).unwrap_or(Value::Null);
+            // (The coins followed here only: the list is drawn often; a vault's own view asks lenders too.)
+            v["balance"] = coins_with(node, &id, false).ok().map(|c| c["balance"].clone()).unwrap_or(Value::Null);
             v
         })
         .collect();

@@ -336,6 +336,16 @@ impl Psbt {
         Self::locate(&self.outputs[o], O_BIP32, d, &out.script_pubkey).is_some_and(|(change, _, _)| change)
     }
 
+    /// How many partial signatures input `i` carries (not checked: [`Psbt::finalize_vault`] checks them).
+    pub fn signatures(&self, i: usize) -> usize {
+        self.inputs.get(i).map_or(0, |m| m.iter().filter(|(k, _)| k.len() == 34 && k[0] == I_PARTIAL_SIG).count())
+    }
+
+    /// Whether input `i` has its final scriptSig or witness.
+    pub fn is_final(&self, i: usize) -> bool {
+        self.inputs.get(i).is_some_and(Self::finalized)
+    }
+
     fn finalized(m: &Map) -> bool {
         get(m, &[I_FINAL_SCRIPTSIG]).is_some() || get(m, &[I_FINAL_WITNESS]).is_some()
     }

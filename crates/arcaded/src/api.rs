@@ -652,6 +652,27 @@ fn dispatch_cmd(node: &Node, req: &Value) -> Result<Value, String> {
             crate::msigsvc::address(node, &s("id").ok_or("id required")?, index, req["change"].as_bool().unwrap_or(false))
         }
         "multisig.coins" => crate::msigsvc::coins(node, &s("id").ok_or("id required")?),
+        // Spending from a vault (crate::msigspend; docs/MULTISIG.md phase 5).
+        "multisig.propose" => {
+            let all = req["all"].as_bool().unwrap_or(false);
+            let amount = match &req["amount"] {
+                Value::Number(n) => n.as_u64().ok_or("amount is a whole number of the smallest unit")?,
+                Value::String(t) if !t.is_empty() => t.parse().map_err(|_| "amount is a whole number of the smallest unit")?,
+                _ if all => 0,
+                _ => return Err("amount required (or all: true)".into()),
+            };
+            let coins: Vec<String> = match &req["coins"] {
+                Value::Array(a) => a.iter().filter_map(|c| c.as_str().map(String::from)).collect(),
+                Value::String(t) => t.split([',', ' ', '\n']).filter(|c| !c.is_empty()).map(String::from).collect(),
+                _ => Vec::new(),
+            };
+            crate::msigspend::propose(node, &s("id").ok_or("id required")?, &s("to").ok_or("to required")?, amount, all, &coins)
+        }
+        "multisig.card" => crate::msigspend::card(node, &s("id").ok_or("id required")?, s("psbt").as_deref(), s("proposal").as_deref()),
+        "multisig.merge" => crate::msigspend::merge(node, &s("id").ok_or("id required")?, &s("psbt").ok_or("psbt required")?),
+        "multisig.sign" => crate::msigspend::sign(node, &s("id").ok_or("id required")?, s("psbt").as_deref(), s("proposal").as_deref()),
+        "multisig.finalize" => crate::msigspend::finalize(node, &s("id").ok_or("id required")?, s("psbt").as_deref(), s("proposal").as_deref(), req["send"].as_bool().unwrap_or(false)),
+        "multisig.drop" => crate::msigspend::drop_proposal(node, &s("id").ok_or("id required")?, &s("proposal").ok_or("proposal required")?),
         "multisig.remove" => crate::msigsvc::remove(node, &s("id").ok_or("id required")?),
         "wallet.import_remove" => crate::importsvc::remove(node, &s("chain").ok_or("chain required")?, &s("address").ok_or("address required")?),
         "wallet.links" => {

@@ -1,6 +1,6 @@
 # Multisig on ARCADE's UTXO chains: a plan
 
-Status: **design agreed; phases 1 (scripts, addresses, checking), 2 (xpubs, descriptors), 3 (PSBTs) and 4 (watch-only vaults) built.** For review before any code. Where this page and the code disagree later,
+Status: **design agreed; phases 1 (scripts, addresses, checking), 2 (xpubs, descriptors), 3 (PSBTs), 4 (watch-only vaults) and 5 (spending) built.** For review before any code. Where this page and the code disagree later,
 the code is right and this page has a bug.
 
 Goal: a coin can be locked so that **M of N keys** must sign to spend it, on every UTXO chain ARCADE keeps where the
@@ -183,6 +183,14 @@ and refused until phase 6 builds it. In the window (desktop app and `/ui/`, one 
 on a test chain: new vault (this arcade's key shown to copy, two other keys pasted), add from a descriptor, and per
 vault its receive address with QR, coins, co-signers (here / elsewhere) and the descriptor as text and QR. Coins are
 read for every address up to 20 past the last receive address given out, on both branches.
+
+Phase 5 as built: `multisig.propose` (largest coins first, or `coins` picked; change to the vault's next change
+address; `all` sweeps), `multisig.card` (outputs as payment or change back to the vault, checked by key paths; fee;
+signatures per coin; whether this arcade still sees each coin unspent; a warning over 5% fee), `multisig.sign`
+(refused when a coin is seen spent here), `multisig.merge` (a co-signer's copy; conflicts refused),
+`multisig.finalize` (`send` broadcasts as `tx.broadcast` does) and `multisig.drop`. Proposals are kept on the vault's
+record (ten at most). A foreign output is shown as a payment, never as change. Borrowed chains: vault addresses are
+followed apart from the wallet's own coins, and a vault's view also asks a lender for older coins.
 
 ## 5. Decisions (2026-11-24)
 

@@ -196,6 +196,12 @@ marks the change. Hand `psbt` to the app as `{type: "psbt", chain, psbt, finaliz
 | `multisig.list` | `/api/v1/multisig/list` | local | chain? | Your vaults (on one chain, or all) with their descriptors, co-signers (here or elsewhere) and balances. |
 | `multisig.address` | `/api/v1/multisig/address` | local | id, index?, change? | A vault's address: index on the receive (or change) branch; without index the next new receive address. |
 | `multisig.coins` | `/api/v1/multisig/coins` | local | id | A vault's unspent coins and balance, from this arcade's address index or borrowed chain data. |
+| `multisig.propose` | `/api/v1/multisig/propose` | local | id, to, amount?, all?, coins? | Propose a payment from a vault: amount (smallest units) to an address, or all: everything less the fee; coins ("txid:vout", a list) picks which coins, else the largest first. Change goes back to the vault's next change address. Returns the PSBT (give it to a co-signer) and its card; kept here as a proposal. |
+| `multisig.card` | `/api/v1/multisig/card` | local | id, psbt?, proposal? | What signing a vault spend approves: each output (payment or change back to the vault, checked by its key paths), the fee, each coin's signatures and whether this arcade sees it unspent, and whether it is ready. |
+| `multisig.merge` | `/api/v1/multisig/merge` | local | id, psbt | Merge a co-signer's copy of a vault spend into the proposal kept here (a field the two disagree on is refused). |
+| `multisig.sign` | `/api/v1/multisig/sign` | local | id, psbt?, proposal? | Sign a vault spend with this wallet's key in the vault (SIGHASH_ALL; refused when this arcade sees one of its coins spent). Returns the PSBT to pass on. |
+| `multisig.finalize` | `/api/v1/multisig/finalize` | local | id, psbt?, proposal?, send? | Finish a vault spend that has enough signatures (each checked) and, with send, broadcast it as tx.broadcast does; otherwise its hex. |
+| `multisig.drop` | `/api/v1/multisig/drop` | local | id, proposal | Forget a vault spend proposal here. |
 | `multisig.remove` | `/api/v1/multisig/remove` | local | id | Forget a vault here (its coins stay; its descriptor is needed to see or spend them again). |
 
 ### Dd

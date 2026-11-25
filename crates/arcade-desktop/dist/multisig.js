@@ -55,6 +55,7 @@ function vaultDetail(ch, v, tk) {
       h("button", { onclick: async () => { try { showAddr(await api("multisig.address", { id: v.id })); } catch (e) { msg($("ms-msg"), e.message, "bad"); } } }, "New receive address"),
       h("button", { onclick: () => { if (confirm(`Forget the vault "${v.name || v.id}" here? Its coins stay where they are; you need its descriptor to see or spend them again.`)) api("multisig.remove", { id: v.id }).then(() => { MS.open = null; drawVaults(ch); }).catch((e) => msg($("ms-msg"), e.message, "bad")); } }, "Remove from this arcade")),
     h("h3", {}, "Coins"), coinsBox,
+    spendBox(ch, v, tk),
     h("h3", {}, "Co-signers"),
     h("div", { class: "wl-rows" }, ...v.signers.map((s, i) => h("div", { class: "wl-row" }, h("span", { class: "ic" }, String(i + 1)),
       h("div", { class: "mid" }, h("div", {}, s.where === "here" ? "This wallet" : "Another co-signer"), h("div", { class: "s", translate: "no" }, s.key.slice(0, 32) + "…"))))),
@@ -121,4 +122,59 @@ function addVaultForm(ch) {
         } catch (e) { msg($("ms-msg"), e.message, "bad"); }
       } }, "Add vault"),
       h("button", { onclick: () => { MS.form = null; drawVaults(ch); } }, "Cancel")));
+}
+
+/* Spending (phase 5): propose a payment, look at its card, sign, pass the PSBT to a co-signer (text or QR), merge
+ * theirs, finalize and send once two have signed. */
+function msSats(text) {
+  const t = String(text).trim();
+  if (!/^\d+(\.\d{1,8})?$/.test(t)) return null;
+  const [w, f = ""] = t.split(".");
+  return Number(w) * 1e8 + Number((f + "00000000").slice(0, 8));
+}
+
+function cardView(c, tk) {
+  return h("div", { class: "wl-rows" },
+    ...c.outputs.map((o) => h("div", { class: "wl-row" }, h("span", { class: o.change ? "ic in" : "ic out" }, o.change ? "↺" : "↑"),
+      h("div", { class: "mid" }, h("div", { translate: "no" }, o.address || "(a script with no address)"), h("div", { class: "s" }, o.change ? "change back to this vault" : "payment")),
+      h("span", { class: "amt" }, `${coinNum(o.value)} ${tk}`))),
+    h("div", { class: "wl-hint" }, `Fee ${coinNum(c.fee)} ${tk} · ${c.inputs.length} coin(s) · signatures ${Math.min(...c.inputs.map((i) => i.final ? c.needed : i.signatures))} of ${c.needed}${c.ready ? " · ready to send" : ""}`),
+    ...c.warnings.map((w) => h("div", { class: "msg bad" }, w)));
+}
+
+function spendBox(ch, v, tk) {
+  const out = h("div", {});
+  const say = (t, kind) => msg($("ms-msg"), t, kind);
+  const redraw = () => drawVaults(ch);
+  const to = h("input", { placeholder: `${ch.name} address`, autocomplete: "off", style: "flex:1;min-width:16em" });
+  const amt = h("input", { placeholder: "amount", inputmode: "decimal", autocomplete: "off", style: "max-width:9em" });
+  const all = h("input", { type: "checkbox" });
+  const paste = h("textarea", { rows: 3, placeholder: "a co-signer's PSBT (base64)", spellcheck: "false", autocomplete: "off" });
+  const act = (cmd, args, done) => api(cmd, { id: v.id, ...args }).then((r) => { done && done(r); redraw(); }).catch((e) => say(e.message, "bad"));
+  const props = (v.proposals || []).slice().reverse();
+  out.append(
+    h("h3", {}, "Send from this vault"),
+    h("p", { class: "wl-hint" }, "Proposing builds the payment; it needs 2 of the 3 keys before it can be sent. Give the PSBT to another co-signer to sign."),
+    h("div", { class: "row" }, to, amt, h("span", { class: "wl-unit" }, tk), h("label", { class: "wl-hint" }, all, " everything")),
+    h("div", { class: "row" }, h("button", { class: "primary", onclick: () => {
+      const sats = all.checked ? 0 : msSats(amt.value);
+      if (!all.checked && !sats) return say("Enter an amount.", "bad");
+      act("multisig.propose", { to: to.value.trim(), amount: sats, all: all.checked }, () => say("Proposed. Sign it, then pass the PSBT on.", "ok"));
+    } }, "Propose")),
+    ...props.map((pr) => {
+      const box = h("div", { class: "wl-panel" },
+        h("div", { class: "wl-hint", translate: "no" }, `Proposal ${pr.id.slice(0, 12)}… · ${pr.sent ? "sent " + pr.sent : pr.ready ? "ready" : "waiting for signatures"}`));
+      const cardBox = h("div", {}, h("div", { class: "x-empty" }, "Loading…"));
+      box.append(cardBox);
+      api("multisig.card", { id: v.id, proposal: pr.id }).then((r) => cardBox.replaceChildren(cardView(r.card, tk))).catch((e) => cardBox.replaceChildren(h("div", { class: "msg bad" }, e.message)));
+      if (!pr.sent) box.append(h("div", { class: "row" },
+        v.signs_here ? h("button", { onclick: () => act("multisig.sign", { proposal: pr.id }, () => say("Signed with this wallet's key.", "ok")) }, "Sign") : null,
+        pr.ready ? h("button", { class: "primary", onclick: () => { if (confirm("Send this payment now?")) act("multisig.finalize", { proposal: pr.id, send: true }, (r) => say(`Sent: ${r.txid}`, "ok")); } }, "Finalize and send") : null,
+        h("button", { class: "small", onclick: () => navigator.clipboard.writeText(pr.psbt) }, "Copy PSBT"),
+        h("button", { class: "small", onclick: () => act("multisig.drop", { proposal: pr.id }) }, "Forget")));
+      if (!pr.sent) box.append(h("details", {}, h("summary", {}, "PSBT as text and QR"), h("textarea", { rows: 3, readonly: true, spellcheck: "false" }, pr.psbt), qrImg(pr.psbt)));
+      return box;
+    }),
+    h("div", {}, paste, h("div", { class: "row" }, h("button", { onclick: () => act("multisig.merge", { psbt: paste.value.trim() }, () => say("Merged the co-signer's copy.", "ok")) }, "Add a co-signer's PSBT"))));
+  return out;
 }
