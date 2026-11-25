@@ -90,7 +90,7 @@ pub fn key(node: &Node, chain_key: &str, wrap: &str) -> Result<Value, String> {
     let m = master(node)?;
     let n = next_number(node, &m);
     let k = Descriptor::account_key(&m, p.bip44_coin_type, n, w, version(p))?;
-    Ok(json!({"chain": p.key, "wrap": wrap_name(w), "vault": n, "key": k.to_string()}))
+    Ok(json!({"chain": p.key, "wrap": wrap_name(w), "vault": n, "key": k.to_string(), "node": node.id_hex()}))
 }
 
 fn signers(node: &Node, d: &Descriptor) -> Vec<Value> {
@@ -99,7 +99,8 @@ fn signers(node: &Node, d: &Descriptor) -> Vec<Value> {
         .iter()
         .map(|k| {
             let here = m.as_ref().is_some_and(|m| Descriptor { wrap: d.wrap, m: 1, keys: vec![k.clone()] }.own_key(m, false, 0).is_some());
-            json!({"key": k.to_string(), "where": if here { "here" } else { "elsewhere" }})
+            // The arcade a key is on (its mesh node id): this one for our own key; others named with multisig.set_node.
+            json!({"key": k.to_string(), "where": if here { "here" } else { "elsewhere" }, "node": if here { Some(node.id_hex()) } else { None }})
         })
         .collect()
 }

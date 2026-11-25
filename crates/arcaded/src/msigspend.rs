@@ -101,13 +101,15 @@ pub fn card_of(node: &Node, p: &ChainParams, d: &Descriptor, ps: &Psbt) -> Resul
               "needed": d.m, "ready": ready, "warnings": warnings}))
 }
 
-fn store_proposal(node: &Node, id: &str, ps: &Psbt, card: &Value, sent: Option<&str>) -> Result<(), String> {
+pub(crate) fn store_proposal(node: &Node, id: &str, ps: &Psbt, card: &Value, sent: Option<&str>) -> Result<(), String> {
     let mut l = list_raw(node);
     let v = l.iter_mut().find(|v| v["id"] == id).ok_or("no such vault")?;
     let key = ps.tx.txid.to_hex();
     let mut props: Vec<Value> = v["proposals"].as_array().cloned().unwrap_or_default();
+    // Who sent it here first (crate::msigmesh) stays with it.
+    let from = props.iter().find(|x| x["id"] == key.as_str()).map(|x| x["from"].clone()).unwrap_or(Value::Null);
     props.retain(|x| x["id"] != key.as_str());
-    props.push(json!({"id": key, "psbt": ps.to_base64(), "paid": card["paid"], "fee": card["fee"], "ready": card["ready"],
+    props.push(json!({"id": key, "from": from, "psbt": ps.to_base64(), "paid": card["paid"], "fee": card["fee"], "ready": card["ready"],
                       "to": card["outputs"].as_array().map(|o| o.iter().filter(|x| x["change"] == false).map(|x| x["address"].clone()).collect::<Vec<_>>()),
                       "sent": sent, "at": arcade_app::now()}));
     let n = props.len();
@@ -118,7 +120,7 @@ fn store_proposal(node: &Node, id: &str, ps: &Psbt, card: &Value, sent: Option<&
     save(node, &l)
 }
 
-fn proposal(v: &Value, pid: &str) -> Option<String> {
+pub(crate) fn proposal(v: &Value, pid: &str) -> Option<String> {
     v["proposals"].as_array()?.iter().find(|x| x["id"] == pid).and_then(|x| x["psbt"].as_str()).map(String::from)
 }
 

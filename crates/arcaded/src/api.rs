@@ -673,6 +673,9 @@ fn dispatch_cmd(node: &Node, req: &Value) -> Result<Value, String> {
         "multisig.sign" => crate::msigspend::sign(node, &s("id").ok_or("id required")?, s("psbt").as_deref(), s("proposal").as_deref()),
         "multisig.finalize" => crate::msigspend::finalize(node, &s("id").ok_or("id required")?, s("psbt").as_deref(), s("proposal").as_deref(), req["send"].as_bool().unwrap_or(false)),
         "multisig.drop" => crate::msigspend::drop_proposal(node, &s("id").ok_or("id required")?, &s("proposal").ok_or("proposal required")?),
+        // Co-signing over the mesh (crate::msigmesh; docs/MULTISIG.md phase 6).
+        "multisig.set_node" => crate::msigmesh::set_node(node, &s("id").ok_or("id required")?, req["place"].as_u64().ok_or("place required (the co-signer's place in the vault, from 0)")? as usize, &s("arcade").unwrap_or_default()),
+        "multisig.share" => crate::msigmesh::share(node, &s("id").ok_or("id required")?, &s("proposal").ok_or("proposal required")?),
         "multisig.remove" => crate::msigsvc::remove(node, &s("id").ok_or("id required")?),
         "wallet.import_remove" => crate::importsvc::remove(node, &s("chain").ok_or("chain required")?, &s("address").ok_or("address required")?),
         "wallet.links" => {

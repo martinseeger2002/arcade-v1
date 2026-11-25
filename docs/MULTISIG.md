@@ -1,6 +1,6 @@
 # Multisig on ARCADE's UTXO chains: a plan
 
-Status: **design agreed; phases 1 (scripts, addresses, checking), 2 (xpubs, descriptors), 3 (PSBTs), 4 (watch-only vaults) and 5 (spending) built.** For review before any code. Where this page and the code disagree later,
+Status: **design agreed; phases 1 (scripts, addresses, checking), 2 (xpubs, descriptors), 3 (PSBTs), 4 (watch-only vaults), 5 (spending) and 6 (co-signing over the mesh) built.** For review before any code. Where this page and the code disagree later,
 the code is right and this page has a bug.
 
 Goal: a coin can be locked so that **M of N keys** must sign to spend it, on every UTXO chain ARCADE keeps where the
@@ -191,6 +191,15 @@ signatures per coin; whether this arcade still sees each coin unspent; a warning
 `multisig.finalize` (`send` broadcasts as `tx.broadcast` does) and `multisig.drop`. Proposals are kept on the vault's
 record (ten at most). A foreign output is shown as a payment, never as change. Borrowed chains: vault addresses are
 followed apart from the wallet's own coins, and a vault's view also asks a lender for older coins.
+
+Phase 6 as built: the mesh's service channel (`svc.ask`, crate::svcmesh) carries the PSBT, as a service named
+`multisig` built into arcaded, instead of the website-pairing boxes (`id.box_put` is one arcade's ten-minute relay,
+not mesh-wide). Mesh links are end-to-end encrypted, through relays too. Each co-signer key of a vault names the
+arcade it is on (its node id: this one for our own key, others with `multisig.set_node`); `multisig.share` sends a
+proposal to every named arcade. An arcade takes a PSBT only from an arcade named on one of its vaults and only when
+every coin is that vault's; it is merged into the proposal kept there and waits for its user (nothing is signed on
+arrival); the proposal keeps who sent it. Several people on one arcade: each account keeps its own copy of the
+vault and signs in turn (accounts switch in the window). "Waiting for N more" is the card's signatures of `needed`.
 
 ## 5. Decisions (2026-11-24)
 

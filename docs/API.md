@@ -202,6 +202,8 @@ marks the change. Hand `psbt` to the app as `{type: "psbt", chain, psbt, finaliz
 | `multisig.sign` | `/api/v1/multisig/sign` | local | id, psbt?, proposal? | Sign a vault spend with this wallet's key in the vault (SIGHASH_ALL; refused when this arcade sees one of its coins spent). Returns the PSBT to pass on. |
 | `multisig.finalize` | `/api/v1/multisig/finalize` | local | id, psbt?, proposal?, send? | Finish a vault spend that has enough signatures (each checked) and, with send, broadcast it as tx.broadcast does; otherwise its hex. |
 | `multisig.drop` | `/api/v1/multisig/drop` | local | id, proposal | Forget a vault spend proposal here. |
+| `multisig.set_node` | `/api/v1/multisig/set_node` | local | id, place, arcade | Name the arcade (its mesh node id, as multisig.key gives it) the co-signer key at place (from 0, as multisig.list shows the co-signers) is on, so spends can be sent there and taken from there; "" forgets it. |
+| `multisig.share` | `/api/v1/multisig/share` | local | id, proposal | Send a vault spend (as signed here so far) to every co-signer's arcade named on the vault, over the mesh (end-to-end encrypted). Each takes it only from an arcade named on its vault, and only for that vault's coins; nothing is signed there until its user signs. |
 | `multisig.remove` | `/api/v1/multisig/remove` | local | id | Forget a vault here (its coins stay; its descriptor is needed to see or spend them again). |
 
 ### Dd

@@ -166,6 +166,8 @@ cmds! {
     "multisig.sign" Local "id, psbt?, proposal?" "Sign a vault spend with this wallet's key in the vault (SIGHASH_ALL; refused when this arcade sees one of its coins spent). Returns the PSBT to pass on.";
     "multisig.finalize" Local "id, psbt?, proposal?, send?" "Finish a vault spend that has enough signatures (each checked) and, with send, broadcast it as tx.broadcast does; otherwise its hex.";
     "multisig.drop" Local "id, proposal" "Forget a vault spend proposal here.";
+    "multisig.set_node" Local "id, place, arcade" "Name the arcade (its mesh node id, as multisig.key gives it) the co-signer key at place (from 0, as multisig.list shows the co-signers) is on, so spends can be sent there and taken from there; \"\" forgets it.";
+    "multisig.share" Local "id, proposal" "Send a vault spend (as signed here so far) to every co-signer's arcade named on the vault, over the mesh (end-to-end encrypted). Each takes it only from an arcade named on its vault, and only for that vault's coins; nothing is signed there until its user signs.";
     "multisig.remove" Local "id" "Forget a vault here (its coins stay; its descriptor is needed to see or spend them again).";
     "tag.check" Public "tag, chain?" "Whether a @tag is free and valid on one chain (every chain has its own @tags): tag may name it (alice.doge), or chain does; else where new tags go. Answers full (alice.doge) and label (@alice · DOGE).";
     "tag.claim" Wallet "tag, chain?, client_ref?" "Claim a @tag on one chain: ARCADE, Pepecoin testnet (test coins asked for by themselves), or a mainnet chain tags live on here (pep, doge, dgb: kept with their ledger or borrowed; paid in that coin). tag may name the chain (alice.doge).";
@@ -548,6 +550,7 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("all", "boolean", "All of them, not only the newest or own."),
     ("all_kinds", "boolean", "Also spend the wallet's other address types' coins."),
     ("amount", "integer|string", "An amount in the chain's smallest unit (satoshis; 8 decimals unless the answer says otherwise)."),
+    ("arcade", "string", "An arcade's mesh node id (64 hex)."),
     ("args", "object", "The read's own arguments."),
     ("author", "string", "An author's @tag or address."),
     ("auto", "boolean", "Do it automatically (true) or only when asked (false)."),
@@ -784,6 +787,7 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("unchecked", "string", "What happens to content not checked yet: show_here or cover."),
     ("day_cap", "integer", "A daily spending cap, in ARCADE base units."),
     ("descriptor", "string", "An output descriptor with its checksum (sh/wsh/sh(wsh(sortedmulti(...))))."),
+    ("place", "integer", "A place in a list, from 0 (a multisig vault's co-signer keys)."),
     ("proposal", "string", "A multisig vault spend proposal (its unsigned txid)."),
     ("value", "string", "A value."),
     ("verdict", "string", "A verdict."),

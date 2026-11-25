@@ -53,6 +53,7 @@ mod borrow;
 mod appsvc;
 mod foldersvc;
 mod apppub;
+mod msigmesh;
 mod msigspend;
 mod msigsvc;
 mod walletsvc;

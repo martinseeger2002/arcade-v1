@@ -57,8 +57,14 @@ function vaultDetail(ch, v, tk) {
     h("h3", {}, "Coins"), coinsBox,
     spendBox(ch, v, tk),
     h("h3", {}, "Co-signers"),
-    h("div", { class: "wl-rows" }, ...v.signers.map((s, i) => h("div", { class: "wl-row" }, h("span", { class: "ic" }, String(i + 1)),
-      h("div", { class: "mid" }, h("div", {}, s.where === "here" ? "This wallet" : "Another co-signer"), h("div", { class: "s", translate: "no" }, s.key.slice(0, 32) + "…"))))),
+    h("p", { class: "wl-hint" }, "Name the arcade each other co-signer uses (its node id, shown with its key) to send spends there over the mesh and take theirs."),
+    h("div", { class: "wl-rows" }, ...v.signers.map((s, i) => {
+      const nodeIn = h("input", { placeholder: "their arcade's node id", autocomplete: "off", spellcheck: "false", style: "flex:1;min-width:14em", value: s.node || "" });
+      return h("div", { class: "wl-row" }, h("span", { class: "ic" }, String(i + 1)),
+        h("div", { class: "mid" }, h("div", {}, s.where === "here" ? "This wallet" : "Another co-signer"), h("div", { class: "s", translate: "no" }, s.key.slice(0, 32) + "…"),
+          s.where === "here" ? h("div", { class: "s" }, "on this arcade") : h("div", { class: "row" }, nodeIn,
+            h("button", { class: "small", onclick: () => api("multisig.set_node", { id: v.id, place: i, arcade: nodeIn.value.trim() }).then(() => { msg($("ms-msg"), "Saved.", "ok"); drawVaults(ch); }).catch((e) => msg($("ms-msg"), e.message, "bad")) }, "Save"))));
+    })),
     h("h3", {}, "Descriptor (backup)"),
     h("p", { class: "wl-hint" }, "Give this to every co-signer and keep it with your 12 words: without it, two phrases are not enough to find or spend the vault's coins. It shows every address of the vault, so keep it private."),
     h("textarea", { rows: 4, readonly: true, spellcheck: "false" }, v.descriptor),
@@ -82,7 +88,9 @@ function newVaultForm(ch) {
       const k = await api("multisig.key", { chain: ch.key, wrap: wrap.value });
       keyBox.replaceChildren(h("p", { class: "wl-hint" }, `Your key for vault ${k.vault}: give it to the other co-signers if one of them makes the vault instead.`),
         h("textarea", { rows: 3, readonly: true, spellcheck: "false" }, k.key),
-        h("div", { class: "row" }, h("button", { class: "small", onclick: () => navigator.clipboard.writeText(k.key) }, "Copy my key")));
+        h("div", { class: "row" }, h("button", { class: "small", onclick: () => navigator.clipboard.writeText(k.key) }, "Copy my key")),
+        h("p", { class: "wl-hint" }, "This arcade's node id, for co-signers who want to send spends here:"),
+        h("div", { class: "row" }, h("code", {}, k.node), h("button", { class: "small", onclick: () => navigator.clipboard.writeText(k.node) }, "Copy")));
     } catch (e) { keyBox.replaceChildren(h("p", { class: "msg bad" }, e.message)); }
   };
   wrap.onchange = showKey;
@@ -163,13 +171,14 @@ function spendBox(ch, v, tk) {
     } }, "Propose")),
     ...props.map((pr) => {
       const box = h("div", { class: "wl-panel" },
-        h("div", { class: "wl-hint", translate: "no" }, `Proposal ${pr.id.slice(0, 12)}… · ${pr.sent ? "sent " + pr.sent : pr.ready ? "ready" : "waiting for signatures"}`));
+        h("div", { class: "wl-hint", translate: "no" }, `Proposal ${pr.id.slice(0, 12)}… · ${pr.sent ? "sent " + pr.sent : pr.ready ? "ready" : "waiting for signatures"}${pr.from ? " · from arcade " + pr.from.slice(0, 12) + "…" : ""}`));
       const cardBox = h("div", {}, h("div", { class: "x-empty" }, "Loading…"));
       box.append(cardBox);
       api("multisig.card", { id: v.id, proposal: pr.id }).then((r) => cardBox.replaceChildren(cardView(r.card, tk))).catch((e) => cardBox.replaceChildren(h("div", { class: "msg bad" }, e.message)));
       if (!pr.sent) box.append(h("div", { class: "row" },
         v.signs_here ? h("button", { onclick: () => act("multisig.sign", { proposal: pr.id }, () => say("Signed with this wallet's key.", "ok")) }, "Sign") : null,
         pr.ready ? h("button", { class: "primary", onclick: () => { if (confirm("Send this payment now?")) act("multisig.finalize", { proposal: pr.id, send: true }, (r) => say(`Sent: ${r.txid}`, "ok")); } }, "Finalize and send") : null,
+        v.signers.some((x) => x.where !== "here" && x.node) ? h("button", { onclick: () => act("multisig.share", { proposal: pr.id }, (r) => say(`Sent to ${r.sent.filter((x) => x.ok).length} of ${r.sent.length} co-signer arcade(s).${r.sent.filter((x) => !x.ok).map((x) => " " + x.error).join("")}`, r.sent.every((x) => x.ok) ? "ok" : "bad")) }, "Send to co-signers' arcades") : null,
         h("button", { class: "small", onclick: () => navigator.clipboard.writeText(pr.psbt) }, "Copy PSBT"),
         h("button", { class: "small", onclick: () => act("multisig.drop", { proposal: pr.id }) }, "Forget")));
       if (!pr.sent) box.append(h("details", {}, h("summary", {}, "PSBT as text and QR"), h("textarea", { rows: 3, readonly: true, spellcheck: "false" }, pr.psbt), qrImg(pr.psbt)));

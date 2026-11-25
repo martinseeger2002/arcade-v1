@@ -336,6 +336,11 @@ impl Psbt {
         Self::locate(&self.outputs[o], O_BIP32, d, &out.script_pubkey).is_some_and(|(change, _, _)| change)
     }
 
+    /// Whether every input is a coin of vault `d` (as signing and finalizing check it).
+    pub fn check_vault(&self, p: &ChainParams, d: &Descriptor) -> Result<(), String> {
+        self.vault_inputs(p, d).map(|_| ())
+    }
+
     /// How many partial signatures input `i` carries (not checked: [`Psbt::finalize_vault`] checks them).
     pub fn signatures(&self, i: usize) -> usize {
         self.inputs.get(i).map_or(0, |m| m.iter().filter(|(k, _)| k.len() == 34 && k[0] == I_PARTIAL_SIG).count())
