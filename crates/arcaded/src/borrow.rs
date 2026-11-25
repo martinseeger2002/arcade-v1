@@ -356,7 +356,12 @@ fn all_lenders(node: &Node, p: &ChainParams) -> Vec<String> {
     }
     let rtts: HashMap<String, u64> = ST.health.lock().unwrap().iter().map(|(a, x)| (a.clone(), if x.rtt_ms == 0 { 5_000 } else { x.rtt_ms })).collect();
     let rtt = |a: &str| rtts.get(a).copied().unwrap_or(5_000);
-    v.retain(|a| recent_fails(a) < 3);
+    // Lenders failing lately drop out, unless every one of them does: then the asking arcade is the slow side (a loaded
+    // laptop whose asks all time out, Kiko 2026-11-25: love's wallet read 0 with no lender left), and the least failed
+    // are still asked.
+    if v.iter().any(|a| recent_fails(a) < 3) {
+        v.retain(|a| recent_fails(a) < 3);
+    }
     // A link of our own first: big answers over a mesh link hold up its other traffic.
     v.sort_by_key(|a| (recent_fails(a), crate::crvia::peer_of(a).is_some(), rtt(a)));
     v

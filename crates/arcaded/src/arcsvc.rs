@@ -50,7 +50,7 @@ use arcade_mesh::bk::{join_blocks, split_blocks, CHUNK};
 use arcade_mesh::link::{Frame, Link, LinkError};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -105,14 +105,49 @@ impl Clock {
     }
 }
 
+thread_local! {
+    /// Set on the thread reading this arcade's own stored blocks back at start ([`TrustStored`]).
+    static TRUST_STORED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While held, proofs of time on this thread pass unchecked: the blocks read back from this arcade's own store had
+/// theirs checked when they came in. That check is about 99% of a block's cost at start (the discriminant and every
+/// run of a time keeper's segmented proof): 200+ s for 6,000 blocks on the GX10, 7+ minutes on a 2-core laptop, while
+/// the arcade answered only "starting" (Kiko 2026-11-25). Blocks from other arcades are always checked.
+struct TrustStored;
+
+impl TrustStored {
+    fn hold() -> TrustStored {
+        TRUST_STORED.with(|t| t.set(true));
+        TrustStored
+    }
+}
+
+impl Drop for TrustStored {
+    fn drop(&mut self) {
+        TRUST_STORED.with(|t| t.set(false));
+    }
+}
+
+fn trusted() -> bool {
+    TRUST_STORED.with(|t| t.get())
+}
+
 impl TimeProofs for Clock {
     fn verify(&self, challenge: &arcade_arc::merkle::Hash, steps: u64, proof: &TimeProof) -> bool {
+        if *self == Clock::Vdf && trusted() {
+            return true;
+        }
         match self {
             Clock::StandIn => StandIn.verify(challenge, steps, proof),
             Clock::Vdf => ChiaVdf.verify(challenge, steps, proof),
         }
     }
     fn verify_pot(&self, challenge: &arcade_arc::merkle::Hash, steps: u64, proof: &TimeProof, most: usize) -> bool {
+        if *self == Clock::Vdf && trusted() {
+            // (Still well formed: its runs add up to the steps the chain asks for.)
+            return arcade_arc::time::segments(proof, steps, most).is_some();
+        }
         match self {
             Clock::StandIn => StandIn.verify_pot(challenge, steps, proof, most),
             Clock::Vdf => ChiaVdf.verify_pot(challenge, steps, proof, most),
@@ -401,7 +436,12 @@ impl Svc {
     /// block it lacks, and one has spoken (or none did for a good while: it may be alone).
     fn caught_up(&self) -> bool {
         let peers = self.peers.lock().unwrap();
-        let behind = peers.values().any(|p| p.wants.is_some() && p.seen.is_some_and(|t| t.elapsed() < LINKED));
+        // A linked arcade named a block we lack, or told a height well past ours lately (a copy far behind whose links
+        // tick slowly under load still isn't caught up: it neither lends nor stops borrowing; Kiko 2026-11-25, love at
+        // 4098 of 6000 read her wallet from her own copy).
+        let ours = TIP_HEIGHT.load(Ordering::Relaxed);
+        let behind = peers.values().any(|p| p.wants.is_some() && p.seen.is_some_and(|t| t.elapsed() < LINKED))
+            || told_past(peers.values().filter_map(|p| p.told_height), ours, Instant::now());
         let up = !behind && (peers.values().any(|p| p.heard) || self.started.elapsed() > ALONE_AFTER);
         drop(peers);
         if up {
@@ -414,6 +454,17 @@ impl Svc {
     fn answers(&self) -> bool {
         self.caught_up() || still_answers(*self.last_up.lock().unwrap(), Instant::now())
     }
+}
+
+/// The running chain's tip height, kept beside the chain's lock so a check that may run under it needn't take it.
+static TIP_HEIGHT: AtomicU64 = AtomicU64::new(0);
+/// How far past our tip a height told by a linked arcade (within TOLD_FOR) means this copy is behind.
+const TOLD_AHEAD: u64 = 3;
+const TOLD_FOR: Duration = Duration::from_secs(600);
+
+/// Whether any of `told` (height, when told) is recent and more than TOLD_AHEAD past `ours`.
+fn told_past(told: impl Iterator<Item = (u64, Instant)>, ours: u64, now: Instant) -> bool {
+    told.into_iter().any(|(h, at)| now.saturating_duration_since(at) < TOLD_FOR && h > ours + TOLD_AHEAD)
 }
 
 /// Whether a copy last caught up at `last_up` still answers its borrowers at `now`.
@@ -556,6 +607,7 @@ fn take(node: &Node, svc: &Svc, block: Block) -> Result<Accepted, ChainError> {
 /// After the tip moved: the transactions of blocks the chain left wait again (oldest first), and the store follows.
 fn new_tip(node: &Node, svc: &Svc, st: &mut State, undone: &[Hash256]) {
     st.since = Instant::now();
+    TIP_HEIGHT.store(st.chain.tip().height, Ordering::Relaxed);
     let back: Vec<Tx> = undone.iter().rev().filter_map(|id| st.chain.block(id)).flat_map(|b| b.txs.iter().skip(1).cloned()).collect();
     // Against the chain's blobs now: after a reorg a blob it held may be new again (counted in the next block's blob budget).
     let (pool, chain) = (&mut st.pool, &st.chain);
@@ -1475,8 +1527,14 @@ pub fn install(node: &Arc<Node>) -> Result<(), String> {
     if REMOVING.load(Ordering::Relaxed) {
         return Err(format!("{} is still being removed; try again in a moment", def.params.name));
     }
-    run(node, def)?;
+    // Noted before the chain comes up: bringing it up replays every stored block (minutes on a slow box), and an
+    // arcade restarted meanwhile forgot the install and started it over (Kiko 2026-11-25: love, 17 starts in a day,
+    // each "not installed here"). A start that fails takes the note back.
     node.app.store.write(|w| w.put(arcade_app::META, &installed_key(&def.net), b"1")).map_err(db_err)?;
+    if let Err(e) = run(node, def) {
+        let _ = node.app.store.write(|w| w.del(arcade_app::META, &installed_key(&def.net)).map(|_| ()));
+        return Err(e);
+    }
     let _ = node.app.event("chains", &format!("installed {}", def.params.name));
     Ok(())
 }
@@ -1539,6 +1597,8 @@ fn run(node: &Arc<Node>, def: &Def) -> Result<(), String> {
     // The chain's one copy on disk is the store's (docs/ARCADECHAIN.md §14.17): its best branch
     // is read back and checked again, block by block.
     let mut held = 0;
+    // Our own stored blocks: their proofs of time were checked when they came (see TrustStored).
+    let trust = TrustStored::hold();
     if node.chain.hash_at(p.chain_no, 0).ok().flatten() == Some(genesis) {
         let tip = node.chain.tip(p.chain_no).map_err(db_err)?.map_or(0, |t| t.height);
         let mut batch = Vec::new();
@@ -1556,6 +1616,7 @@ fn run(node: &Arc<Node>, def: &Def) -> Result<(), String> {
         held += batch.len();
         refused += log::replay(&mut chain, batch);
     }
+    drop(trust);
     // A block log from before is read once more, then goes (one copy). The store's copy from
     // then holds only the transactions: it is made again, whole.
     let old_log = dir.join("blocks.log");
@@ -1699,6 +1760,7 @@ fn run(node: &Arc<Node>, def: &Def) -> Result<(), String> {
         if refused > 0 { format!(" ({refused} no longer taken)") } else { String::new() },
         if weight > 0 { format!("writes with {weight} bytes") } else { "holds nothing yet: it writes once a sealed replica of it is registered".into() },
     );
+    TIP_HEIGHT.store(chain.tip().height, Ordering::Relaxed);
     let svc = Arc::new(Svc {
         net,
         params: p,
@@ -4062,6 +4124,33 @@ mod tests {
         let p2 = store::chain_params(&NET, &new.id_at(0).unwrap());
         reconcile(&db, p2, &new).unwrap();
         stored_matches(&db, p2, &new);
+    }
+
+    /// Proofs of time pass unchecked only while TrustStored is held, and only on that thread; a malformed one never.
+    #[test]
+    fn stored_blocks_proofs_pass_only_while_trusted() {
+        let c = arcade_arc::time::block_challenge(&NET, &Hash256([3; 32]));
+        let junk = TimeProof { output: vec![1; 100], proof: vec![2; 100] };
+        assert!(!Clock::Vdf.verify_pot(&c, 1_000, &junk, 8));
+        {
+            let _t = TrustStored::hold();
+            assert!(Clock::Vdf.verify(&c, 1_000, &junk) && Clock::Vdf.verify_pot(&c, 1_000, &junk, 8));
+            assert!(!Clock::Vdf.verify_pot(&c, 1_000, &TimeProof { output: vec![1; 100], proof: vec![2; 7] }, 8), "malformed");
+            assert!(!std::thread::spawn(move || Clock::Vdf.verify_pot(&c, 1_000, &TimeProof { output: vec![1; 100], proof: vec![2; 100] }, 8)).join().unwrap(), "other threads check");
+            assert!(!Clock::StandIn.verify(&c, 1_000, &junk), "the stand-in is always checked");
+        }
+        assert!(!Clock::Vdf.verify_pot(&c, 1_000, &junk, 8));
+    }
+
+    /// A recent told height well past our tip means behind; an old one, or one within TOLD_AHEAD, doesn't.
+    #[test]
+    fn a_height_told_well_past_ours_means_behind() {
+        let now = Instant::now();
+        assert!(told_past([(6000, now)].into_iter(), 4098, now));
+        assert!(!told_past([(4100, now)].into_iter(), 4098, now));
+        let old = now.checked_sub(TOLD_FOR + Duration::from_secs(1)).unwrap();
+        assert!(!told_past([(6000, old)].into_iter(), 4098, now));
+        assert!(!told_past(std::iter::empty(), 4098, now));
     }
 
     /// An update waits only for a seed proof still running for the task the tip wants.
