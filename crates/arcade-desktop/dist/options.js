@@ -175,6 +175,35 @@ $("o-si-on").addEventListener("change", async (e) => {
   refreshSysinfo();
 });
 
+// Litecoin MWEB (mweb.status / .set): off by default; on only after the operator accepts the notice.
+let MW_NOTICE = null;
+async function refreshMweb() {
+  let st;
+  try { st = await api("mweb.status"); } catch (e) { say("o-mw-msg", e.message, true); return; }
+  MW_NOTICE = st;
+  if (document.activeElement !== $("o-mw-on")) $("o-mw-on").checked = !!st.on;
+  $("o-mw-notice").textContent = st.notice;
+  const ltc = (v) => v == null ? "—" : `${(v / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 })} LTC`;
+  $("o-mw-rows").replaceChildren(...(st.pools || []).map((p) => h("tr", {},
+    h("td", {}, p.name), h("td", {}, `MWEB pool ${ltc(p.pool)} at block ${p.height}`),
+    h("td", { class: "muted" }, `last block: ${p.pegin ? ltc(p.pegin) + " in" : "no peg-ins"}, ${p.pegout ? ltc(p.pegout) + " out" : "no peg-outs"}, ${p.kernels} kernels`))));
+  if (!$("o-mw-msg").textContent) say("o-mw-msg", st.on ? (st.pools && st.pools.length ? "MWEB on." : "MWEB on. No Litecoin chain with MWEB blocks is installed here yet.") : "MWEB off.");
+}
+$("o-mw-on").addEventListener("change", async (e) => {
+  const on = e.target.checked;
+  const body = { on };
+  if (on) {
+    const st = MW_NOTICE || await api("mweb.status");
+    if (!confirm(`${st.notice}\n\nAccept this notice and turn MWEB on?`)) { e.target.checked = false; return; }
+    body.accept = st.notice_version;
+  }
+  try {
+    await api("mweb.set", body);
+    say("o-mw-msg", on ? "MWEB on. You accepted the notice." : "MWEB off.");
+  } catch (err) { say("o-mw-msg", err.message, true); }
+  refreshMweb();
+});
+
 // Content screening (screening.status / .set / .test / .topup): off (the default), borrowing within a daily cap, or the operator's own model.
 async function refreshScreening() {
   let st;
@@ -301,6 +330,7 @@ async function refreshOptions() {
   refreshRelay();
   refreshWelcomeOpts();
   refreshSysinfo();
+  refreshMweb();
   const u = await api("update.status");
   $("o-ver").textContent = u.version || "local build";
   $("o-new").textContent = u.newest ? (u.newer ? `${u.newest} (newer)` : `${u.newest} (this one)`) : "—";

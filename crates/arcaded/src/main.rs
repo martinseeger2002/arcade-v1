@@ -128,6 +128,7 @@ mod rpc;
 mod sizes;
 mod screening;
 mod sysinfo;
+mod mwebsvc;
 mod linkrtt;
 mod udpsvc;
 mod relaysvc;
@@ -710,6 +711,7 @@ fn main() {
     v1import::auto_home(node.clone());
     sizes::load(&node);
     sysinfo::load(&node);
+    mwebsvc::load(&node);
     screening::load(&node);
     if node.home_mode == "shared" {
         // Shared home chain (test setups): keep our share of its blocks right.
