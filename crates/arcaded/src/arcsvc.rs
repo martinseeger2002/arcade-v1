@@ -1475,8 +1475,14 @@ pub fn install(node: &Arc<Node>) -> Result<(), String> {
     if REMOVING.load(Ordering::Relaxed) {
         return Err(format!("{} is still being removed; try again in a moment", def.params.name));
     }
-    run(node, def)?;
+    // Noted before the chain comes up: bringing it up replays every stored block (minutes on a slow box), and an
+    // arcade restarted meanwhile forgot the install and started it over (Kiko 2026-11-25: love, 17 starts in a day,
+    // each "not installed here"). A start that fails takes the note back.
     node.app.store.write(|w| w.put(arcade_app::META, &installed_key(&def.net), b"1")).map_err(db_err)?;
+    if let Err(e) = run(node, def) {
+        let _ = node.app.store.write(|w| w.del(arcade_app::META, &installed_key(&def.net)).map(|_| ()));
+        return Err(e);
+    }
     let _ = node.app.event("chains", &format!("installed {}", def.params.name));
     Ok(())
 }
