@@ -6,11 +6,13 @@
   const SECTIONS = [
     ["home", "Overview"], ["blocks", "Blocks"], ["mempool", "Mempool"], ["rich", "Rich list", "addresses"], ["inscriptions", "Inscriptions", "ord"],
     ["collections", "Collections", "collections"], ["tokens", "Tokens", "tokens"], ["names", "Names", "names"], ["maps", "Maps", "maps"], ["dogefeed", "DogeFeed", "dogefeed"], ["ledger", "Arcade ledger", "ledger"],
+    // Omni Layer (Litecoin testnet), from the operator's OmniLite sidecar when one is named (explorer.omni*).
+    ["omni", "Omni", "omni"],
     // Runes and dunes join here (with their index keys) when those indexes exist.
   ];
   // Pages and the index each needs; a page comes online only when its index is on the chain.
-  const NEEDS = { rich: "addresses", collections: "collections", collection: "collections", inscriptions: "ord", inscription: "ord", tokens: "tokens", token: "tokens", names: "names", name: "names", maps: "maps", map: "maps", dogefeed: "dogefeed", dfpost: "dogefeed", dfaddr: "dogefeed", ledger: "ledger", ltokens: "ledger", linscs: "ledger", ltoken: "ledger", linsc: "ledger" };
-  const DETAIL_PARENT = { collection: "collections", block: "blocks", tx: "blocks", address: "home", inscription: "inscriptions", token: "tokens", name: "names", map: "maps", dfpost: "dogefeed", dfaddr: "dogefeed", ltokens: "ledger", linscs: "ledger", ltoken: "ledger", linsc: "ledger", tag: "home", results: "home" };
+  const NEEDS = { rich: "addresses", collections: "collections", collection: "collections", inscriptions: "ord", inscription: "ord", tokens: "tokens", token: "tokens", names: "names", name: "names", maps: "maps", map: "maps", dogefeed: "dogefeed", dfpost: "dogefeed", dfaddr: "dogefeed", ledger: "ledger", ltokens: "ledger", linscs: "ledger", ltoken: "ledger", linsc: "ledger", omni: "omni", oprop: "omni", otx: "omni", oaddr: "omni", oblock: "omni" };
+  const DETAIL_PARENT = { collection: "collections", block: "blocks", tx: "blocks", address: "home", inscription: "inscriptions", token: "tokens", name: "names", map: "maps", dfpost: "dogefeed", dfaddr: "dogefeed", ltokens: "ledger", linscs: "ledger", ltoken: "ledger", linsc: "ledger", oprop: "omni", otx: "omni", oaddr: "omni", oblock: "omni", tag: "home", results: "home" };
 
   let chains = [], chain = null, sum = null, page = "home", arg = null, seq = 0;
 
@@ -34,7 +36,8 @@
     } catch { return String(v); }
   };
   // Indexes kept here, or by another arcade on the mesh that answers for them.
-  const has = (ix) => !!sum && (sum.indexes.includes(ix) || (sum.mesh_indexes || []).includes(ix));
+  // Omni is no index here: the overview says when an OmniLite sidecar is named for the chain.
+  const has = (ix) => !!sum && (ix === "omni" ? !!sum.omni : sum.indexes.includes(ix) || (sum.mesh_indexes || []).includes(ix));
   // Pages (or parts) answered by another arcade say so.
   let meshFrom = null;
   // This arcade's HTTP server: inscription lists ask for images as links to it (img: "links")
@@ -801,9 +804,70 @@
       (c.linked_keys || []).length ? sect("Linked keys", null, kv(c.linked_keys.map((k) => [k.label || "key", h("span", { class: "mono" }, k.key, " · ", (k.ops || []).join(", "))]))) : "",
       sect("Activity", null, h("div", {}, h("div", { class: "df-chips" }, h("button", { class: "df-chip on" }, "What it did"), inBtn), box, more)));
   }
+  // ---------- Omni (OmniLite sidecar; read only) ----------
+  const omniLook = () => {
+    const box = h("input", { type: "text", placeholder: "property id, Omni txid or address", "aria-label": "Look up on Omni" });
+    const err = h("span", { class: "pg-err", "aria-live": "polite" });
+    const look = () => {
+      const q = box.value.trim();
+      if (/^\d+$/.test(q)) go("oprop", q); else if (/^[0-9a-fA-F]{64}$/.test(q)) go("otx", q.toLowerCase());
+      else if (/^[A-Za-z0-9]{20,99}$/.test(q)) go("oaddr", q); else err.textContent = "A property id, a txid or an address.";
+    };
+    box.onkeydown = (e) => { if (e.key === "Enter") look(); };
+    return h("div", { class: "row" }, box, h("button", { onclick: look }, "Look up"), err);
+  };
+  const omniProps = (list) => list.length ? table([["Property"], ["Id", 1], ["Kind"], ["Category"]], list.map((p) => ({ go: () => go("oprop", String(p.propertyid)),
+    cells: [[h("b", {}, p.name || "(no name)")], [String(p.propertyid), 1], [p["non-fungibletoken"] ? "NFT" : p.divisible ? "divisible" : "indivisible"], [[p.category, p.subcategory].filter(Boolean).join(" · ") || "—"]] })))
+    : h("div", { class: "x-empty" }, "No Omni properties yet.");
+  const omniTxRows = (list) => table([["Txid"], ["Type"], ["From"], ["To"], ["Property", 1], ["Amount", 1], ["Valid"]], list.map((t) => ({ go: () => go("otx", t.txid),
+    cells: [[h("span", { class: "mono" }, short(t.txid, 10, 6))], [t.type || t.error || ""], [t.sendingaddress ? short(t.sendingaddress, 8, 6) : ""], [t.referenceaddress ? short(t.referenceaddress, 8, 6) : ""],
+      [t.propertyid != null ? String(t.propertyid) : "", 1], [t.amount ?? "", 1], [t.valid === false ? pill("invalid") : t.valid ? pill("valid", true) : ""]] })));
+  async function vOmni() {
+    const size = 50, page = pageOf();
+    const r = await xapi("explorer.omni", { chain: chain.key, offset: (page - 1) * size, n: size });
+    const i = r.info || {};
+    const st = [["Omni block", fmt(i.block)], ["Properties", fmt(r.total)], ["Omni transactions", fmt(i.totaltransactions)], ["Version", i.omnicoreversion || i.mastercoreversion || "—"]];
+    return h("div", {},
+      h("div", { class: "x-stats" }, st.map(([k, v]) => h("div", { class: "x-stat" }, h("div", { class: "k" }, k), h("div", { class: "v" }, v)))),
+      omniLook(),
+      sect(`Omni properties · ${fmt(r.total)}`, null, h("div", {}, pager(r.total, size, page, "omni"), omniProps(r.items || []), pager(r.total, size, page, "omni"))),
+      h("p", { class: "x-note" }, `Omni Layer, read from this arcade's OmniLite sidecar (read only) at block ${fmt(i.block)}${i.blocktime ? " · " + when(i.blocktime) : ""}. Separate from ord and the arcade ledger.`));
+  }
+  async function vOProp() {
+    const p = await xapi("explorer.omni_property", { chain: chain.key, propertyid: Number(arg), n: 100 });
+    return h("div", {}, crumbs(link("Omni", "omni"), p.name || `#${p.propertyid}`),
+      head(p.name || `Property ${p.propertyid}`, h("span", { class: "chip arc" }, p["non-fungibletoken"] ? "NFT" : p.divisible ? "divisible" : "indivisible"), pill(p.managedissuance ? "managed" : p.fixedissuance ? "fixed supply" : "crowdsale", true)),
+      kv([["Id", String(p.propertyid)], ["Supply", p.totaltokens ?? "—"], ["Issuer", h("span", { class: "mono" }, link(short(p.issuer, 10, 6), "oaddr", p.issuer))], ["Category", [p.category, p.subcategory].filter(Boolean).join(" · ") || "—"],
+        p.url && ["Url", p.url], p.data && ["Data", p.data], p.creationtxid && ["Creation tx", link(short(p.creationtxid, 12, 8), "otx", p.creationtxid, "mono")], ["Holders", fmt(p.holders)]]),
+      h("h2", { class: "x-h2" }, "Top holders"),
+      (p.top || []).length ? table([["Holder"], ["Balance", 1], ["Reserved", 1]], p.top.map((x) => ({ go: () => go("oaddr", x.address), cells: [[h("span", { class: "mono" }, short(x.address, 12, 6))], [x.balance, 1], [x.reserved, 1]] }))) : h("div", { class: "x-empty" }, "Nobody holds any."));
+  }
+  async function vOTx() {
+    const t = await xapi("explorer.omni_tx", { chain: chain.key, txid: arg });
+    return h("div", {}, crumbs(link("Omni", "omni"), short(t.txid, 10, 6)),
+      head(t.type || "Omni transaction", t.valid ? pill("valid", true) : pill(t.invalidreason ? `invalid: ${t.invalidreason}` : "unconfirmed or invalid")),
+      kv([["Txid", h("span", { class: "mono" }, t.txid)], ["From", t.sendingaddress ? link(t.sendingaddress, "oaddr", t.sendingaddress, "mono") : "—"], t.referenceaddress && ["To", link(t.referenceaddress, "oaddr", t.referenceaddress, "mono")],
+        t.propertyid != null && ["Property", link(`#${t.propertyid}`, "oprop", String(t.propertyid))], t.amount != null && ["Amount", String(t.amount)], ["Fee", String(t.fee ?? "—")],
+        t.block != null && ["Block", h("span", {}, link(fmt(t.block), "oblock", String(t.block)), t.blocktime ? ` · ${when(t.blocktime)}` : "")], ["Confirmations", fmt(t.confirmations)],
+        ["Chain transaction", link("Open in Blocks", "tx", t.txid)]]),
+      h("p", { class: "x-note mono" }, JSON.stringify(t).slice(0, 2000)));
+  }
+  async function vOBlock() {
+    const b = await xapi("explorer.omni_block", { chain: chain.key, height: Number(arg), n: 100 });
+    return h("div", {}, crumbs(link("Omni", "omni"), `block ${fmt(b.height)}`), head(`Omni in block ${fmt(b.height)}`, link("Block page", "block", String(b.height))),
+      b.total ? omniTxRows(b.items) : h("div", { class: "x-empty" }, "No Omni transactions in this block."));
+  }
+  async function vOAddr() {
+    const a = await xapi("explorer.omni_address", { chain: chain.key, address: arg });
+    return h("div", {}, crumbs(link("Omni", "omni"), short(a.address, 10, 6)), head("Omni balances", link("Address page", "address", a.address)),
+      h("p", { class: "mono x-note" }, a.address),
+      a.balances.length ? table([["Property"], ["Id", 1], ["Balance", 1], ["Reserved", 1]], a.balances.map((x) => ({ go: () => go("oprop", String(x.propertyid)),
+        cells: [[x.name || "—"], [String(x.propertyid), 1], [x.balance, 1], [x.reserved ?? "", 1]] }))) : h("div", { class: "x-empty" }, "No Omni balances."));
+  }
   const VIEWS = { collections: vCollections, collection: vCollection, home: vHome, blocks: vBlocks, mempool: vMempool, rich: vRich, inscriptions: vInscriptions, tokens: vTokens, names: vNames, maps: vMaps, dogefeed: vDogeFeed, dfpost: vDfPost, dfaddr: vDfAddr, ledger: vLedger,
     block: vBlock, tx: vTx, address: vAddress, inscription: vInscription, token: vToken, name: vName, map: vMap,
-    ltokens: vLTokens, linscs: vLInscs, ltoken: vLToken, linsc: vLInsc, tag: vTag, results: vResults };
+    ltokens: vLTokens, linscs: vLInscs, ltoken: vLToken, linsc: vLInsc, tag: vTag, results: vResults,
+    omni: vOmni, oprop: vOProp, otx: vOTx, oblock: vOBlock, oaddr: vOAddr };
 
   // ---------- navigation ----------
   function paintNav() {

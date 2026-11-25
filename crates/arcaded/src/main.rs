@@ -120,6 +120,7 @@ mod refill;
 mod pagechain;
 mod vouch;
 mod prizesvc;
+mod omnisvc;
 mod refereesvc;
 mod tradesvc;
 mod ringsvc;
