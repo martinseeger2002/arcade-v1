@@ -527,6 +527,7 @@ pub fn find(name: &str) -> Option<&'static Cmd> {
 
 /// Every parameter name a command takes: (name, JSON type, what it is). A type "a|b" takes either.
 pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
+    ("accept", "integer", "The version of the notice the operator read and accepted (from the status command)."),
     ("activity", "boolean", "Also list the record's activity."),
     ("add", "boolean", "true adds, false removes."),
     ("addr_kind", "string", "Address type: legacy, p2sh-p2wpkh or p2wpkh."),
