@@ -153,6 +153,14 @@ cmds! {
     "wallet.import" Local "chain, secret, addr_kind?, name?" "Import a wallet: a WIF key, or another wallet's words (one address, index 0); addr_kind legacy (default), p2sh-p2wpkh or p2wpkh. Kept encrypted here; nothing is published.";
     "wallet.imports" Local "" "Imported wallets, with balances on chains this arcade keeps addresses for.";
     "wallet.import_remove" Local "chain, address" "Forget an imported wallet and its key.";
+    // Multisig vaults (crate::msigsvc; docs/MULTISIG.md)
+    "multisig.key" Local "chain, wrap?" "This arcade's key for its next multisig vault on a (test) chain, to give the other co-signers: [fingerprint/48'/coin'/vault'/type']tpub.../<0;1>/*. wrap: sh (default where there is no SegWit), wsh (default on SegWit chains) or sh-wsh.";
+    "multisig.create" Local "chain, cosigners, name?, wrap?, backup?" "Make a 2-of-3 vault of this arcade's next key and two other co-signers' keys (cosigners: a list, or one per line). Returns its descriptor: give it to each co-signer and keep it with your 12 words. backup: self (the mesh copy comes with mesh co-signing).";
+    "multisig.import" Local "chain, descriptor, name?, backup?" "Add a vault made elsewhere from its descriptor (sh/wsh/sh(wsh(sortedmulti(2,...)))): watch-only, or signed for here when this wallet's phrase holds one of its keys.";
+    "multisig.list" Local "chain?" "Your vaults (on one chain, or all) with their descriptors, co-signers (here or elsewhere) and balances.";
+    "multisig.address" Local "id, index?, change?" "A vault's address: index on the receive (or change) branch; without index the next new receive address.";
+    "multisig.coins" Local "id" "A vault's unspent coins and balance, from this arcade's address index or borrowed chain data.";
+    "multisig.remove" Local "id" "Forget a vault here (its coins stay; its descriptor is needed to see or spend them again).";
     "tag.check" Public "tag, chain?" "Whether a @tag is free and valid on one chain (every chain has its own @tags): tag may name it (alice.doge), or chain does; else where new tags go. Answers full (alice.doge) and label (@alice · DOGE).";
     "tag.claim" Wallet "tag, chain?, client_ref?" "Claim a @tag on one chain: ARCADE, Pepecoin testnet (test coins asked for by themselves), or a mainnet chain tags live on here (pep, doge, dgb: kept with their ledger or borrowed; paid in that coin). tag may name the chain (alice.doge).";
     "tag.resolve" Public "tag" "What an @tag names: found one (its chain, address, label) or many (different people on several chains: each, to pick from) or none. alice.doge names Dogecoin's.";
@@ -581,6 +589,8 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("content_b64", "string", "A file's bytes as base64."),
     ("card", "object|string", "An app card: the JSON beside the inscription, e.g. {\"app\": {name, family, version, ...}}; a string is used as written."),
     ("as", "string", "An @tag to sign with: the key here (the wallet's own, or an imported one) that holds it."),
+    ("backup", "string", "Multisig vault descriptor backup: self (kept by you) or mesh (an encrypted copy for co-signers, not built yet)."),
+    ("change", "boolean", "The change branch of a multisig vault (false: receive)."),
     ("reason", "string", "Why, in a few words."),
     ("replaced_by", "string", "What replaces it: chain:txid, or a name."),
     ("versions", "array", "Card txids (64 hex)."),
@@ -660,6 +670,7 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("nonce", "string", "A sign-in nonce."),
     ("note", "string", "A note."),
     ("coin", "string", "A coin's chain key."),
+    ("cosigners", "array|string", "Other co-signers' keys ([fingerprint/path]tpub.../<0;1>/*): an array, or one per line."),
     ("show", "boolean", "Show it (true) or not (false)."),
     ("undo", "boolean", "Give back what was counted."),
     ("origin", "string", "An arcade's node id, or its first hex digits."),
@@ -765,6 +776,7 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("pin", "string", "One offer to use only: \"model@<arcade id>\"; \"\" for none."),
     ("unchecked", "string", "What happens to content not checked yet: show_here or cover."),
     ("day_cap", "integer", "A daily spending cap, in ARCADE base units."),
+    ("descriptor", "string", "An output descriptor with its checksum (sh/wsh/sh(wsh(sortedmulti(...))))."),
     ("value", "string", "A value."),
     ("verdict", "string", "A verdict."),
     ("via", "string", "This arcade's https address."),
@@ -773,6 +785,7 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("who", "string", "An @tag or address."),
     ("wif", "string", "A WIF private key."),
     ("with", "array", "Indexes to keep with a chain."),
+    ("wrap", "string", "How a multisig vault is held: sh, wsh or sh-wsh."),
 ];
 
 /// What one command says of one parameter: (command, parameter, allowed values (comma list, "" none), default (JSON,
@@ -807,6 +820,10 @@ pub const PARAM_RULES: &[(&str, &str, &str, &str, u64)] = &[
     ("borrow.send", "kind", "legacy,p2sh-p2wpkh,p2wpkh,p2tr", "", 0),
     ("wallet.addr_kind", "kind", "legacy,p2sh-p2wpkh,p2wpkh,p2tr", "", 0),
     ("wallet.import", "addr_kind", "legacy,p2sh-p2wpkh,p2wpkh", "\"legacy\"", 0),
+    ("multisig.key", "wrap", "sh,wsh,sh-wsh", "", 0),
+    ("multisig.create", "wrap", "sh,wsh,sh-wsh", "", 0),
+    ("multisig.create", "backup", "self,mesh", "\"self\"", 0),
+    ("multisig.import", "backup", "self,mesh", "\"self\"", 0),
     ("chains.add", "mode", "full,shared,chain", "\"full\"", 0),
     ("chains.plan", "mode", "full,shared,chain", "\"full\"", 0),
     ("chains.copy_start", "what", "coins,blocks", "\"coins\"", 0),

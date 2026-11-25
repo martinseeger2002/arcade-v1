@@ -1,6 +1,6 @@
 # Multisig on ARCADE's UTXO chains: a plan
 
-Status: **design agreed; phases 1 (scripts, addresses, checking), 2 (xpubs, descriptors) and 3 (PSBTs) built.** For review before any code. Where this page and the code disagree later,
+Status: **design agreed; phases 1 (scripts, addresses, checking), 2 (xpubs, descriptors), 3 (PSBTs) and 4 (watch-only vaults) built.** For review before any code. Where this page and the code disagree later,
 the code is right and this page has a bug.
 
 Goal: a coin can be locked so that **M of N keys** must sign to spend it, on every UTXO chain ARCADE keeps where the
@@ -166,8 +166,8 @@ Each phase is one PR, aimed at ≤ ~400 lines (code, not counting test vectors),
 | 1 | `arcade-wallet::multisig`: build/parse `sortedmulti` redeem and witness scripts, `sh` / `wsh` addresses per chain, limits (15 / 20 keys, compressed only). `verify.rs` learns P2SH-multisig and P2WSH-multisig (sigs in key order, NULLDUMMY) | ~300 | BIP67 vectors; Core `createmultisig` addresses for doge/pep/ltc/btc; sign-then-verify round trips; the ARCADE interpreter accepts what we build |
 | 2 | `XPub` + public derivation (BIP32 CKDpub) in `keys.rs`; descriptor parse/print for `sh(sortedmulti)`, `wsh(sortedmulti)` with key origins, `<0;1>/*`, checksum | ~400 | BIP380/383/389 vectors; Core `deriveaddresses` cross-check |
 | 3 | PSBT for multisig: move `psbt.rs` core into `arcade-wallet`; fields 0x04/0x05/0x06, global xpubs, ARCADE proprietary chain field; sign (legacy sighash + BIP143), combine, finalize | ~400 | BIP174 test vectors; 2-of-3 signed by three PSBT passes in any order equals one combined result; mismatched chain refused |
-| 4 | Vault on the arcade, watch-only: `vault.create` (adds this arcade's key), `vault.import` (descriptor), `vault.address`, `vault.coins`, balance via the address watch; desktop app and `/ui/` | ~400 | create 2-of-3 on `peptest` across node 6 and the mini; addresses agree on every device; receive testnet coins |
-| 5 | Spend: `vault.propose` (coin control picks coins, builds PSBT), `vault.sign`, `vault.finalize` → `tx.broadcast`; approval card shows outputs, change check, fee | ~400 | 2-of-3 spend on `peptest` and `ltctest` with keys on two arcades + paper; refuses: change to foreign script, wrong chain, missing prev tx |
+| 4 | Vault on the arcade, watch-only: `multisig.create` (adds this arcade's key), `multisig.import` (descriptor), `multisig.address`, `multisig.coins`, balance via the address watch; desktop app and `/ui/` | ~400 | create 2-of-3 on `peptest` across node 6 and the mini; addresses agree on every device; receive testnet coins |
+| 5 | Spend: `multisig.propose` (coin control picks coins, builds PSBT), `multisig.sign`, `multisig.finalize` → `tx.broadcast`; approval card shows outputs, change check, fee | ~400 | 2-of-3 spend on `peptest` and `ltctest` with keys on two arcades + paper; refuses: change to foreign script, wrong chain, missing prev tx |
 | 6 | Co-signing over the mesh: send/receive PSBTs in sealed boxes; "waiting for N more" state; several users on one arcade | ~400 | three arcades, one offline for a day; replayed and tampered PSBTs refused |
 | 7 | Chains out: BTC/DGB/BEL/JKC `wsh`; ARCADE-chain vaults (Earn payout to a vault); mainnet behind a switch after external review | ~250 | per-chain address + spend vectors; regtest where we have it |
 | 8 | Later: PSBT file/QR for hardware wallets (BTC/LTC); inscribing and DRC-20 transfers from a vault; a vault-owned @tag and records; any M-of-N; Taproot (`multi_a`, then MuSig2) with its own review | separate | |
@@ -175,6 +175,14 @@ Each phase is one PR, aimed at ≤ ~400 lines (code, not counting test vectors),
 Start on the **Dogecoin family (legacy `sh(sortedmulti)`) tested on Pepecoin testnet**: it is most of our users, the
 legacy sighash code already exists, and the same code covers Doge, PEP, LKY, Flop, Shic, WJK and the ARCADE chain.
 P2WSH follows in phase 1's own verify work and phase 7's chain list.
+
+Phase 4 as built: the commands are `multisig.*` (`multisig.key`, `.create`, `.import`, `.list`, `.address`,
+`.coins`, `.remove`), since `vault.put/get/delete` already name the password accounts' sealed records. Vaults are
+kept per account, encrypted like the phrase; test chains only until phase 7; the mesh backup copy is offered at setup
+and refused until phase 6 builds it. In the window (desktop app and `/ui/`, one set of files): **Wallet → Vaults**
+on a test chain: new vault (this arcade's key shown to copy, two other keys pasted), add from a descriptor, and per
+vault its receive address with QR, coins, co-signers (here / elsewhere) and the descriptor as text and QR. Coins are
+read for every address up to 20 past the last receive address given out, on both branches.
 
 ## 5. Decisions (2026-11-24)
 

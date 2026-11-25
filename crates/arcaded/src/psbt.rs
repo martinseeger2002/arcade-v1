@@ -12,7 +12,6 @@
 //! OP_CODESEPARATOR and this wallet's P2PKH. The site wrote the inscription and builds the
 //! scriptSig itself; the wallet signs ALL over the P2PKH after the separator and leaves a partial
 //! signature, never a final scriptSig.
-use arcade_chain::encode::write_varint;
 use arcade_chain::{OutPoint, Tx};
 use arcade_wallet::legacy;
 use arcade_wallet::psbt::{get, read_map as map, write_map as put, MAGIC};

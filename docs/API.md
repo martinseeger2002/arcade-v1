@@ -186,6 +186,18 @@ marks the change. Hand `psbt` to the app as `{type: "psbt", chain, psbt, finaliz
 | `wallet.approve` | `/api/v1/wallet/approve` | local | id | Approve a request: sign and send it. |
 | `wallet.deny` | `/api/v1/wallet/deny` | local | id | Refuse a request. |
 
+### Multisig
+
+| method | route | needs | params | what |
+|---|---|---|---|---|
+| `multisig.key` | `/api/v1/multisig/key` | local | chain, wrap? | This arcade's key for its next multisig vault on a (test) chain, to give the other co-signers: [fingerprint/48'/coin'/vault'/type']tpub.../<0;1>/*. wrap: sh (default where there is no SegWit), wsh (default on SegWit chains) or sh-wsh. |
+| `multisig.create` | `/api/v1/multisig/create` | local | chain, cosigners, name?, wrap?, backup? | Make a 2-of-3 vault of this arcade's next key and two other co-signers' keys (cosigners: a list, or one per line). Returns its descriptor: give it to each co-signer and keep it with your 12 words. backup: self (the mesh copy comes with mesh co-signing). |
+| `multisig.import` | `/api/v1/multisig/import` | local | chain, descriptor, name?, backup? | Add a vault made elsewhere from its descriptor (sh/wsh/sh(wsh(sortedmulti(2,...)))): watch-only, or signed for here when this wallet's phrase holds one of its keys. |
+| `multisig.list` | `/api/v1/multisig/list` | local | chain? | Your vaults (on one chain, or all) with their descriptors, co-signers (here or elsewhere) and balances. |
+| `multisig.address` | `/api/v1/multisig/address` | local | id, index?, change? | A vault's address: index on the receive (or change) branch; without index the next new receive address. |
+| `multisig.coins` | `/api/v1/multisig/coins` | local | id | A vault's unspent coins and balance, from this arcade's address index or borrowed chain data. |
+| `multisig.remove` | `/api/v1/multisig/remove` | local | id | Forget a vault here (its coins stay; its descriptor is needed to see or spend them again). |
+
 ### Dd
 
 | method | route | needs | params | what |
