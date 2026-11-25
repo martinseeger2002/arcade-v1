@@ -207,7 +207,8 @@ impl TimeProofs for ChiaVdf {
         // Each run starts from the output before it, which the proof carries: the runs are checked side by side, one
         // thread per core (a time keeper's proof has 4-5 of them in recent blocks, about 8.6 ms each on the GX10).
         let froms: Vec<Vec<u8>> = std::iter::once(Self::start().to_vec()).chain(runs.iter().map(|r| r.output.clone())).take(runs.len()).collect();
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(runs.len());
+        // One core is left for the rest of the arcade (a 2-core laptop copying the chain still answers its wallet).
+        let threads = std::thread::available_parallelism().map(|n| n.get().saturating_sub(1)).unwrap_or(1).max(1).min(runs.len());
         if threads <= 1 {
             return runs.iter().zip(&froms).all(|(run, from)| Self::check_run(&disc, from, run));
         }
