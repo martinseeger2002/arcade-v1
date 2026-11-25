@@ -1,6 +1,6 @@
 # Multisig on ARCADE's UTXO chains: a plan
 
-Status: **design agreed; phase 1 (scripts, addresses, checking) built.** For review before any code. Where this page and the code disagree later,
+Status: **design agreed; phases 1 (scripts, addresses, checking) and 2 (xpubs, descriptors) built.** For review before any code. Where this page and the code disagree later,
 the code is right and this page has a bug.
 
 Goal: a coin can be locked so that **M of N keys** must sign to spend it, on every UTXO chain ARCADE keeps where the
@@ -89,6 +89,11 @@ same as a single-sig one; consolidation matters more on BTC/LTC.
 - Derivation: one new account per vault on each co-signer's phrase, BIP48 `m/48'/coin'/vault'/type'` (`2'` = wsh,
   `1'` = sh-wsh, `0'` = legacy P2SH, ours since BIP48 names none). Because the descriptor carries every origin,
   recovery never depends on guessing paths.
+- The vault number (`vault'`) is counted once per phrase across all chains, not per chain: the Dogecoin-family
+  chains share a coin type and a P2SH byte, so vault 0 on Dogecoin and vault 0 on Pepecoin would otherwise be the
+  same address on two chains.
+- Descriptors write `xpub` on main chains and `tpub` on test chains, whatever the chain (Dogecoin's own `dgub`
+  is not used): the chain is named next to the descriptor.
 - Rejected: a home-made "PSBT-like" format for non-SegWit chains (PSBT v0 already covers them and keeps us compatible
   with Sparrow / Electrum / Core for BTC/LTC); bare multisig (non-standard); unsorted `multi` (order agreement errors).
 

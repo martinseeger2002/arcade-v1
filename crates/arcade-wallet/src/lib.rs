@@ -1,6 +1,7 @@
 pub mod dd;
 pub mod ddtrade;
 pub mod ddlock;
+pub mod descriptor;
 pub mod htlc;
 pub mod ordwrite;
 pub mod keys;
