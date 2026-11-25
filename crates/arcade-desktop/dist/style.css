@@ -706,3 +706,27 @@ button.linkish { border: 0; background: none; padding: 0; font-size: 11px; color
 .welcome-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 0; }
 .welcome-list .when { opacity: .7; font-size: .9em; }
 .welcomers { margin: 4px 0 12px; }
+
+/* Coin control (Wallet → Send, with Options → Wallet → Coin control on): the coins a payment spends. */
+.cc { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 8px; }
+.cc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cc-head .grow { flex: 1; }
+.cc-help { min-width: 26px; padding: 0 6px; border-radius: 999px; font-weight: 700; }
+.cc-mode { color: var(--muted); font-size: 13px; }
+.cc-tip { background: var(--accent-soft); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 4px 12px 10px; margin: 8px 0; font-size: 13px; }
+.cc-tip ul { margin: 4px 0 6px; padding-left: 20px; }
+.cc-tip li { margin: 3px 0; }
+.cc-list { display: flex; flex-direction: column; margin-top: 6px; max-height: 320px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; }
+.cc-row { display: grid; grid-template-columns: 24px minmax(7em, 1fr) minmax(8em, 2fr) auto auto; gap: 4px 10px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.cc-row:last-child { border-bottom: 0; }
+.cc-row.on { background: var(--accent-soft); }
+.cc-row.locked { color: var(--muted); }
+.cc-row .amt { font-weight: 600; font-variant-numeric: tabular-nums; }
+.cc-row .where { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-row .when { color: var(--muted); white-space: nowrap; }
+.cc-badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); margin-left: 6px; white-space: nowrap; }
+.cc-badge.ins { border-color: var(--gold, var(--warn-line)); color: var(--gold, inherit); }
+.cc-badge.ice { border-color: var(--accent); color: var(--accent); }
+.cc-sum { margin-top: 8px; font-size: 13px; }
+.cc-sum .bad { color: var(--bad); }
+@media (max-width: 640px) { .cc-row { grid-template-columns: 24px 1fr auto; } .cc-row .where { grid-column: 2 / 4; } .cc-row .when { grid-column: 2; } }

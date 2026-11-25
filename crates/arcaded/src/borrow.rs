@@ -2000,6 +2000,13 @@ fn tip_of(node: &Node, key: &str) -> u32 {
     state(node, key).and_then(|s| s["tip"].as_u64()).unwrap_or(0) as u32
 }
 
+/// The heights of the coins followed on borrowed chain `key` (0: not in a block yet), and its
+/// tip as last heard (coin control's list).
+pub fn coin_heights(node: &Node, key: &str) -> (std::collections::HashMap<OutPoint, u32>, u32) {
+    let h = coin_rows(node, key).into_iter().map(|(op, c)| (op, c["h"].as_u64().unwrap_or(0) as u32)).collect();
+    (h, tip_of(node, key))
+}
+
 fn pool_spent(key: &str) -> HashSet<OutPoint> {
     let pool = ST.pool.lock().unwrap();
     let mut out = HashSet::new();
@@ -2084,7 +2091,8 @@ pub fn coins(node: &Node, key: &str) -> R {
 
 // ---------------- sending ----------------
 
-fn fee_rate(node: &Node, p: &ChainParams) -> u64 {
+/// The fee rate a send on borrowed chain `p` pays: the lenders' estimate, within the chain's rules.
+pub fn fee_rate(node: &Node, p: &ChainParams) -> u64 {
     let fp = crate::coinsend::fee_policy(p);
     let fallback = fp.fallback_per_kb.max(fp.floor_per_kb);
     match call_any(node, p, json!([["estimatesmartfee", [6]]])) {
@@ -2099,6 +2107,12 @@ fn fee_rate(node: &Node, p: &ChainParams) -> u64 {
 /// wallet.send has them (crate::coinsend::own_spend), for the wallet's own addresses.
 #[allow(clippy::too_many_arguments)]
 pub fn send(node: &Node, key: &str, to: &str, amount: u64, from: Option<&str>, kind: Option<&str>, all_kinds: bool, broadcast: bool) -> R {
+    send_picked(node, key, to, amount, from, kind, all_kinds, broadcast, &[])
+}
+
+/// As [`send`], spending exactly the coins `picked` when any are (coin control, crate::coinctl).
+#[allow(clippy::too_many_arguments)]
+pub fn send_picked(node: &Node, key: &str, to: &str, amount: u64, from: Option<&str>, kind: Option<&str>, all_kinds: bool, broadcast: bool, picked: &[OutPoint]) -> R {
     let p = by_key(key).ok_or_else(|| format!("unknown chain {key}"))?;
     if !is_borrowed(p.key) {
         return Err(format!("{} is not borrowed here (installed chains send from the Wallet tab)", p.name));
@@ -2124,7 +2138,8 @@ pub fn send(node: &Node, key: &str, to: &str, amount: u64, from: Option<&str>, k
     // Coins carrying an inscription stay out (crate::ordsafe), as on a chain kept here.
     let coins = crate::ordsafe::keep_free(node, p, coins);
     let fp = crate::coinsend::fee_policy(p);
-    let tx = arcade_wallet::tx::build_send_keys(p, &to_script, amount, &keys, &coins, &change.1, fee_rate(node, p), fp.dust, arcade_app::now() as u32)?;
+    let cc = arcade_wallet::tx::CoinControl { picked: picked.to_vec(), frozen: crate::coinctl::frozen(node, p) };
+    let tx = arcade_wallet::tx::build_send_controlled(p, &[(to_script.as_slice(), amount)], &keys, &coins, &cc, &change.1, fee_rate(node, p), fp.dust, arcade_app::now() as u32)?;
     let ins: u64 = tx.inputs.iter().filter_map(|i| coins.iter().find(|c| c.outpoint == i.prevout).map(|c| c.value)).sum();
     let fee = ins.saturating_sub(tx.outputs.iter().map(|o| o.value).sum());
     let vsize = (tx.encode_legacy().len() * 3 + tx.raw.len()).div_ceil(4);

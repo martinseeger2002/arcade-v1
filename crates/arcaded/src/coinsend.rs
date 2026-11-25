@@ -250,16 +250,24 @@ pub fn warning(p: &ChainParams, to: &str) -> Option<String> {
 /// signed here. With broadcast false it is only built and shown (fee, size, warning). `kind`
 /// (legacy, p2sh-p2wpkh, p2wpkh, p2tr) is the address type it is sent from, change back to it
 /// (default: the kind of `from`, else the one the Wallet shows); `all_kinds` spends the coins of
-/// every address type of that wallet.
+/// every address type of that wallet. `picked` (coin control): spend exactly these coins.
 #[allow(clippy::too_many_arguments)]
-pub fn send(node: &Node, key: Option<&str>, to: &str, amount: u64, from: Option<&str>, kind: Option<&str>, all_kinds: bool, broadcast: bool) -> R {
-    send_parts(node, key, to, &[amount], from, kind, all_kinds, broadcast)
+pub fn send(node: &Node, key: Option<&str>, to: &str, amount: u64, from: Option<&str>, kind: Option<&str>, all_kinds: bool, broadcast: bool, picked: &[arcade_chain::OutPoint]) -> R {
+    send_picked(node, key, to, &[amount], from, kind, all_kinds, broadcast, picked)
 }
 
 /// As [`send`], the amount in several coins to the same address (a faucet pays in two: an a:// act spends two).
 /// Not on a borrowed chain.
 #[allow(clippy::too_many_arguments)]
 pub fn send_parts(node: &Node, key: Option<&str>, to: &str, parts: &[u64], from: Option<&str>, kind: Option<&str>, all_kinds: bool, broadcast: bool) -> R {
+    send_picked(node, key, to, parts, from, kind, all_kinds, broadcast, &[])
+}
+
+/// As [`send_parts`], spending exactly the coins `picked` when any are (coin control,
+/// crate::coinctl): all of them and no other, refused when one can't be spent (frozen, held
+/// back for an inscription, spent) or they don't pay the amount and fee.
+#[allow(clippy::too_many_arguments)]
+pub fn send_picked(node: &Node, key: Option<&str>, to: &str, parts: &[u64], from: Option<&str>, kind: Option<&str>, all_kinds: bool, broadcast: bool, picked: &[arcade_chain::OutPoint]) -> R {
     let amount: u64 = parts.iter().sum();
     let from = from.map(str::trim).filter(|f| !f.is_empty());
     let p: &'static ChainParams = match key.filter(|k| !k.is_empty()) {
@@ -281,7 +289,7 @@ pub fn send_parts(node: &Node, key: Option<&str>, to: &str, parts: &[u64], from:
         if parts.len() != 1 {
             return Err(format!("{} is borrowed here: a send in several coins needs the chain kept here", p.name));
         }
-        let mut v = crate::borrow::send(node, p.key, to, amount, from, kind, all_kinds, broadcast)?;
+        let mut v = crate::borrow::send_picked(node, p.key, to, amount, from, kind, all_kinds, broadcast, picked)?;
         v["chain"] = json!(p.key);
         v["warning"] = json!(warn);
         return Ok(v);
@@ -340,13 +348,15 @@ pub fn send_parts(node: &Node, key: Option<&str>, to: &str, parts: &[u64], from:
     let coins = crate::ordsafe::keep_free(node, p, coins);
     let fp = fee_policy(p);
     let outs: Vec<(&[u8], u64)> = parts.iter().map(|v| (to_script.as_slice(), *v)).collect();
-    let tx = arcade_wallet::tx::build_send_outputs(p, &outs, &keys, &coins, &change.1, fp.fallback_per_kb.max(fp.floor_per_kb), fp.dust, arcade_app::now() as u32)?;
+    let cc = arcade_wallet::tx::CoinControl { picked: picked.to_vec(), frozen: crate::coinctl::frozen(node, p) };
+    let tx = arcade_wallet::tx::build_send_controlled(p, &outs, &keys, &coins, &cc, &change.1, fp.fallback_per_kb.max(fp.floor_per_kb), fp.dust, arcade_app::now() as u32)?;
     let ins: u64 = tx.inputs.iter().filter_map(|i| coins.iter().find(|c| c.outpoint == i.prevout).map(|c| c.value)).sum();
     let fee = ins.saturating_sub(tx.outputs.iter().map(|o| o.value).sum());
     let vsize = (tx.encode_legacy().len() * 3 + tx.raw.len()).div_ceil(4);
     let mut out = json!({"chain": p.key, "txid": tx.txid.to_hex(), "from": change.0, "to": to, "amount": amount, "fee": fee,
                          "size": tx.raw.len(), "vsize": vsize, "sent": false, "warning": warn, "hex": hex::encode(&tx.raw),
-                         "kind": kd.map(AddrKind::id), "kind_label": kd.map(AddrKind::label), "kinds_spent": kinds_spent(&tx, &coins, &kinds)});
+                         "kind": kd.map(AddrKind::id), "kind_label": kd.map(AddrKind::label), "kinds_spent": kinds_spent(&tx, &coins, &kinds),
+                         "inputs": tx.inputs.len(), "picked": !picked.is_empty()});
     // How well the coins it spends are known to carry no inscription: shown before Send.
     let spent: Vec<arcade_chain::OutPoint> = tx.inputs.iter().map(|i| i.prevout).collect();
     out["caution"] = json!(crate::ordsafe::caution(node, p, &spent));
@@ -699,7 +709,7 @@ mod tests {
 
     /// wallet.send built, not sent.
     fn send_hex(node: &Node, to: &str, amount: u64, from: Option<&str>, kind: Option<&str>, all: bool) -> R {
-        send(node, None, to, amount, from, kind, all, false)
+        send(node, None, to, amount, from, kind, all, false, &[])
     }
 }
 

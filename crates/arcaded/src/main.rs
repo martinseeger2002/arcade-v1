@@ -54,6 +54,7 @@ mod appsvc;
 mod foldersvc;
 mod apppub;
 mod walletsvc;
+mod coinctl;
 mod coinsend;
 mod ddsvc;
 mod dproto;

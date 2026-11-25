@@ -540,7 +540,7 @@ fn psbt_preview(node: &Node, p: &Value, req: &Value, s: Signer) -> Result<Value,
     let signed: Vec<usize> = list.iter().map(|(i, _, _)| *i).collect();
     // Signed coins that carry an inscription (this arcade's ord index, else the mesh's).
     let coins: Vec<arcade_wallet::tx::Utxo> = signed.iter().filter_map(|i| ps.input(*i).coin.map(|(value, script)| arcade_wallet::tx::Utxo { outpoint: ps.input(*i).prevout, value, script })).collect();
-    let free: Vec<arcade_chain::OutPoint> = crate::ordsafe::keep_free(node, chain, coins.clone()).into_iter().map(|u| u.outpoint).collect();
+    let free: Vec<arcade_chain::OutPoint> = crate::ordsafe::ord_free(node, chain, coins.clone()).into_iter().map(|u| u.outpoint).collect();
     let inputs: Vec<Value> = (0..ps.inputs.len())
         .map(|i| {
             let v = ps.input(i);
