@@ -289,11 +289,6 @@ pub(crate) fn coins_with(node: &Node, id: &str, lenders: bool) -> Result<Value, 
               "looked_at": all.len() / 2, "note": note}))
 }
 
-/// A vault's coins and balance (on a borrowed chain, a lender's scan too).
-pub fn coins(node: &Node, id: &str) -> Result<Value, String> {
-    coins_with(node, id, true)
-}
-
 /// The account's vaults (on one chain, or all), with balances where this arcade keeps that chain's addresses.
 pub fn list(node: &Node, chain_key: Option<&str>) -> Value {
     let out: Vec<Value> = list_raw(node)
@@ -305,7 +300,21 @@ pub fn list(node: &Node, chain_key: Option<&str>) -> Value {
         .map(|mut v| {
             let id = v["id"].as_str().unwrap_or("").to_string();
             // (The coins followed here only: the list is drawn often; a vault's own view asks lenders too.)
-            v["balance"] = coins_with(node, &id, false).ok().map(|c| c["balance"].clone()).unwrap_or(Value::Null);
+            let have = coins_with(node, &id, false).ok();
+            v["balance"] = have.as_ref().map(|c| c["balance"].clone()).unwrap_or(Value::Null);
+            // Each proposal not sent from here: are all its coins still among the vault's coins here? (No: spent, maybe
+            // by a co-signer's send; or, on a borrowed chain, not seen here yet.)
+            if let (Some(have), Some(p)) = (have, crate::chains::find(v["chain"].as_str().unwrap_or(""))) {
+                let ours: Vec<String> = have["coins"].as_array().into_iter().flatten().map(|c| format!("{}:{}", c["txid"].as_str().unwrap_or(""), c["vout"])).collect();
+                if let Some(props) = v["proposals"].as_array_mut() {
+                    for pr in props.iter_mut().filter(|pr| pr["sent"].is_null()) {
+                        let ins = pr["psbt"].as_str().and_then(|t| arcade_wallet::psbt::decode_text(t).ok()).and_then(|b| arcade_wallet::psbt::Psbt::parse(&b, p).ok());
+                        if let Some(ps) = ins {
+                            pr["coins_here"] = json!(ps.tx.inputs.iter().all(|i| ours.contains(&format!("{}:{}", i.prevout.txid.to_hex(), i.prevout.vout))));
+                        }
+                    }
+                }
+            }
             v
         })
         .collect();
@@ -379,7 +388,7 @@ mod tests {
         let tip = node.chain.tip(p.chain_no).unwrap().unwrap();
         let pay = tx(&[], &[(700, script(false, 0)), (300, script(true, 3)), (99, script(false, 40))], 7);
         node.chain.connect_blocks(p, &[block(tip.hash, vec![pay], 9)]).unwrap();
-        let c = coins(node, &id).unwrap();
+        let c = coins_with(node, &id, true).unwrap();
         assert_eq!(c["balance"].as_u64(), Some(1000), "{c}");
         assert_eq!(c["coins"].as_array().unwrap().len(), 2);
         assert_eq!(list(node, Some("peptest"))[0]["balance"].as_u64(), Some(1000));
@@ -391,7 +400,7 @@ mod tests {
         assert!(r["added"].as_bool().unwrap());
         assert_eq!(r["vault"]["first_address"].as_str(), Some(a0.as_str()));
         assert!(r["vault"]["signs_here"].as_bool().unwrap());
-        assert_eq!(coins(node, r["vault"]["id"].as_str().unwrap()).unwrap()["balance"].as_u64(), Some(1000));
+        assert_eq!(coins_with(node, r["vault"]["id"].as_str().unwrap(), true).unwrap()["balance"].as_u64(), Some(1000));
         // B's next vault number moves past the one its key holds.
         assert_eq!(key(node, "peptest", "").unwrap()["vault"].as_u64(), Some(1));
         // Twice is "already here"; a bad checksum or a 1-of-1 is refused; remove forgets it.

@@ -651,7 +651,7 @@ fn dispatch_cmd(node: &Node, req: &Value) -> Result<Value, String> {
             };
             crate::msigsvc::address(node, &s("id").ok_or("id required")?, index, req["change"].as_bool().unwrap_or(false))
         }
-        "multisig.coins" => crate::msigsvc::coins(node, &s("id").ok_or("id required")?),
+        "multisig.coins" => crate::msigsvc::coins_with(node, &s("id").ok_or("id required")?, req["lenders"].as_bool().unwrap_or(true)),
         // Spending from a vault (crate::msigspend; docs/MULTISIG.md phase 5).
         "multisig.propose" => {
             let all = req["all"].as_bool().unwrap_or(false);

@@ -21,7 +21,7 @@ async function drawVaults(ch) {
     h("div", { class: "row" },
       h("button", { class: "primary", onclick: () => { MS.form = MS.form === "new" ? null : "new"; drawVaults(ch); } }, "New vault"),
       h("button", { onclick: () => { MS.form = MS.form === "add" ? null : "add"; drawVaults(ch); } }, "Add from a descriptor")),
-    MS.form === "new" ? newVaultForm(ch) : MS.form === "add" ? addVaultForm(ch) : null,
+    ...(MS.form === "new" ? [newVaultForm(ch)] : MS.form === "add" ? [addVaultForm(ch)] : []),
     h("p", { class: "msg", id: "ms-msg" }));
 }
 
@@ -37,17 +37,23 @@ function vaultRow(ch, v, tk) {
 }
 
 function vaultDetail(ch, v, tk) {
-  const addrBox = h("div", {}), coinsBox = h("div", { class: "wl-rows" });
+  const addrBox = h("div", {}), coinsBox = h("div", { class: "wl-rows" }, h("div", { class: "x-empty" }, "Loading…"));
   const showAddr = (a) => addrBox.replaceChildren(
     h("p", { class: "wl-hint" }, `Receive address ${a.index}: send ${tk} here.`),
     h("div", { class: "row" }, h("code", {}, a.address), h("button", { class: "small", onclick: () => navigator.clipboard.writeText(a.address) }, "Copy")),
     qrImg(a.address));
   showAddr({ index: 0, address: v.first_address });
-  api("multisig.coins", { id: v.id }).then((c) => {
+  // The coins followed here at once; on a borrowed chain a lender's scan after (it can take a minute).
+  const drawCoins = (c) => {
     coinsBox.replaceChildren(...(c.coins.length ? c.coins.map((x) => h("div", { class: "wl-row" }, h("span", { class: "ic in" }, "↓"),
       h("div", { class: "mid" }, h("div", { translate: "no" }, shortAddr(x.address)), h("div", { class: "s" }, `${x.change ? "change" : "receive"} ${x.index} · ${x.height ? "block " + x.height : "waiting"}`)),
       h("span", { class: "amt" }, `${coinNum(x.value)} ${tk}`))) : [h("div", { class: "x-empty" }, "No coins yet.")]));
-  }).catch((e) => coinsBox.replaceChildren(h("div", { class: "x-empty bad" }, e.message)));
+  };
+  const coinsFail = (e) => coinsBox.replaceChildren(h("div", { class: "x-empty bad" }, e.message));
+  api("multisig.coins", { id: v.id, lenders: false }).then((c) => {
+    drawCoins(c);
+    if (c.borrowed) api("multisig.coins", { id: v.id }).then(drawCoins).catch(() => {});
+  }).catch(coinsFail);
   return h("div", { class: "wl-panel" },
     h("h2", {}, v.name || "Vault"),
     addrBox,
@@ -171,7 +177,7 @@ function spendBox(ch, v, tk) {
     } }, "Propose")),
     ...props.map((pr) => {
       const box = h("div", { class: "wl-panel" },
-        h("div", { class: "wl-hint", translate: "no" }, `Proposal ${pr.id.slice(0, 12)}… · ${pr.sent ? "sent " + pr.sent : pr.ready ? "ready" : "waiting for signatures"}${pr.from ? " · from arcade " + pr.from.slice(0, 12) + "…" : ""}`));
+        h("div", { class: "wl-hint", translate: "no" }, `Proposal ${pr.id.slice(0, 12)}… · ${pr.sent ? "sent " + pr.sent : pr.coins_here === false ? "a coin of it is no longer among the vault's coins here (spent, perhaps by a co-signer's send, or not seen here yet)" : pr.ready ? "ready" : "waiting for signatures"}${pr.from ? " · from arcade " + pr.from.slice(0, 12) + "…" : ""}`));
       const cardBox = h("div", {}, h("div", { class: "x-empty" }, "Loading…"));
       box.append(cardBox);
       api("multisig.card", { id: v.id, proposal: pr.id }).then((r) => cardBox.replaceChildren(cardView(r.card, tk))).catch((e) => cardBox.replaceChildren(h("div", { class: "msg bad" }, e.message)));

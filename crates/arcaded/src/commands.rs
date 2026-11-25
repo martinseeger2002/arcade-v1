@@ -159,7 +159,7 @@ cmds! {
     "multisig.import" Local "chain, descriptor, name?, backup?" "Add a vault made elsewhere from its descriptor (sh/wsh/sh(wsh(sortedmulti(2,...)))): watch-only, or signed for here when this wallet's phrase holds one of its keys.";
     "multisig.list" Local "chain?" "Your vaults (on one chain, or all) with their descriptors, co-signers (here or elsewhere) and balances.";
     "multisig.address" Local "id, index?, change?" "A vault's address: index on the receive (or change) branch; without index the next new receive address.";
-    "multisig.coins" Local "id" "A vault's unspent coins and balance, from this arcade's address index or borrowed chain data.";
+    "multisig.coins" Local "id, lenders?" "A vault's unspent coins and balance, from this arcade's address index or borrowed chain data (there, lenders: false answers at once from the coins followed here; by default a lender's scan is added, which can take a minute).";
     "multisig.propose" Local "id, to, amount?, all?, coins?" "Propose a payment from a vault: amount (smallest units) to an address, or all: everything less the fee; coins (\"txid:vout\", a list) picks which coins, else the largest first. Change goes back to the vault's next change address. Returns the PSBT (give it to a co-signer) and its card; kept here as a proposal.";
     "multisig.card" Local "id, psbt?, proposal?" "What signing a vault spend approves: each output (payment or change back to the vault, checked by its key paths), the fee, each coin's signatures and whether this arcade sees it unspent, and whether it is ready.";
     "multisig.merge" Local "id, psbt" "Merge a co-signer's copy of a vault spend into the proposal kept here (a field the two disagree on is refused).";
@@ -787,6 +787,7 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("unchecked", "string", "What happens to content not checked yet: show_here or cover."),
     ("day_cap", "integer", "A daily spending cap, in ARCADE base units."),
     ("descriptor", "string", "An output descriptor with its checksum (sh/wsh/sh(wsh(sortedmulti(...))))."),
+    ("lenders", "boolean", "Also ask a lender of a borrowed chain (slower)."),
     ("place", "integer", "A place in a list, from 0 (a multisig vault's co-signer keys)."),
     ("proposal", "string", "A multisig vault spend proposal (its unsigned txid)."),
     ("value", "string", "A value."),

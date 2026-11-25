@@ -291,7 +291,7 @@ pub fn drop_proposal(node: &Node, id: &str, pid: &str) -> Result<Value, String> 
 mod tests {
     use super::*;
     use crate::accountsvc::add_words;
-    use crate::msigsvc::{coins, create, import};
+    use crate::msigsvc::{coins_with, create, import};
     use crate::sitesvc::tests::{addr, block, setup, tx};
     use arcade_wallet::keys::{seed_from_phrase, XPriv, TPUB};
 
@@ -320,7 +320,7 @@ mod tests {
         let tip = node.chain.tip(p.chain_no).unwrap().unwrap();
         let fund = tx(&[], &[(600_000_000, d.at(false, 0).unwrap().output_script(Wrap::Sh)), (500_000_000, d.at(false, 1).unwrap().output_script(Wrap::Sh))], 11);
         node.chain.connect_blocks(p, &[block(tip.hash, vec![fund], 9)]).unwrap();
-        assert_eq!(coins(node, &id).unwrap()["balance"].as_u64(), Some(1_100_000_000));
+        assert_eq!(coins_with(node, &id, true).unwrap()["balance"].as_u64(), Some(1_100_000_000));
 
         // A proposes 7 coins to someone: both coins needed, change to change 0.
         let to = addr(&t, 9);
@@ -338,6 +338,9 @@ mod tests {
         let one = format!("{}:0", c["inputs"][0]["txid"].as_str().unwrap());
         assert!(propose(node, &id, &to, 700_000_000, false, &[one]).is_err());
 
+        // The list says the proposal's coins are all still the vault's here.
+        let listed = crate::msigsvc::list(node, Some("peptest"));
+        assert_eq!(listed[0]["proposals"][0]["coins_here"], true, "{listed}");
         // A signs its copy (kept here), and gives the PSBT on.
         let a = sign(node, &id, None, Some(&pid)).unwrap();
         assert_eq!(a["signed_inputs"].as_u64(), Some(2));
