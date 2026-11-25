@@ -893,6 +893,19 @@ fn keep_hold(holds: &mut std::collections::BTreeMap<String, (u64, Value)>, id: &
 
 #[cfg(test)]
 mod tests {
+    /// A linked keeper that timed out goes last among the linked ones for SLOW_FOR, so the next ask goes elsewhere.
+    #[test]
+    fn a_keeper_that_timed_out_goes_last_for_a_while() {
+        let (a, b) = ("aa11slowkeeper", "bb22otherkeeper");
+        assert!(!super::slow_lately(a));
+        super::note_slow(a);
+        assert!(super::slow_lately(a) && !super::slow_lately(b));
+        let mut v = vec![(a.to_string(), true), (b.to_string(), true)];
+        v.sort_by_key(|(id, linked)| (!*linked, super::slow_lately(id)));
+        assert_eq!(v[0].0, b);
+        assert!(super::ask_linked_timeout_text().starts_with(super::NO_ANSWER));
+    }
+
     use super::*;
 
     #[test]
@@ -1300,9 +1313,11 @@ pub fn ask_explorer(node: &Node, p: &ChainParams, ix: &str, cmd: &str, req: &Val
         last = format!("linking to {}'s arcade, which keeps it; try again in a minute", names.join(" or "));
     }
     let q = json!({"cmd": cmd, "req": req}).to_string();
-    // Linked holders first (their link is up; dialing may not work from the same network).
+    // Linked holders first (their link is up; dialing may not work from the same network), and among them the ones
+    // that haven't timed out lately: one keeper that never answers (Kiko 2026-11-25: the ThinkPad asked da506e1f
+    // six times in a row, 30 s each) no longer stands in front of the others on every ask.
     let mut holders = index_holders(node, p.net, ix);
-    holders.sort_by_key(|(id, _)| !is_linked(node, id));
+    holders.sort_by_key(|(id, _)| (!is_linked(node, id), slow_lately(id)));
     // Four tries; an arcade that refuses by the handle gate (a release before a read was opened, such as
     // explorer.tag for a first handle) doesn't count: the next is asked, up to twelve in all.
     let (mut tries, mut asked) = (0, 0);
@@ -1317,6 +1332,14 @@ pub fn ask_explorer(node: &Node, p: &ChainParams, ix: &str, cmd: &str, req: &Val
             Err(e) if is_linked(node, &id) => {
                 if !e.contains(crate::handlegate::NEED) {
                     tries += 1;
+                }
+                if e.starts_with(NO_ANSWER) {
+                    // It is linked and still didn't answer: last for a while, and links asked for to the other
+                    // keepers, so the next ask has someone else to go to.
+                    note_slow(&id);
+                    for (other, _) in index_holders(node, p.net, ix).iter().filter(|(o, _)| *o != id && !is_linked(node, o)).take(2) {
+                        crate::udpsvc::want(other);
+                    }
                 }
                 last = format!("arcade {}: {e}", &id[..id.len().min(8)]);
             }
@@ -1488,9 +1511,33 @@ pub(crate) fn ask_linked(peer: &str, q: Value) -> Result<Value, String> {
         l.waiting.insert(id, (peer.to_string(), tx, 0, Vec::new()));
         id
     };
-    let r = rx.recv_timeout(Duration::from_secs(30)).map_err(|_| "no answer within 30 s".to_string());
+    let r = rx.recv_timeout(Duration::from_secs(30)).map_err(|_| ask_linked_timeout_text());
     linked().waiting.remove(&id);
     r?
+}
+
+fn ask_linked_timeout_text() -> String {
+    format!("{NO_ANSWER} within 30 s")
+}
+
+/// How a linked ask that timed out begins (see [`ask_linked`]).
+const NO_ANSWER: &str = "no answer";
+/// How long a linked holder that didn't answer goes last among the linked ones.
+const SLOW_FOR: Duration = Duration::from_secs(600);
+
+fn slows() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, Instant>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Instant>>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default).lock().unwrap()
+}
+
+fn slow_lately(id: &str) -> bool {
+    slows().get(id).is_some_and(|t| t.elapsed() < SLOW_FOR)
+}
+
+fn note_slow(id: &str) {
+    let mut s = slows();
+    s.retain(|_, t| t.elapsed() < SLOW_FOR);
+    s.insert(id.to_string(), Instant::now());
 }
 
 /// Per link, often: send the questions queued for it.
