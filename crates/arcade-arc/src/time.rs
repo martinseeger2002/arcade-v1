@@ -204,14 +204,25 @@ impl TimeProofs for ChiaVdf {
         if !chiavdf::create_discriminant(challenge, &mut disc) {
             return false;
         }
-        let mut from = Self::start().to_vec();
-        for run in &runs {
-            if !Self::check_run(&disc, &from, run) {
-                return false;
-            }
-            from = run.output.clone();
+        // Each run starts from the output before it, which the proof carries: the runs are checked side by side, one
+        // thread per core (a time keeper's proof has 4-5 of them in recent blocks, about 8.6 ms each on the GX10).
+        let froms: Vec<Vec<u8>> = std::iter::once(Self::start().to_vec()).chain(runs.iter().map(|r| r.output.clone())).take(runs.len()).collect();
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(runs.len());
+        if threads <= 1 {
+            return runs.iter().zip(&froms).all(|(run, from)| Self::check_run(&disc, from, run));
         }
-        true
+        let per = runs.len().div_ceil(threads);
+        std::thread::scope(|sc| {
+            let handles: Vec<_> = runs
+                .chunks(per)
+                .zip(froms.chunks(per))
+                .map(|(rs, fs)| {
+                    let disc = &disc;
+                    sc.spawn(move || rs.iter().zip(fs).all(|(run, from)| Self::check_run(disc, from, run)))
+                })
+                .collect();
+            handles.into_iter().all(|h| h.join().unwrap_or(false))
+        })
     }
 }
 

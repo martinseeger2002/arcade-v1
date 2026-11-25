@@ -105,14 +105,49 @@ impl Clock {
     }
 }
 
+thread_local! {
+    /// Set on the thread reading this arcade's own stored blocks back at start ([`TrustStored`]).
+    static TRUST_STORED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While held, proofs of time on this thread pass unchecked: the blocks read back from this arcade's own store had
+/// theirs checked when they came in. That check is about 99% of a block's cost at start (the discriminant and every
+/// run of a time keeper's segmented proof): 200+ s for 6,000 blocks on the GX10, 7+ minutes on a 2-core laptop, while
+/// the arcade answered only "starting" (Kiko 2026-11-25). Blocks from other arcades are always checked.
+struct TrustStored;
+
+impl TrustStored {
+    fn hold() -> TrustStored {
+        TRUST_STORED.with(|t| t.set(true));
+        TrustStored
+    }
+}
+
+impl Drop for TrustStored {
+    fn drop(&mut self) {
+        TRUST_STORED.with(|t| t.set(false));
+    }
+}
+
+fn trusted() -> bool {
+    TRUST_STORED.with(|t| t.get())
+}
+
 impl TimeProofs for Clock {
     fn verify(&self, challenge: &arcade_arc::merkle::Hash, steps: u64, proof: &TimeProof) -> bool {
+        if *self == Clock::Vdf && trusted() {
+            return true;
+        }
         match self {
             Clock::StandIn => StandIn.verify(challenge, steps, proof),
             Clock::Vdf => ChiaVdf.verify(challenge, steps, proof),
         }
     }
     fn verify_pot(&self, challenge: &arcade_arc::merkle::Hash, steps: u64, proof: &TimeProof, most: usize) -> bool {
+        if *self == Clock::Vdf && trusted() {
+            // (Still well formed: its runs add up to the steps the chain asks for.)
+            return arcade_arc::time::segments(proof, steps, most).is_some();
+        }
         match self {
             Clock::StandIn => StandIn.verify_pot(challenge, steps, proof, most),
             Clock::Vdf => ChiaVdf.verify_pot(challenge, steps, proof, most),
@@ -1562,6 +1597,8 @@ fn run(node: &Arc<Node>, def: &Def) -> Result<(), String> {
     // The chain's one copy on disk is the store's (docs/ARCADECHAIN.md §14.17): its best branch
     // is read back and checked again, block by block.
     let mut held = 0;
+    // Our own stored blocks: their proofs of time were checked when they came (see TrustStored).
+    let trust = TrustStored::hold();
     if node.chain.hash_at(p.chain_no, 0).ok().flatten() == Some(genesis) {
         let tip = node.chain.tip(p.chain_no).map_err(db_err)?.map_or(0, |t| t.height);
         let mut batch = Vec::new();
@@ -1579,6 +1616,7 @@ fn run(node: &Arc<Node>, def: &Def) -> Result<(), String> {
         held += batch.len();
         refused += log::replay(&mut chain, batch);
     }
+    drop(trust);
     // A block log from before is read once more, then goes (one copy). The store's copy from
     // then holds only the transactions: it is made again, whole.
     let old_log = dir.join("blocks.log");
@@ -4086,6 +4124,22 @@ mod tests {
         let p2 = store::chain_params(&NET, &new.id_at(0).unwrap());
         reconcile(&db, p2, &new).unwrap();
         stored_matches(&db, p2, &new);
+    }
+
+    /// Proofs of time pass unchecked only while TrustStored is held, and only on that thread; a malformed one never.
+    #[test]
+    fn stored_blocks_proofs_pass_only_while_trusted() {
+        let c = arcade_arc::time::block_challenge(&NET, &Hash256([3; 32]));
+        let junk = TimeProof { output: vec![1; 100], proof: vec![2; 100] };
+        assert!(!Clock::Vdf.verify_pot(&c, 1_000, &junk, 8));
+        {
+            let _t = TrustStored::hold();
+            assert!(Clock::Vdf.verify(&c, 1_000, &junk) && Clock::Vdf.verify_pot(&c, 1_000, &junk, 8));
+            assert!(!Clock::Vdf.verify_pot(&c, 1_000, &TimeProof { output: vec![1; 100], proof: vec![2; 7] }, 8), "malformed");
+            assert!(!std::thread::spawn(move || Clock::Vdf.verify_pot(&c, 1_000, &TimeProof { output: vec![1; 100], proof: vec![2; 100] }, 8)).join().unwrap(), "other threads check");
+            assert!(!Clock::StandIn.verify(&c, 1_000, &junk), "the stand-in is always checked");
+        }
+        assert!(!Clock::Vdf.verify_pot(&c, 1_000, &junk, 8));
     }
 
     /// A recent told height well past our tip means behind; an old one, or one within TOLD_AHEAD, doesn't.
