@@ -25,8 +25,8 @@ copy fails its checks and is fetched again elsewhere.
 
 Tested on real blocks with `examples/mwebscan.rs`: mainnet activation (2,265,980-2,266,280),
 the 601 blocks to the tip (3,218,956) and 300 random blocks in between: 0 failures, every HogEx
-amount checked on the contiguous ranges (pool at the tip 512,572.75 LTC). Testnet4: see the
-branch report. Unit tests use mainnet block 2,844,114 (one kernel with a peg-in and a peg-out)
+amount checked on the contiguous ranges (pool at the tip 512,572.75 LTC). Testnet4: every block
+from 2,215,500 to 5,050,468 (2,834,885 with an MWEB block, all amount-checked): 0 failures. Unit tests use mainnet block 2,844,114 (one kernel with a peg-in and a peg-out)
 and damage it in each way the checks must catch.
 
 ## Init installs (docs/INITSYNC.md)
