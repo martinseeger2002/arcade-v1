@@ -8,6 +8,7 @@ pub mod keys;
 pub mod legacy;
 pub mod legs;
 pub mod multisig;
+pub mod psbt;
 pub mod taproot;
 pub mod tx;
 pub mod verify;

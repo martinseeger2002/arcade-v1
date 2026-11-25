@@ -146,7 +146,7 @@ impl Multi {
     }
 
     /// The P2WSH program: version 0, sha256 of the witness script.
-    fn wsh_program(&self) -> Vec<u8> {
+    pub(crate) fn wsh_program(&self) -> Vec<u8> {
         segwit_script(0, &sha256(&self.script()))
     }
 
@@ -182,11 +182,15 @@ impl Multi {
         if !self.keys.contains(&pk) {
             return Err("the key is not one of this multisig's".into());
         }
-        let d = match wrap {
+        Ok(crate::legacy::sign(key, &self.digest(tx, i, coin.value, wrap)?, SIGHASH_ALL))
+    }
+
+    /// The SIGHASH_ALL digest a signature for input `i` (a coin of `value`) signs.
+    pub(crate) fn digest(&self, tx: &Tx, i: usize, value: u64, wrap: Wrap) -> Result<[u8; 32], String> {
+        Ok(match wrap {
             Wrap::Sh => crate::legacy::sighash(&crate::verify::shape(tx), i, &self.script(), SIGHASH_ALL)?,
-            Wrap::Wsh | Wrap::ShWsh => crate::verify::bip143(tx, i, &self.script(), coin.value, SIGHASH_ALL),
-        };
-        Ok(crate::legacy::sign(key, &d, SIGHASH_ALL))
+            Wrap::Wsh | Wrap::ShWsh => crate::verify::bip143(tx, i, &self.script(), value, SIGHASH_ALL),
+        })
     }
 
     /// The scriptSig and witness that spend a coin of this multisig, from signatures by key (any order,

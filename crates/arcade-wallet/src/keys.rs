@@ -183,8 +183,8 @@ impl XPub {
         Ok(k)
     }
 
-    /// Base58Check with the given 4-byte version ([`XPUB`], [`TPUB`]).
-    pub fn to_base58(&self, version: [u8; 4]) -> String {
+    /// The 78 bytes BIP32 serializes (what PSBTs carry as global xpubs).
+    pub fn encode(&self, version: [u8; 4]) -> Vec<u8> {
         let mut v = Vec::with_capacity(78);
         v.extend_from_slice(&version);
         v.push(self.depth);
@@ -192,7 +192,12 @@ impl XPub {
         v.extend_from_slice(&self.child.to_be_bytes());
         v.extend_from_slice(&self.chain_code);
         v.extend_from_slice(&self.key.serialize());
-        arcade_ledger::address::base58check_payload(&v)
+        v
+    }
+
+    /// Base58Check with the given 4-byte version ([`XPUB`], [`TPUB`]).
+    pub fn to_base58(&self, version: [u8; 4]) -> String {
+        arcade_ledger::address::base58check_payload(&self.encode(version))
     }
 
     /// (version, key) of an xpub or tpub; None for anything else (private keys, other versions, a

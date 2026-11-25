@@ -1,6 +1,6 @@
 # Multisig on ARCADE's UTXO chains: a plan
 
-Status: **design agreed; phases 1 (scripts, addresses, checking) and 2 (xpubs, descriptors) built.** For review before any code. Where this page and the code disagree later,
+Status: **design agreed; phases 1 (scripts, addresses, checking), 2 (xpubs, descriptors) and 3 (PSBTs) built.** For review before any code. Where this page and the code disagree later,
 the code is right and this page has a bug.
 
 Goal: a coin can be locked so that **M of N keys** must sign to spend it, on every UTXO chain ARCADE keeps where the
@@ -83,9 +83,11 @@ same as a single-sig one; consolidation matters more on BTC/LTC.
 - **PSBT (BIP174 v0) for every chain.** PSBT v0 doesn't need SegWit: legacy inputs carry `non_witness_utxo` (the
   whole previous tx), which the existing `psbt.rs` already demands. Add: 0x04 redeem script, 0x05 witness script,
   0x06 / global 0x01 BIP32 derivations and xpubs, a combiner, a multisig finalizer.
-- One **ARCADE proprietary global field** (0xFC, prefix `arcade`): the chain key (`doge`, `pep`, …) and the vault
-  descriptor checksum. A signer refuses a PSBT without it, or for a chain it doesn't expect (the address-collision
-  point above).
+- One **ARCADE proprietary global field** (key `0xFC 06 "ARCADE" 00`): the chain's genesis hash (unique per chain
+  and network, where a key name like `pep` is ours alone). A signer refuses a PSBT without it, or for a chain it
+  doesn't expect (the address-collision point above). Built in phase 3 without the descriptor checksum: each
+  co-signer checks every input against its own copy of the vault instead (key paths → address → the coin's
+  script), which a checksum written by whoever made the PSBT couldn't prove.
 - Derivation: one new account per vault on each co-signer's phrase, BIP48 `m/48'/coin'/vault'/type'` (`2'` = wsh,
   `1'` = sh-wsh, `0'` = legacy P2SH, ours since BIP48 names none). Because the descriptor carries every origin,
   recovery never depends on guessing paths.

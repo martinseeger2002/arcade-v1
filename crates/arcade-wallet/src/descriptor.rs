@@ -71,6 +71,17 @@ pub enum Tail {
     Fixed(Vec<u32>),
 }
 
+impl Tail {
+    /// The steps after the xpub to (branch, index).
+    pub fn steps(&self, change: bool, index: u32) -> Vec<u32> {
+        match self {
+            Tail::Ranged(p) => p.iter().copied().chain([index]).collect(),
+            Tail::Branches(r, c) => vec![if change { *c } else { *r }, index],
+            Tail::Fixed(p) => p.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Key {
     Plain(PublicKey),
@@ -116,15 +127,22 @@ impl Key {
             Key::Plain(k) => return Ok(*k),
             Key::Ext { xpub, tail, .. } => (xpub, tail),
         };
-        let path: Vec<u32> = match tail {
-            Tail::Ranged(p) => p.iter().copied().chain([index]).collect(),
-            Tail::Branches(r, c) => vec![if change { *c } else { *r }, index],
-            Tail::Fixed(p) => p.clone(),
-        };
         if index & HARDENED != 0 {
             return Err("an address index is below 2^31".into());
         }
-        Ok(xpub.derive(&path).map_err(|e| e.to_string())?.key)
+        Ok(xpub.derive(&tail.steps(change, index)).map_err(|e| e.to_string())?.key)
+    }
+
+    /// (master fingerprint, full path) of this key at (branch, index), as PSBT derivation fields give
+    /// it; an xpub without an origin is its own master. None for a plain key.
+    pub fn path_at(&self, change: bool, index: u32) -> Option<([u8; 4], Vec<u32>)> {
+        let Key::Ext { origin, xpub, tail, .. } = self else { return None };
+        let (fp, mut path) = match origin {
+            Some(o) => (o.fingerprint, o.path.clone()),
+            None => (xpub.fingerprint(), Vec::new()),
+        };
+        path.extend(tail.steps(change, index));
+        Some((fp, path))
     }
 
     fn parse(s: &str) -> Result<Key, String> {
@@ -259,12 +277,7 @@ impl Descriptor {
             if account.to_xpub() != *xpub {
                 return None;
             }
-            let rest: Vec<u32> = match tail {
-                Tail::Ranged(p) => p.iter().copied().chain([index]).collect(),
-                Tail::Branches(r, c) => vec![if change { *c } else { *r }, index],
-                Tail::Fixed(p) => p.clone(),
-            };
-            Some(account.derive(&rest).ok()?.key)
+            Some(account.derive(&tail.steps(change, index)).ok()?.key)
         })
     }
 
