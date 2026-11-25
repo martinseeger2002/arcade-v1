@@ -1,6 +1,6 @@
 # Multisig on ARCADE's UTXO chains: a plan
 
-Status: **design proposal, nothing built.** For review before any code. Where this page and the code disagree later,
+Status: **design agreed; phase 1 (scripts, addresses, checking) built.** For review before any code. Where this page and the code disagree later,
 the code is right and this page has a bug.
 
 Goal: a coin can be locked so that **M of N keys** must sign to spend it, on every UTXO chain ARCADE keeps where the
@@ -36,7 +36,7 @@ From `arcade-chain/src/params.rs` (`script_flags`, `Format`).
 | Junkcoin `jkc` | yes | 1,145,000 | 1,155,000 | yes | `wsh(sortedmulti)` | |
 | Dogecoin `doge` | yes | never | never | **no** | `sh(sortedmulti)` | CLTV yes, CSV never |
 | Pepecoin `pep` / `peptest` | yes | never | never | no | `sh(sortedmulti)` | CLTV from 1,000 |
-| Luckycoin `lky` | yes | no | no | no | `sh(sortedmulti)` | P2SH byte 5 |
+| Luckycoin `lky` | yes | no | no | no | `sh(sortedmulti)` | P2SH byte 5; signature hashes start with a chain-id prefix from block 276,500 (`luckycoin::sighash_prefix`), which the wallet's signers don't add yet: needed before LKY vaults |
 | Flopcoin `flop` | yes | no | no | no | `sh(sortedmulti)` | |
 | Shibacoin `shic` | yes | no | no | no | `sh(sortedmulti)` | |
 | Wojakcoin `wjk` | yes | no (despite `wj` hrp) | no | no | `sh(sortedmulti)` | P2SH only, no CLTV |
@@ -86,9 +86,9 @@ same as a single-sig one; consolidation matters more on BTC/LTC.
 - One **ARCADE proprietary global field** (0xFC, prefix `arcade`): the chain key (`doge`, `pep`, …) and the vault
   descriptor checksum. A signer refuses a PSBT without it, or for a chain it doesn't expect (the address-collision
   point above).
-- Derivation: one new account per vault on each co-signer's phrase, BIP48-style `m/48'/coin'/vault'/type'`
-  (`2'` = wsh, `1'` = sh-wsh). BIP48 has no type for legacy P2SH; we'd pick `0'` and write it in the descriptor's key
-  origins (open question Q4). Because the descriptor carries every origin, recovery never depends on guessing paths.
+- Derivation: one new account per vault on each co-signer's phrase, BIP48 `m/48'/coin'/vault'/type'` (`2'` = wsh,
+  `1'` = sh-wsh, `0'` = legacy P2SH, ours since BIP48 names none). Because the descriptor carries every origin,
+  recovery never depends on guessing paths.
 - Rejected: a home-made "PSBT-like" format for non-SegWit chains (PSBT v0 already covers them and keeps us compatible
   with Sparrow / Electrum / Core for BTC/LTC); bare multisig (non-standard); unsorted `multi` (order agreement errors).
 
@@ -134,7 +134,7 @@ two-round nonce exchange with strict no-reuse rules and its own audit. Only BTC/
   M phrases are *not* enough unless every other co-signer's xpub is known: we say this loudly at creation.
 - The descriptor is shown as text and QR, with its checksum, and the app makes each co-signer confirm the first
   receive address on their own screen (the anti-swap check: an attacker who substitutes an xpub changes the address).
-- Optional: the arcade keeps an encrypted copy of the descriptor in the mesh store, readable by co-signers only.
+- A choice at setup: also keep an encrypted copy of the descriptor in the mesh store, readable by co-signers only.
 - **Watch-only**: any arcade (or the desktop app with no keys) imports the descriptor and shows balance, coins,
   history and receive addresses. Note: a descriptor reveals every address of the vault (privacy, not theft).
 
@@ -176,8 +176,7 @@ P2WSH follows in phase 1's own verify work and phase 7's chain list.
 - First chain family: Dogecoin family, legacy `sh(sortedmulti)`, tested on Pepecoin testnet.
 - Shape: **2-of-3 only** at first; any M-of-N later.
 - Vault @tags / records: **yes, in a later phase** (8), not in the first ones.
-
-## 6. Open questions
-
-- Q4. Derivation for legacy P2SH vaults: BIP48 with type `0'` (ours) vs BIP45 `m/45'` (older, used by some wallets).
-- Q6. Where the descriptor backup lives: user-only (text/QR) or also an encrypted copy on the mesh.
+- Derivation (Q4): **BIP48** for every vault, `m/48'/coin'/vault'/type'`: `2'` wsh, `1'` sh-wsh, and `0'` for legacy
+  P2SH (BIP48 names no legacy type; ours, written in each key origin of the descriptor).
+- Descriptor backup (Q6): **a choice at vault setup**: keep it yourself only (text/QR), or also store an encrypted
+  copy on the mesh that only the vault's co-signers can read.

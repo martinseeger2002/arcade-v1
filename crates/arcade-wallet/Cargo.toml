@@ -18,6 +18,7 @@ thiserror = "1"
 zeroize = "1.9.1"
 
 [dev-dependencies]
+bitcoinconsensus = "0.106.0"
 arcade-local = { version = "0.1.0", path = "../arcade-local" }
 arcade-chaindb = { path = "../arcade-chaindb" }
 serde_json = "1"

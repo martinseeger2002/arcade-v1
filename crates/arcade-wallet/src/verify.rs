@@ -5,9 +5,11 @@
 //!   SINGLE|ANYONECANPAY);
 //! - P2WPKH, native or inside P2SH: BIP143, every hash type;
 //! - P2TR key path: BIP341 with SIGHASH_DEFAULT or SIGHASH_ALL, no annex;
-//! - P2SH of a refereed prize pool (the arcade's own redeem script): either branch.
+//! - P2SH of a refereed prize pool (the arcade's own redeem script): either branch;
+//! - M-of-N multisig (crate::multisig) in P2SH (legacy hash), P2WSH or P2WSH inside P2SH (BIP143):
+//!   a NULLDUMMY empty first item, then exactly M signatures in the keys' order.
 //!
-//! Anything else (other P2SH scripts, bare multisig, P2WSH, Taproot script paths, other hash
+//! Anything else (other P2SH or P2WSH scripts, bare multisig, Taproot script paths, other hash
 //! types) is reported as not checkable rather than passed: whoever asks decides what to do with
 //! a coin it can't check. Sequences and the lock time are the transaction's own.
 
@@ -97,7 +99,7 @@ fn data_pushes(s: &[u8]) -> Option<Vec<&[u8]>> {
     }).collect()
 }
 
-fn shape(tx: &Tx) -> Shape {
+pub(crate) fn shape(tx: &Tx) -> Shape {
     Shape {
         version: tx.version,
         time: tx.time,
@@ -125,6 +127,10 @@ fn p2wpkh_hash(s: &[u8]) -> Option<&[u8]> {
     (s.len() == 22 && s[0] == 0 && s[1] == 20).then(|| &s[2..22])
 }
 
+fn p2wsh_hash(s: &[u8]) -> Option<&[u8]> {
+    (s.len() == 34 && s[0] == 0 && s[1] == 32).then(|| &s[2..34])
+}
+
 fn p2sh_hash(s: &[u8]) -> Option<&[u8]> {
     (s.len() == 23 && s[0] == 0xa9 && s[1] == 0x14 && s[22] == 0x87).then(|| &s[2..22])
 }
@@ -149,7 +155,7 @@ fn refereed_keys(r: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
 }
 
 /// BIP143 signature hash of input `i`, spending `value` with script code `code`.
-fn bip143(tx: &Tx, i: usize, code: &[u8], value: u64, ht: u32) -> [u8; 32] {
+pub(crate) fn bip143(tx: &Tx, i: usize, code: &[u8], value: u64, ht: u32) -> [u8; 32] {
     let base = ht & 0x1f;
     let acp = ht & 0x80 != 0;
     let (single, none) = (base == 3, base == 2);
@@ -229,6 +235,62 @@ fn wpkh_witness(tx: &Tx, i: usize, h: &[u8], value: u64) -> Result<(), Refused> 
     if SECP256K1.verify_ecdsa(&Message::from_digest(d), &sig, &pk).is_ok() { Ok(()) } else { bad("does not verify") }
 }
 
+/// A SegWit (BIP143) signature by `pubkey` for input `i`, over `code`.
+fn witness_sig(tx: &Tx, i: usize, code: &[u8], value: u64, sig: &[u8], pubkey: &[u8]) -> Result<(), Refused> {
+    let Some((&ht, der)) = sig.split_last() else { return bad("empty signature") };
+    if !matches!(ht, 0x01..=0x03 | 0x81..=0x83) {
+        return bad("unknown hash type");
+    }
+    let Ok(pk) = PublicKey::from_slice(pubkey) else { return bad("not a key") };
+    let Ok(mut s) = Signature::from_der(der) else { return bad("not a DER signature") };
+    s.normalize_s();
+    let d = bip143(tx, i, code, value, ht as u32);
+    if SECP256K1.verify_ecdsa(&Message::from_digest(d), &s, &pk).is_ok() { Ok(()) } else { bad("does not verify") }
+}
+
+/// CHECKMULTISIG's matching: `dummy` must be empty (NULLDUMMY), there must be exactly `m` signatures, none
+/// empty, each one a later key's than the one before. `check` tells one signature against one key.
+fn multisig_sigs(m: usize, keys: &[&[u8]], dummy: &[u8], sigs: &[&[u8]], check: impl Fn(&[u8], &[u8]) -> Result<(), Refused>) -> Result<(), Refused> {
+    if !dummy.is_empty() {
+        return bad("a multisig's extra item must be empty");
+    }
+    if sigs.len() != m {
+        return bad("a multisig spend has exactly its threshold of signatures");
+    }
+    let mut k = 0;
+    for sig in sigs {
+        if sig.is_empty() {
+            return bad("an empty signature");
+        }
+        loop {
+            let Some(key) = keys.get(k) else { return bad("a signature matches none of the keys left") };
+            k += 1;
+            match check(sig, key) {
+                Ok(()) => break,
+                Err(e @ Refused::Unknown(_)) => return Err(e),
+                Err(Refused::Bad(_)) => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A P2WSH witness `[] <sigs> <script>` for program `prog` (sha256 of the script), a multisig script.
+fn wsh_witness(tx: &Tx, i: usize, prog: &[u8], value: u64) -> Result<(), Refused> {
+    let w = &tx.inputs[i].witness;
+    let Some((script, items)) = w.split_last() else { return bad("an empty witness") };
+    if arcade_chain::hash::sha256(script)[..] != *prog {
+        return bad("the witness script is not the coin's");
+    }
+    let Some((m, keys)) = crate::multisig::parse(script) else { return unknown("a P2WSH script other than multisig") };
+    if keys.iter().any(|k| k.len() != 33) {
+        return bad("an uncompressed key in a witness script");
+    }
+    let Some((dummy, sigs)) = items.split_first() else { return bad("a multisig spend has its extra item and signatures") };
+    let sigs: Vec<&[u8]> = sigs.iter().map(|s| &s[..]).collect();
+    multisig_sigs(m, &keys, dummy, &sigs, |sig, key| witness_sig(tx, i, script, value, sig, key))
+}
+
 /// Check input `i` of `tx`, which spends `spent[i]` (`spent` holds every input's coin, in
 /// order).
 pub fn input(p: &ChainParams, tx: &Tx, spent: &[Utxo], i: usize) -> Result<(), Refused> {
@@ -237,7 +299,7 @@ pub fn input(p: &ChainParams, tx: &Tx, spent: &[Utxo], i: usize) -> Result<(), R
         return bad("the coins don't match the inputs");
     }
     let s = &coin.script;
-    let segwit_spend = p2wpkh_hash(s).is_some() || p2tr_key(s).is_some();
+    let segwit_spend = p2wpkh_hash(s).is_some() || p2wsh_hash(s).is_some() || p2tr_key(s).is_some();
     if !x.witness.is_empty() && !segwit_spend && p2sh_hash(s).is_none() {
         return bad("a witness on a coin that takes none");
     }
@@ -260,6 +322,12 @@ pub fn input(p: &ChainParams, tx: &Tx, spent: &[Utxo], i: usize) -> Result<(), R
             return bad("a native SegWit input has an empty scriptSig");
         }
         return wpkh_witness(tx, i, h, coin.value);
+    }
+    if let Some(prog) = p2wsh_hash(s) {
+        if !x.script_sig.is_empty() {
+            return bad("a native SegWit input has an empty scriptSig");
+        }
+        return wsh_witness(tx, i, prog, coin.value);
     }
     if let Some(q) = p2tr_key(s) {
         if !x.script_sig.is_empty() {
@@ -300,6 +368,15 @@ pub fn input(p: &ChainParams, tx: &Tx, spent: &[Utxo], i: usize) -> Result<(), R
             }
             return wpkh_witness(tx, i, wh, coin.value);
         }
+        if let Some(prog) = p2wsh_hash(redeem) {
+            if o.len() != 1 {
+                return bad("a wrapped SegWit scriptSig is the redeem script alone");
+            }
+            if !p.format.segwit {
+                return unknown("SegWit coin on a chain without SegWit");
+            }
+            return wsh_witness(tx, i, prog, coin.value);
+        }
         if !x.witness.is_empty() {
             return bad("a witness on a coin that takes none");
         }
@@ -313,9 +390,18 @@ pub fn input(p: &ChainParams, tx: &Tx, spent: &[Utxo], i: usize) -> Result<(), R
                 _ => bad("not a spend of the pool's script"),
             };
         }
-        return unknown("a P2SH script other than wrapped SegWit or a prize pool");
+        if let Some((m, keys)) = crate::multisig::parse(redeem) {
+            let mut pushed = Vec::with_capacity(o.len());
+            for op in &o[..o.len() - 1] {
+                let Op::Push(d) = op else { return bad("a multisig scriptSig only pushes") };
+                pushed.push(*d);
+            }
+            let Some((dummy, sigs)) = pushed.split_first() else { return bad("a multisig spend has its extra item and signatures") };
+            return multisig_sigs(m, &keys, dummy, sigs, |sig, key| legacy_sig(tx, i, redeem, sig, key));
+        }
+        return unknown("a P2SH script other than wrapped SegWit, multisig or a prize pool");
     }
-    unknown("a kind of coin other than P2PKH, P2PK, P2WPKH, P2SH-P2WPKH or Taproot")
+    unknown("a kind of coin other than P2PKH, P2PK, P2WPKH, P2SH-P2WPKH, multisig in P2SH or P2WSH, or Taproot")
 }
 
 /// Check every input (see `input`).

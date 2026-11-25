@@ -6,6 +6,7 @@ pub mod ordwrite;
 pub mod keys;
 pub mod legacy;
 pub mod legs;
+pub mod multisig;
 pub mod taproot;
 pub mod tx;
 pub mod verify;
