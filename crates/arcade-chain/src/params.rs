@@ -57,7 +57,11 @@ pub fn check_block_body(params: &ChainParams, b: &crate::block::Block) -> Result
     if b.hash() == params.genesis_hash() {
         return Ok(());
     }
-    b.check_with(params.coinbase_script_max)
+    b.check_with(params.coinbase_script_max)?;
+    if params.format.mweb {
+        crate::mweb::check_block(b)?;
+    }
+    Ok(())
 }
 
 /// Script flags, as libbitcoinconsensus (and Core's interpreter) number them.
