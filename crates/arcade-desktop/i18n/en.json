@@ -154,6 +154,7 @@
  "Arcades on the mesh are asked first (this waits up to a minute and a half for their answers), then the coin's own P2P network.": "chains.js:251",
  "Arcades on the mesh first: other V1.0 arcades' blocks, or an existing arcade's Core node. This waits up to a minute and a half for their answers, then uses the coin's own P2P network for anything left.": "index.html:381",
  "Architecture": "options.js:144",
+ "As the sidecar sent it": "explorer.js:853",
  "Ask Nintondo for its known collections (the list once a day; a collection's pieces when it is opened)": "explorer.js:600",
  "Asked the arcade mesh for it {0}; another arcade sends it, usually within a minute or two. Nothing to do: it's used as soon as it arrives, even before a block confirms it.{1}": "app.js:174",
  "Asking the mesh…": "index.html:64",

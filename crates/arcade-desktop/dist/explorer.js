@@ -850,7 +850,7 @@
         t.propertyid != null && ["Property", link(`#${t.propertyid}`, "oprop", String(t.propertyid))], t.amount != null && ["Amount", String(t.amount)], ["Fee", String(t.fee ?? "—")],
         t.block != null && ["Block", h("span", {}, link(fmt(t.block), "oblock", String(t.block)), t.blocktime ? ` · ${when(t.blocktime)}` : "")], ["Confirmations", fmt(t.confirmations)],
         ["Chain transaction", link("Open in Blocks", "tx", t.txid)]]),
-      h("p", { class: "x-note mono" }, JSON.stringify(t).slice(0, 2000)));
+      sect("As the sidecar sent it", null, h("pre", { class: "df-json" }, JSON.stringify(t, null, 1).slice(0, 4000))));
   }
   async function vOBlock() {
     const b = await xapi("explorer.omni_block", { chain: chain.key, height: Number(arg), n: 100 });
