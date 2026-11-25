@@ -139,7 +139,7 @@ fn path_value(fp: [u8; 4], path: &[u32]) -> Vec<u8> {
 
 /// The (fingerprint, path) value of a derivation field.
 fn read_path(v: &[u8]) -> Option<([u8; 4], Vec<u32>)> {
-    if v.len() < 4 || v.len() % 4 != 0 {
+    if v.len() < 4 || !v.len().is_multiple_of(4) {
         return None;
     }
     Some((v[..4].try_into().ok()?, v[4..].chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()))

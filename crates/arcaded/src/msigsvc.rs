@@ -209,9 +209,12 @@ fn watch(node: &Node, p: &ChainParams) -> Option<Watch> {
     (installed && node.chain.addresses_on(p.chain_no).unwrap_or(false)).then_some(Watch::Here)
 }
 
+/// One vault address: (change, index, address, script).
+type VaultAddr = (bool, u32, String, Vec<u8>);
+
 /// Every address of a vault up to [`GAP`] past the last receive address given out, on both branches:
 /// (change, index, address, script).
-fn addresses(v: &Value, p: &ChainParams, d: &Descriptor) -> Result<Vec<(bool, u32, String, Vec<u8>)>, String> {
+fn addresses(v: &Value, p: &ChainParams, d: &Descriptor) -> Result<Vec<VaultAddr>, String> {
     let upto = v["receive_next"].as_u64().unwrap_or(0).max(v["change_next"].as_u64().unwrap_or(0)) as u32 + GAP;
     let mut out = Vec::new();
     for change in [false, true] {
