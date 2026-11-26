@@ -197,7 +197,7 @@ fn ask_mesh(node: &Node, p: &'static ChainParams, ops: &[OutPoint]) {
     }
 }
 
-fn parse_op(s: &str) -> Option<OutPoint> {
+pub(crate) fn parse_op(s: &str) -> Option<OutPoint> {
     let (t, v) = s.split_once(':')?;
     Some(OutPoint { txid: arcade_chain::Hash256::from_hex(t).ok()?, vout: v.parse().ok()? })
 }
@@ -231,9 +231,26 @@ pub fn answer(node: &Node, p: &ChainParams, req: &Value) -> Result<Value, String
 
 // ---------------- the guard ----------------
 
-/// `coins` without the ones that carry, or may carry, an inscription (see the module notes).
+/// `coins` without the ones that carry, or may carry, an inscription (see the module notes),
+/// nor the ones the user froze (coin control, crate::coinctl): what a send gathering coins on
+/// its own may spend.
 pub fn keep_free(node: &Node, p: &'static ChainParams, coins: Vec<Utxo>) -> Vec<Utxo> {
-    let Some(start) = ord::ord_start(p) else { return coins };
+    let frozen = crate::coinctl::frozen(node, p);
+    let coins: Vec<Utxo> = if frozen.is_empty() { coins } else { coins.into_iter().filter(|u| !frozen.contains(&u.outpoint)).collect() };
+    ord_free(node, p, coins)
+}
+
+/// `coins` without the ones that carry, or may carry, an inscription (frozen ones kept: what a
+/// coin carries, not whether the user lets it be spent).
+pub fn ord_free(node: &Node, p: &'static ChainParams, coins: Vec<Utxo>) -> Vec<Utxo> {
+    let verdicts = verdicts(node, p, &coins);
+    coins.into_iter().zip(verdicts).filter(|(u, v)| free_to_spend(*v, u.value)).map(|(u, _)| u).collect()
+}
+
+/// What is known of each coin of `coins` (in order), as [`keep_free`] decides by it: from this
+/// arcade's own ord index and pool, else the mesh. All No on chains without inscriptions.
+pub fn verdicts(node: &Node, p: &'static ChainParams, coins: &[Utxo]) -> Vec<Held> {
+    let Some(start) = ord::ord_start(p) else { return vec![Held::No; coins.len()] };
     let read_to = local_ord(node, p);
     let mut verdicts: Vec<Held> = coins.iter().map(|u| here_at(node, p, start, read_to, &u.outpoint, 0)).collect();
     // Kept: a waiting coin found free (this arcade's own change) stays known once it confirms,
@@ -244,7 +261,7 @@ pub fn keep_free(node: &Node, p: &'static ChainParams, coins: Vec<Utxo>) -> Vec<
         if m.len() > HEARD_MOST {
             m.clear();
         }
-        for (v, u) in verdicts.iter().zip(&coins) {
+        for (v, u) in verdicts.iter().zip(coins) {
             // (Confirmed coins this arcade reads itself are read again: cheap, and always current.)
             if *v != Held::Unknown && node.chain.coin(p, &u.outpoint).ok().flatten().is_none() {
                 m.insert((p.chain_no, u.outpoint), (*v == Held::Yes, Trust::Green));
@@ -252,7 +269,7 @@ pub fn keep_free(node: &Node, p: &'static ChainParams, coins: Vec<Utxo>) -> Vec<
         }
     }
     let from_heard = |verdicts: &mut Vec<Held>| {
-        for (v, u) in verdicts.iter_mut().zip(&coins) {
+        for (v, u) in verdicts.iter_mut().zip(coins) {
             if *v == Held::Unknown {
                 if let Some((yes, _)) = heard(p.chain_no, &u.outpoint) {
                     *v = if yes { Held::Yes } else { Held::No };
@@ -266,7 +283,7 @@ pub fn keep_free(node: &Node, p: &'static ChainParams, coins: Vec<Utxo>) -> Vec<
         ask_mesh(node, p, &ask);
         from_heard(&mut verdicts);
     }
-    coins.into_iter().zip(verdicts).filter(|(u, v)| free_to_spend(*v, u.value)).map(|(u, _)| u).collect()
+    verdicts
 }
 
 /// How well backed the "free" of the coins a send spends is (they came through [`keep_free`]):

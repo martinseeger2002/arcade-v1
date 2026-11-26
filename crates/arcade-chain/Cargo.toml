@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+blake3 = { version = "1", default-features = false, features = ["std", "pure"] }
 hex = "0.4.3"
 ripemd = "0.2.0"
 scrypt = "0.12.0"

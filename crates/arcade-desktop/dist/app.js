@@ -586,6 +586,8 @@ function drawCard(ch) {
   if (ak) $("w-from").textContent = `Sends from your ${ak.label} address ${shortAddr(ak.address)} (${ak.balance == null ? "—" : coinNum(ak.balance)} ${tk}); change comes back to it.`;
   $("w-allkinds-row").hidden = !others.length;
   if (!others.length) $("w-allkinds").checked = false;
+  // Coin control's list of coins follows the wallet, address type and chain picked (coinctl.js).
+  if (typeof ccRefresh === "function") ccRefresh();
   $("w-addr").textContent = w.address;
   $("w-forget").hidden = w.own;
   $("w-btn-send").disabled = !w.own && !w.spendable;
@@ -666,8 +668,9 @@ function assetChanged() {
 function drawPane(ch) {
   document.querySelectorAll(".wl-tabs button").forEach((b) => b.classList.toggle("on", b.dataset.wt === W.tab));
   // Functions: ARCADE ID, accounts, sign-in and linked wallets (not a list of this wallet's rows).
-  const fn = W.tab === "functions";
-  $("w-functions").hidden = !fn; $("w-pane").hidden = fn;
+  const fn = W.tab === "functions", vt = W.tab === "vaults";
+  $("w-functions").hidden = !fn; $("w-vaults").hidden = !vt; $("w-pane").hidden = fn || vt;
+  if (vt) { $("w-note").hidden = true; drawVaults(ch); return; }
   if (fn) { $("w-note").hidden = true; drawAccounts(); drawLinks(ch); aidSites(); return; }
   const v = W.view, w = cur();
   const pane = $("w-pane");
@@ -1193,6 +1196,9 @@ $("w-review").addEventListener("click", async () => {
   try {
     const args = { chain: ch.key, to, amount: sats, from: w.address };
     if (w.own && w.akind && w.kinds.length > 1) Object.assign(args, { kind: w.akind.id, all_kinds: $("w-allkinds").checked });
+    // Coin control (coinctl.js): exactly the coins ticked.
+    const pick = typeof ccPicked === "function" ? ccPicked() : null;
+    if (pick) args.coins = pick;
     const r = await api("wallet.send", { ...args, send: false });
     pendingSend = { cmd: "wallet.send", args };
     const spent = r.kinds_spent || [];
@@ -1200,6 +1206,7 @@ $("w-review").addEventListener("click", async () => {
       h("div", {}, `Pay ${coins(r.amount, ch.key)} to ${r.to}`),
       h("div", { class: "s" }, `fee ${coins(r.fee, ch.key)} · ${r.vsize || r.size} bytes · from ${r.from}${r.kind_label ? ` (${r.kind_label})` : ""}`),
       spent.length > 1 || (spent.length === 1 && spent[0] !== r.kind_label) ? h("div", { class: "s" }, `spends coins of your ${spent.join(", ")} address${spent.length > 1 ? "es" : ""}; change to your ${r.kind_label} address`) : null,
+      r.picked ? h("div", { class: "s" }, `spends the ${r.inputs} coin${r.inputs === 1 ? "" : "s"} you picked, and no other`) : null,
       r.warning ? h("p", { class: "msg bad" }, r.warning) : null,
       cautionLine(r.caution));
     $("w-confirm").hidden = false;
@@ -1225,6 +1232,7 @@ $("w-sendnow").addEventListener("click", async () => {
     const r = await api(pendingSend.cmd, { ...pendingSend.args, send: true });
     $("w-confirm").hidden = true; pendingSend = null; $("w-to").value = ""; $("w-amt").value = "";
     if (r.inscription) W.ordPick = null;
+    if (typeof CC === "object") { CC.picked.clear(); CC.key = ""; }
     msg($("w-send-msg"), r.id ? `Transfer note inscribed (${r.note_tx}); the tokens go once a block holds it.` : `Sent: ${r.txid}`, "ok");
     W.viewAt = 0; W.ddAt = 0; refreshWallet();
   } catch (e) { msg($("w-send-msg"), e.message, "bad"); }

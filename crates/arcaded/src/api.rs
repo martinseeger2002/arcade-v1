@@ -197,6 +197,8 @@ fn handle(node: Arc<Node>, s: UnixStream) {
 pub fn create_wallet(node: &Node, phrase: Option<&str>) -> Result<Value, String> {
     let restored = phrase.is_some();
     let words = node.app.create_wallet(phrase).map_err(|e| e.to_string())?;
+    // The database keeps the phrase. The signer gets its own copy, and drops any seed it held.
+    crate::signer::publish(&node.home, &node.app.active_account(), &words);
     // The wallet is saved: answer now. Finding a restored wallet's @handle can take minutes on a fresh install (its
     // tag index behind, other arcades asked over the mesh for each key slot), and a caller waiting for it gave up with
     // "timed out" though the words were right (a Kiko laptop, 2026-11-24). The handle comes in the background, shown
@@ -517,6 +519,8 @@ fn dispatch_cmd(node: &Node, req: &Value) -> Result<Value, String> {
         "screening.topup" => crate::screening::topup(node, &req),
         "sysinfo.status" => Ok(crate::sysinfo::status(node)),
         "sysinfo.set" => crate::sysinfo::set(node, &req),
+        "mweb.status" => Ok(crate::mwebsvc::status(node)),
+        "mweb.set" => crate::mwebsvc::set(node, &req),
         "mesh.relay" => Ok(crate::relaysvc::status(node)),
         "svc.offers" => crate::svcmesh::list_offers(node, req),
         "svc.services" => Ok(crate::svcmesh::services()),
@@ -614,10 +618,14 @@ fn dispatch_cmd(node: &Node, req: &Value) -> Result<Value, String> {
         "wallet.send" => {
             let amount = req["amount"].as_u64().ok_or("amount required (satoshis)")?;
             crate::coinsend::OWNER_CHANGE_OK.with(|c| c.set(req["owner_changed_ok"] == true));
-            let r = crate::coinsend::send(node, s("chain").as_deref(), &s("to").ok_or("to required")?, amount, s("from").as_deref(), s("kind").as_deref(), req["all_kinds"] == true, req["send"] == true);
+            let picked = crate::coinctl::parse_coins(&req["coins"])?;
+            let r = crate::coinsend::send(node, s("chain").as_deref(), &s("to").ok_or("to required")?, amount, s("from").as_deref(), s("kind").as_deref(), req["all_kinds"] == true, req["send"] == true, &picked);
             crate::coinsend::OWNER_CHANGE_OK.with(|c| c.set(false));
             r
         }
+        "wallet.coins" => crate::coinctl::coins(node, s("chain").as_deref(), s("from").as_deref(), s("kind").as_deref(), req["all_kinds"] == true),
+        "wallet.freeze" => crate::coinctl::freeze(node, &s("chain").ok_or("chain required")?, &crate::coinctl::parse_coins(&req["coins"])?, req["frozen"] != false),
+        "wallet.coin_prefs" => crate::coinctl::set_prefs(node, req["coin_control"].as_bool(), req["tip"].as_bool()),
         "wallet.addr_kind" => {
             let cp = crate::chains::find(&s("chain").ok_or("chain required")?).ok_or("unknown chain")?;
             crate::coinsend::addr_kind(node, cp, s("kind").as_deref())
@@ -631,6 +639,52 @@ fn dispatch_cmd(node: &Node, req: &Value) -> Result<Value, String> {
         "account.signout" => crate::accountsvc::sign_out(node, &s("id").ok_or("id required")?),
         "wallet.import" => crate::importsvc::import(node, &s("chain").ok_or("chain required")?, &s("secret").ok_or("secret required (a WIF key or a wallet's words)")?, &s("addr_kind").unwrap_or_default(), &s("name").unwrap_or_default(), "manual"),
         "wallet.imports" => Ok(crate::importsvc::list(node)),
+        // Multisig vaults, watch-only (crate::msigsvc; docs/MULTISIG.md phase 4).
+        "multisig.key" => crate::msigsvc::key(node, &s("chain").ok_or("chain required")?, &s("wrap").unwrap_or_default()),
+        "multisig.create" => {
+            let keys: Vec<String> = match &req["cosigners"] {
+                Value::Array(a) => a.iter().filter_map(|k| k.as_str().map(String::from)).collect(),
+                Value::String(t) => t.split(['\n', ' ']).filter(|k| !k.trim().is_empty()).map(String::from).collect(),
+                _ => Vec::new(),
+            };
+            crate::msigsvc::create(node, &s("chain").ok_or("chain required")?, &s("name").unwrap_or_default(), &keys, &s("wrap").unwrap_or_default(), &s("backup").unwrap_or_default())
+        }
+        "multisig.import" => crate::msigsvc::import(node, &s("chain").ok_or("chain required")?, &s("descriptor").ok_or("descriptor required")?, &s("name").unwrap_or_default(), &s("backup").unwrap_or_default()),
+        "multisig.list" => Ok(crate::msigsvc::list(node, s("chain").as_deref())),
+        "multisig.address" => {
+            let index = match &req["index"] {
+                Value::Number(n) => Some(n.as_u64().filter(|&i| i < 1 << 31).ok_or("index is a whole number below 2^31")? as u32),
+                Value::String(t) if !t.is_empty() => Some(t.parse::<u32>().ok().filter(|&i| i < 1 << 31).ok_or("index is a whole number below 2^31")?),
+                _ => None,
+            };
+            crate::msigsvc::address(node, &s("id").ok_or("id required")?, index, req["change"].as_bool().unwrap_or(false))
+        }
+        "multisig.coins" => crate::msigsvc::coins_with(node, &s("id").ok_or("id required")?, req["lenders"].as_bool().unwrap_or(true)),
+        // Spending from a vault (crate::msigspend; docs/MULTISIG.md phase 5).
+        "multisig.propose" => {
+            let all = req["all"].as_bool().unwrap_or(false);
+            let amount = match &req["amount"] {
+                Value::Number(n) => n.as_u64().ok_or("amount is a whole number of the smallest unit")?,
+                Value::String(t) if !t.is_empty() => t.parse().map_err(|_| "amount is a whole number of the smallest unit")?,
+                _ if all => 0,
+                _ => return Err("amount required (or all: true)".into()),
+            };
+            let coins: Vec<String> = match &req["coins"] {
+                Value::Array(a) => a.iter().filter_map(|c| c.as_str().map(String::from)).collect(),
+                Value::String(t) => t.split([',', ' ', '\n']).filter(|c| !c.is_empty()).map(String::from).collect(),
+                _ => Vec::new(),
+            };
+            crate::msigspend::propose(node, &s("id").ok_or("id required")?, &s("to").ok_or("to required")?, amount, all, &coins)
+        }
+        "multisig.card" => crate::msigspend::card(node, &s("id").ok_or("id required")?, s("psbt").as_deref(), s("proposal").as_deref()),
+        "multisig.merge" => crate::msigspend::merge(node, &s("id").ok_or("id required")?, &s("psbt").ok_or("psbt required")?),
+        "multisig.sign" => crate::msigspend::sign(node, &s("id").ok_or("id required")?, s("psbt").as_deref(), s("proposal").as_deref()),
+        "multisig.finalize" => crate::msigspend::finalize(node, &s("id").ok_or("id required")?, s("psbt").as_deref(), s("proposal").as_deref(), req["send"].as_bool().unwrap_or(false)),
+        "multisig.drop" => crate::msigspend::drop_proposal(node, &s("id").ok_or("id required")?, &s("proposal").ok_or("proposal required")?),
+        // Co-signing over the mesh (crate::msigmesh; docs/MULTISIG.md phase 6).
+        "multisig.set_node" => crate::msigmesh::set_node(node, &s("id").ok_or("id required")?, req["place"].as_u64().ok_or("place required (the co-signer's place in the vault, from 0)")? as usize, &s("arcade").unwrap_or_default()),
+        "multisig.share" => crate::msigmesh::share(node, &s("id").ok_or("id required")?, &s("proposal").ok_or("proposal required")?),
+        "multisig.remove" => crate::msigsvc::remove(node, &s("id").ok_or("id required")?),
         "wallet.import_remove" => crate::importsvc::remove(node, &s("chain").ok_or("chain required")?, &s("address").ok_or("address required")?),
         "wallet.links" => {
             let chain = s("chain").ok_or("chain required")?;
@@ -869,6 +923,8 @@ fn dispatch_cmd(node: &Node, req: &Value) -> Result<Value, String> {
         "prize.claim" => crate::prizesvc::claim(node, &s("page").unwrap_or_default(), req, req["send"] == true),
         "referee.get" => Ok(crate::refereesvc::setting(node)),
         "referee.set" => crate::refereesvc::set(node, &s("url").unwrap_or_default()),
+        "omni.sidecar_get" => Ok(crate::omnisvc::get(node)),
+        "omni.sidecar_set" => crate::omnisvc::set(node, &s("chain").unwrap_or_default(), &s("url").unwrap_or_default(), &s("path").unwrap_or_default()),
         "collections.known_get" => Ok(serde_json::json!({"known": crate::knowncoll::enabled(node)})),
         "dogefeed.registrar" => crate::dproto::registrar(node, req),
         "dogefeed.stamp" => crate::dproto::stamp(node, req),

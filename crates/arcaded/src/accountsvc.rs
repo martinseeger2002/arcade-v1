@@ -95,6 +95,9 @@ pub fn switch(node: &Node, id: &str) -> Result<Value, String> {
         return Err("no such account here".into());
     }
     node.app.set_active_account(id).map_err(|e| e.to_string())?;
+    if let Ok(phrase) = node.app.phrase() {
+        crate::signer::publish(&node.home, id, &phrase);
+    }
     let _ = node.app.event("wallet", &format!("now using {}", if id.is_empty() { "this arcade's own wallet".to_string() } else { format!("account {id}") }));
     Ok(list(node))
 }
@@ -112,6 +115,9 @@ pub fn sign_out(node: &Node, id: &str) -> Result<Value, String> {
     }
     if node.app.active_account() == id {
         node.app.set_active_account("").map_err(|e| e.to_string())?;
+        if let Ok(phrase) = node.app.phrase() {
+            crate::signer::publish(&node.home, "", &phrase);
+        }
     }
     node.app.drop_account(id).map_err(|e| e.to_string())?;
     save(node, &l)?;
@@ -163,6 +169,7 @@ pub fn add_words(node: &Node, phrase: &str) -> Result<Value, String> {
     l.push(json!({"id": id, "tag": tag, "address": addr0, "pubkey": login_pub, "from": "12 words", "added": now()}));
     save(node, &l)?;
     node.app.set_active_account(&id).map_err(|e| e.to_string())?;
+    crate::signer::publish(&node.home, &id, &phrase);
     let _ = node.app.event("wallet", &format!("added account {} from its words", tag.as_ref().map(|t| format!("@{t}")).unwrap_or_else(|| addr0.clone())));
     Ok(json!({"account": {"id": id, "tag": tag, "address": addr0}, "added": true, "own": false}))
 }
@@ -314,6 +321,7 @@ pub fn sign_in(node: &Node, tag: &str, password: &str, from: Option<&str>) -> Re
         save(node, &l)?;
     }
     node.app.set_active_account(&id).map_err(|e| e.to_string())?;
+    crate::signer::publish(&node.home, &id, &phrase);
     // Make the tag key known (slot 0) so the wallet and messages see it at once.
     let _ = node.app.tag_key(p, 0);
     let _ = node.app.event("wallet", &format!("signed in as @{tag} (from {host})"));

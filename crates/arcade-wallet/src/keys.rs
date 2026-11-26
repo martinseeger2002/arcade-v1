@@ -6,6 +6,8 @@
 //!   phrase holds several tags (one tag per address on chain).
 //! - Address kinds (AddrKind) on SegWit chains: m/49' nested SegWit, m/84' native SegWit,
 //!   m/86' Taproot, each with the chain's own coin type and the same tag index.
+//! - Multisig vault accounts (docs/MULTISIG.md): BIP48 m/48'/coin'/vault'/type' (type 2' P2WSH, 1' P2WSH in
+//!   P2SH, 0' legacy P2SH: ours, BIP48 names none), shared as an extended public key ([`XPub`]).
 
 use arcade_chain::params::ChainParams;
 use hmac::{Hmac, KeyInit, Mac};
@@ -21,7 +23,14 @@ pub enum KeyError {
     Phrase(String),
     #[error("derivation produced an invalid key (astronomically unlikely); try the next index")]
     Invalid,
+    #[error("a public key can't derive a hardened child")]
+    Hardened,
 }
+
+/// Extended key versions (BIP32): main-chain and test-chain public keys. Descriptors write these on
+/// every chain; the chain itself is named next to the descriptor, never by the version.
+pub const XPUB: [u8; 4] = [0x04, 0x88, 0xb2, 0x1e];
+pub const TPUB: [u8; 4] = [0x04, 0x35, 0x87, 0xcf];
 
 /// A fresh 12-word phrase.
 pub fn new_phrase() -> String {
@@ -120,6 +129,10 @@ impl XPriv {
         Ok(k)
     }
 
+    pub fn to_xpub(&self) -> XPub {
+        XPub { key: self.public(), chain_code: self.chain_code, depth: self.depth, parent_fp: self.parent_fp, child: self.child }
+    }
+
     /// Base58Check extended private key with the given 4-byte version (xprv = 0488ADE4).
     pub fn to_base58(&self, version: [u8; 4]) -> String {
         let mut v = Vec::with_capacity(78);
@@ -132,6 +145,101 @@ impl XPriv {
         v.extend_from_slice(&self.key.secret_bytes());
         arcade_ledger::address::base58check_payload(&v)
     }
+}
+
+/// An extended public key: derives the non-hardened children of a key without its secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XPub {
+    pub key: PublicKey,
+    pub chain_code: [u8; 32],
+    pub depth: u8,
+    pub parent_fp: [u8; 4],
+    pub child: u32,
+}
+
+impl XPub {
+    pub fn fingerprint(&self) -> [u8; 4] {
+        arcade_ledger::address::hash160(&self.key.serialize())[..4].try_into().unwrap()
+    }
+
+    /// BIP32 CKDpub: child `index` (not hardened) of this key.
+    pub fn child(&self, index: u32) -> Result<XPub, KeyError> {
+        if index & HARDENED != 0 {
+            return Err(KeyError::Hardened);
+        }
+        let mut data = self.key.serialize().to_vec();
+        data.extend_from_slice(&index.to_be_bytes());
+        let i = hmac512(&self.chain_code, &data);
+        let tweak = Scalar::from_be_bytes(i[..32].try_into().unwrap()).map_err(|_| KeyError::Invalid)?;
+        let key = self.key.add_exp_tweak(SECP256K1, &tweak).map_err(|_| KeyError::Invalid)?;
+        Ok(XPub { key, chain_code: i[32..].try_into().unwrap(), depth: self.depth.checked_add(1).ok_or(KeyError::Invalid)?, parent_fp: self.fingerprint(), child: index })
+    }
+
+    pub fn derive(&self, path: &[u32]) -> Result<XPub, KeyError> {
+        let mut k = self.clone();
+        for &i in path {
+            k = k.child(i)?;
+        }
+        Ok(k)
+    }
+
+    /// The 78 bytes BIP32 serializes (what PSBTs carry as global xpubs).
+    pub fn encode(&self, version: [u8; 4]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(78);
+        v.extend_from_slice(&version);
+        v.push(self.depth);
+        v.extend_from_slice(&self.parent_fp);
+        v.extend_from_slice(&self.child.to_be_bytes());
+        v.extend_from_slice(&self.chain_code);
+        v.extend_from_slice(&self.key.serialize());
+        v
+    }
+
+    /// Base58Check with the given 4-byte version ([`XPUB`], [`TPUB`]).
+    pub fn to_base58(&self, version: [u8; 4]) -> String {
+        arcade_ledger::address::base58check_payload(&self.encode(version))
+    }
+
+    /// (version, key) of an xpub or tpub; None for anything else (private keys, other versions, a
+    /// depth-0 key with a parent).
+    pub fn from_base58(s: &str) -> Option<([u8; 4], XPub)> {
+        let (first, rest) = arcade_ledger::address::decode_base58check(s)?;
+        let mut v = vec![first];
+        v.extend_from_slice(&rest);
+        if v.len() != 78 {
+            return None;
+        }
+        let version: [u8; 4] = v[..4].try_into().unwrap();
+        if version != XPUB && version != TPUB {
+            return None;
+        }
+        let x = XPub {
+            depth: v[4],
+            parent_fp: v[5..9].try_into().unwrap(),
+            child: u32::from_be_bytes(v[9..13].try_into().unwrap()),
+            chain_code: v[13..45].try_into().unwrap(),
+            key: PublicKey::from_slice(&v[45..78]).ok()?,
+        };
+        if x.depth == 0 && (x.parent_fp != [0; 4] || x.child != 0) {
+            return None;
+        }
+        Some((version, x))
+    }
+}
+
+/// BIP48 script type of a vault account (the last step of m/48'/coin'/vault'/type').
+pub fn vault_type(wrap: crate::multisig::Wrap) -> u32 {
+    match wrap {
+        crate::multisig::Wrap::Sh => 0,
+        crate::multisig::Wrap::ShWsh => 1,
+        crate::multisig::Wrap::Wsh => 2,
+    }
+}
+
+/// The path of vault account `vault` held as `wrap` on a chain with coin type `coin_type`:
+/// m/48'/coin'/vault'/type', every step hardened.
+pub fn vault_path(coin_type: u32, vault: u32, wrap: crate::multisig::Wrap) -> [u32; 4] {
+    [48 | HARDENED, coin_type | HARDENED, vault | HARDENED, vault_type(wrap) | HARDENED]
 }
 
 /// The coin key for tag slot `index` on a chain: m/44'/coin'/0'/0/index.

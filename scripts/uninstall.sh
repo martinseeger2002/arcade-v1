@@ -61,7 +61,8 @@ if [ -n "$pid" ] && [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = arcaded ]; then
   kill -9 "$pid" 2>/dev/null || true
 fi
 pkill -x arcade-desktop 2>/dev/null || true
-rm -f "$BIN/arcaded" "$BIN/arcade" "$BIN/arcade-desktop" "$UNITS/arcaded.service" "$APPS/arcade-v1.desktop" "$ICON"
+pkill -x arcade-signer 2>/dev/null || true
+rm -f "$BIN/arcaded" "$BIN/arcade" "$BIN/arcade-signer" "$BIN/arcade-desktop" "$UNITS/arcaded.service" "$APPS/arcade-v1.desktop" "$ICON"
 systemctl --user daemon-reload 2>/dev/null || true
 systemctl --user reset-failed arcaded.service 2>/dev/null || true
 update-desktop-database "$APPS" 2>/dev/null || true

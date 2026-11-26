@@ -363,7 +363,7 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:defa
     // ArcadeCore's menu bar, one for one: File, Settings, Window, Go, View (the looks).
     return [
       ["File", [["Backup (your 12 words)…", () => go("wallet")]]],
-      ["Settings", [["Options…", () => go("options")], ["Theme…", () => { go("options"); setTimeout(() => document.getElementById("o-theme")?.scrollIntoView(), 50); }]]],
+      ["Settings", [["Options…", () => go("options")], ["Coin control…", () => { go("options"); setTimeout(() => document.getElementById("o-wallet")?.scrollIntoView(), 50); }], ["Theme…", () => { go("options"); setTimeout(() => document.getElementById("o-theme")?.scrollIntoView(), 50); }]]],
       ["Window", [["Activity", () => go("activity")], ["API", () => go("apitab")], ["Chains & Coins", () => go("chains")]]],
       ["Go", TABS.map(([k, l]) => [l, () => go(k)])],
       ["View", null],

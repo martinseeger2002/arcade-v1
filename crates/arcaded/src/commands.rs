@@ -87,6 +87,8 @@ cmds! {
     "screening.topup" Admin "amount" "Pay credit to the screening seller (the one in use, or the cheapest that needs credit), with the Models marketplace's memo, from this wallet. amount: ARCADE base units, at most 10 ARCADE. It counts once in a block.";
     "sysinfo.status" Read "" "Whether this arcade shares its system info, and the exact record it sends (or would send), field by field: what is reported, what is measured (seal speed, after 64 MiB sealed) and what is never shared.";
     "sysinfo.set" Admin "on" "Share this arcade's system info with the mesh (on: true) or stop (on: false; every arcade drops it at once). Off by default; kept across restarts and updates.";
+    "mweb.status" Read "" "Litecoin MWEB (MimbleWimble Extension Blocks): whether the operator turned it on (off by default), the notice to accept first and whether it was, what the switch covers, and while on the MWEB pool of each installed Litecoin chain at its tip (what the HogEx holds, the extension block's kernels, outputs, inputs, peg-ins, peg-outs and fees). Extension blocks are read and checked whatever the switch says.";
+    "mweb.set" Admin "on, accept?" "Turn Litecoin MWEB on (on: true, with accept: the notice version from mweb.status, meaning the operator read and accepted the notice) or off (on: false). Off by default; kept across restarts and updates; a new notice version turns it off until accepted again.";
     "mesh.name_set" Admin "name" "Set the public name other arcades may dial this arcade by (wss://host/mesh or host:port, a host name): shared with every link, so networks that reach only names can find it. \"\" clears it.";
     "mesh.relay" Read "" "Relayed links: whether this arcade relays links for others, its month's traffic limit and cap on links, what it has passed this month and today, the links it passes now, and this arcade's own links through relays.";
     "mesh.relay_set" Admin "on?, limit_gb?, max_links?, price_per_gb?, free_mb?, pay_to?, pay_on?, pay_cap?" "Relay mesh links between arcades that can't reach each other (end-to-end encrypted: the relay sees only sealed bytes). Off by default; limit_gb is the month's traffic limit (default 50), max_links the links passed at once (default 32); price_per_gb (ARCADE, default 0: free) and free_mb (a month per arcade, default 100) are the usage fee, paid to pay_to (any ARCADE address; default this arcade's wallet, and no price without one). pay_on (on unless set false) and pay_cap (ARCADE a month, default 1) let this arcade pay relays that charge, so it keeps its relayed links past a relay's free allowance.";
@@ -141,7 +143,10 @@ cmds! {
     "dd.wallet" Read "chain?" "Your DigiDollar on DigiByte (chain dgb, the default, or dgbtest): address (DD.../TD...), cents, coins, borrowed, whole (false when only coins from the borrow floor on can be seen).";
     "dd.coins" Read "chain?, pubkey" "The DigiDollar address and coins (txid, vout, cents, height) of any DigiByte key (33-byte hex), as dd.wallet shows this wallet's: for a website whose accounts sign in their browsers.";
     "dd.send" Local "chain?, to, cents, send?, client_ref?" "Send DigiDollars (cents, $1 to $100,000 per send) to a DD.../TD... address, with DGB from the same wallet for the fee (0.35 DGB/kB, at least 0.1, at most 0.5 DGB); send: true broadcasts, otherwise it's only built and shown.";
-    "wallet.send" Local "chain?, to, amount, from?, kind?, all_kinds?, send?, client_ref?" "client_ref (with send): as for ledger.item_open. Pay amount (satoshis) on a chain (Pepecoin testnet by default, or any installed or borrowed one) from this wallet (from: one of its addresses or an imported wallet's; otherwise the own address with the most), signed here; kind: the address type it's sent from, change back to it (default: from's type, else the one the Wallet shows); all_kinds: also spend the wallet's other address types' coins; send: true broadcasts, otherwise it's only built and shown with its fee (and a warning when the address could be meant for another chain).";
+    "wallet.coins" Read "chain?, from?, kind?, all_kinds?" "Coin control: the coins a wallet.send with the same from, kind and all_kinds could spend (value, address, confirmations, age; status free, inscription or unchecked (small and nobody could check: kept back); frozen; spendable), with the chain's fee rule (fee_per_kb, per_started_kb, dust) and the change address (from).";
+    "wallet.freeze" Wallet "chain, coins, frozen?" "Coin control: freeze coins (frozen true, the default) so no automatic send spends them and they can't be picked, or unfreeze them (false). The chain's frozen coins after.";
+    "wallet.coin_prefs" Wallet "coin_control?, tip?" "Coin control's setting for the account in use (off until turned on) and whether its how-to tip shows; with either, change it first.";
+    "wallet.send" Local "chain?, to, amount, from?, kind?, all_kinds?, send?, client_ref?, coins?" "client_ref (with send): as for ledger.item_open. coins (coin control): spend exactly these coins (\"txid:vout\", from wallet.coins), all of them and no other; refused when one is frozen, kept back for an inscription or spent, or they don't pay the amount and fee. Pay amount (satoshis) on a chain (Pepecoin testnet by default, or any installed or borrowed one) from this wallet (from: one of its addresses or an imported wallet's; otherwise the own address with the most), signed here; kind: the address type it's sent from, change back to it (default: from's type, else the one the Wallet shows); all_kinds: also spend the wallet's other address types' coins; send: true broadcasts, otherwise it's only built and shown with its fee (and a warning when the address could be meant for another chain).";
     "wallet.link" Wallet "chain, wif, tag" "Link another wallet to your @tag (signed by both keys).";
     "wallet.unlink" Wallet "chain, address, tag" "Remove a linked wallet.";
     "wallet.links" Read "chain" "Your linked wallets on a chain.";
@@ -153,6 +158,22 @@ cmds! {
     "wallet.import" Local "chain, secret, addr_kind?, name?" "Import a wallet: a WIF key, or another wallet's words (one address, index 0); addr_kind legacy (default), p2sh-p2wpkh or p2wpkh. Kept encrypted here; nothing is published.";
     "wallet.imports" Local "" "Imported wallets, with balances on chains this arcade keeps addresses for.";
     "wallet.import_remove" Local "chain, address" "Forget an imported wallet and its key.";
+    // Multisig vaults (crate::msigsvc; docs/MULTISIG.md)
+    "multisig.key" Local "chain, wrap?" "This arcade's key for its next multisig vault on a (test) chain, to give the other co-signers: [fingerprint/48'/coin'/vault'/type']tpub.../<0;1>/*. wrap: sh (default where there is no SegWit), wsh (default on SegWit chains) or sh-wsh.";
+    "multisig.create" Local "chain, cosigners, name?, wrap?, backup?" "Make a 2-of-3 vault of this arcade's next key and two other co-signers' keys (cosigners: a list, or one per line). Returns its descriptor: give it to each co-signer and keep it with your 12 words. backup: self (the mesh copy comes with mesh co-signing).";
+    "multisig.import" Local "chain, descriptor, name?, backup?" "Add a vault made elsewhere from its descriptor (sh/wsh/sh(wsh(sortedmulti(2,...)))): watch-only, or signed for here when this wallet's phrase holds one of its keys.";
+    "multisig.list" Local "chain?" "Your vaults (on one chain, or all) with their descriptors, co-signers (here or elsewhere) and balances.";
+    "multisig.address" Local "id, index?, change?" "A vault's address: index on the receive (or change) branch; without index the next new receive address.";
+    "multisig.coins" Local "id, lenders?" "A vault's unspent coins and balance, from this arcade's address index or borrowed chain data (there, lenders: false answers at once from the coins followed here; by default a lender's scan is added, which can take a minute).";
+    "multisig.propose" Local "id, to, amount?, all?, coins?" "Propose a payment from a vault: amount (smallest units) to an address, or all: everything less the fee; coins (\"txid:vout\", a list) picks which coins, else the largest first. Change goes back to the vault's next change address. Returns the PSBT (give it to a co-signer) and its card; kept here as a proposal.";
+    "multisig.card" Local "id, psbt?, proposal?" "What signing a vault spend approves: each output (payment or change back to the vault, checked by its key paths), the fee, each coin's signatures and whether this arcade sees it unspent, and whether it is ready.";
+    "multisig.merge" Local "id, psbt" "Merge a co-signer's copy of a vault spend into the proposal kept here (a field the two disagree on is refused).";
+    "multisig.sign" Local "id, psbt?, proposal?" "Sign a vault spend with this wallet's key in the vault (SIGHASH_ALL; refused when this arcade sees one of its coins spent). Returns the PSBT to pass on.";
+    "multisig.finalize" Local "id, psbt?, proposal?, send?" "Finish a vault spend that has enough signatures (each checked) and, with send, broadcast it as tx.broadcast does; otherwise its hex.";
+    "multisig.drop" Local "id, proposal" "Forget a vault spend proposal here.";
+    "multisig.set_node" Local "id, place, arcade" "Name the arcade (its mesh node id, as multisig.key gives it) the co-signer key at place (from 0, as multisig.list shows the co-signers) is on, so spends can be sent there and taken from there; \"\" forgets it.";
+    "multisig.share" Local "id, proposal" "Send a vault spend (as signed here so far) to every co-signer's arcade named on the vault, over the mesh (end-to-end encrypted). Each takes it only from an arcade named on its vault, and only for that vault's coins; nothing is signed there until its user signs.";
+    "multisig.remove" Local "id" "Forget a vault here (its coins stay; its descriptor is needed to see or spend them again).";
     "tag.check" Public "tag, chain?" "Whether a @tag is free and valid on one chain (every chain has its own @tags): tag may name it (alice.doge), or chain does; else where new tags go. Answers full (alice.doge) and label (@alice · DOGE).";
     "tag.claim" Wallet "tag, chain?, client_ref?" "Claim a @tag on one chain: ARCADE, Pepecoin testnet (test coins asked for by themselves), or a mainnet chain tags live on here (pep, doge, dgb: kept with their ledger or borrowed; paid in that coin). tag may name the chain (alice.doge).";
     "tag.resolve" Public "tag" "What an @tag names: found one (its chain, address, label) or many (different people on several chains: each, to pick from) or none. alice.doge names Dogecoin's.";
@@ -289,6 +310,11 @@ cmds! {
     "explorer.dogefeed_inscription" Public "chain?, id, activity?, type?, cursor?, limit?" "A D:// post, comment or quote: the record, counts (likes, branches, quotes, comments, tips, reveals), latest edit, deleted; activity: true (or type) lists what targets it.";
     "explorer.dogefeed_address" Public "chain?, address, direction?, type?, cursor?, limit?, counts?" "An address on D://: its counts (posts, likes given and received, followers, following, tips, linked keys) and activity (direction out: what it did; in: what paid it).";
     "explorer.dogefeed_keys" Public "chain?" "The D:// registrars this arcade checks records against: DogeFeed's, this arcade's own, and any the operator added.";
+    "explorer.omni" Public "chain?, offset?, n?" "Omni Layer on Litecoin testnet, read from the OmniLite sidecar the operator named (omni.sidecar_set; off by default): the sidecar's omni_getinfo and its properties, newest first.";
+    "explorer.omni_property" Public "chain?, propertyid, offset?, n?" "One Omni property (omni_getproperty) with its holders, largest first.";
+    "explorer.omni_tx" Public "chain?, txid" "One Omni transaction (omni_gettransaction).";
+    "explorer.omni_block" Public "chain?, height" "The Omni transactions of one block (omni_listblocktransactions, each with omni_gettransaction).";
+    "explorer.omni_address" Public "chain?, address" "An address's Omni balances (omni_getallbalancesforaddress); none: an empty list.";
     "explorer.held" Public "chain?, address, offset?, limit?, order?" "The ord inscriptions an address holds, a page at a time by number (order old or new; limit 100, at most 500), without content: {total, items: [{id, n, h, ct, size, at, p}]}.";
     "explorer.a_reactions" Public "chain (the ARCADE chain), targets, me?" "The ledger's reacts, replies and tips on up to 100 targets ({chain, txid}; A:// ops 8 to 10, docs/APROTO.md), per recipient; what a.reactions reads, from any arcade keeping the ARCADE chain.";
     "explorer.a_replies" Public "chain (the ARCADE chain), target, offset?, limit?" "The ledger's replies to a target ({chain, txid}), oldest first; what a.replies reads.";
@@ -477,6 +503,8 @@ cmds! {
     "collections.known_set" Admin "on" "Ask Nintondo for its lists of Doginals, Pepinals and Bellinals (off by default): the listing once a day, a collection's pieces when somebody opens it.";
     "referee.get" Read "" "The referee arcade this one asks for seeds when a page names none, and whose key /r/verified trusts by default: {url, pubkey}, or {} when none is set.";
     "referee.set" Admin "url" "Name the referee arcade (https://...): its key is read from its /r/referee. An empty url clears it.";
+    "omni.sidecar_get" Admin "" "The OmniLite sidecar named for each chain that may have one (Litecoin testnet, regtest): {url, cookie}, or {} when off.";
+    "omni.sidecar_set" Local "chain, url, path?" "Name the OmniLite sidecar (omnilite-standalone -apisend=0, or omnilited) the Explorer reads Omni from on chain: url http://127.0.0.1:<port>, path its API .cookie; asked omni_getinfo before it is kept. An empty url turns Omni off. Only read calls are ever sent. Litecoin mainnet is not offered.";
     "realtime.lanes" Local "token" "Which players of the seat's room the fast lane reaches now (up), and how (routes: direct link or relay).";
     "realtime.routes" Local "origin?" "For finding why a room doesn't connect: per arcade heard (origin: a node id or its start), the link its room sub came in on, the links up to it and the one room frames go out on, frames queued, and the rooms routed to it; and this arcade's own rooms with their ids.";
     "realtime.rtc" Local "token, peer, op, signal?" "A WebRTC link made by this arcade between an app window's seat (a room joined with fast) and a website viewer in its room, on the viewer's own wire (rtcsvc.rs): op offer (this seat's compact offer, when its id is the lower), signal (the viewer's compact offer or answer; an offer is answered), close. Once up (realtime.lanes: rtc), the window's realtime.media pieces and realtime.fast sends for that viewer go over it as RTP and data channels, and the viewer's come back as mchunk and fast events.";
@@ -525,6 +553,7 @@ pub fn find(name: &str) -> Option<&'static Cmd> {
 
 /// Every parameter name a command takes: (name, JSON type, what it is). A type "a|b" takes either.
 pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
+    ("accept", "integer", "The version of the notice the operator read and accepted (from the status command)."),
     ("activity", "boolean", "Also list the record's activity."),
     ("add", "boolean", "true adds, false removes."),
     ("addr_kind", "string", "Address type: legacy, p2sh-p2wpkh or p2wpkh."),
@@ -534,6 +563,7 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("all", "boolean", "All of them, not only the newest or own."),
     ("all_kinds", "boolean", "Also spend the wallet's other address types' coins."),
     ("amount", "integer|string", "An amount in the chain's smallest unit (satoshis; 8 decimals unless the answer says otherwise)."),
+    ("arcade", "string", "An arcade's mesh node id (64 hex)."),
     ("args", "object", "The read's own arguments."),
     ("author", "string", "An author's @tag or address."),
     ("auto", "boolean", "Do it automatically (true) or only when asked (false)."),
@@ -556,6 +586,10 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("clear", "boolean", "Empty it."),
     ("client_ref", "string", "Your idempotency key for a send (1 to 128 printable characters): a retry with the same one never signs again; it answers the first send's result (replayed: true). tx.status and tx.wait take it in place of a txid."),
     ("code", "string", "A code from an earlier answer."),
+    ("coin_control", "boolean", "Coin control on (pick which coins a send spends) or off (automatic)."),
+    ("coins", "array", "Coins, each \"txid:vout\"."),
+    ("frozen", "boolean", "true freezes (no automatic send spends them), false unfreezes."),
+    ("tip", "boolean", "Show the how-to tip (true) or not (false)."),
     ("content", "boolean", "Include inscription content previews."),
     ("contenttype", "string", "A MIME type."),
     ("count", "integer", "How many."),
@@ -581,6 +615,8 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("content_b64", "string", "A file's bytes as base64."),
     ("card", "object|string", "An app card: the JSON beside the inscription, e.g. {\"app\": {name, family, version, ...}}; a string is used as written."),
     ("as", "string", "An @tag to sign with: the key here (the wallet's own, or an imported one) that holds it."),
+    ("backup", "string", "Multisig vault descriptor backup: self (kept by you) or mesh (an encrypted copy for co-signers, not built yet)."),
+    ("change", "boolean", "The change branch of a multisig vault (false: receive)."),
     ("reason", "string", "Why, in a few words."),
     ("replaced_by", "string", "What replaces it: chain:txid, or a name."),
     ("versions", "array", "Card txids (64 hex)."),
@@ -660,6 +696,8 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("nonce", "string", "A sign-in nonce."),
     ("note", "string", "A note."),
     ("coin", "string", "A coin's chain key."),
+    ("coins", "array|string", "Coins as txid:vout (an array, or a comma list)."),
+    ("cosigners", "array|string", "Other co-signers' keys ([fingerprint/path]tpub.../<0;1>/*): an array, or one per line."),
     ("show", "boolean", "Show it (true) or not (false)."),
     ("undo", "boolean", "Give back what was counted."),
     ("origin", "string", "An arcade's node id, or its first hex digits."),
@@ -765,6 +803,10 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("pin", "string", "One offer to use only: \"model@<arcade id>\"; \"\" for none."),
     ("unchecked", "string", "What happens to content not checked yet: show_here or cover."),
     ("day_cap", "integer", "A daily spending cap, in ARCADE base units."),
+    ("descriptor", "string", "An output descriptor with its checksum (sh/wsh/sh(wsh(sortedmulti(...))))."),
+    ("lenders", "boolean", "Also ask a lender of a borrowed chain (slower)."),
+    ("place", "integer", "A place in a list, from 0 (a multisig vault's co-signer keys)."),
+    ("proposal", "string", "A multisig vault spend proposal (its unsigned txid)."),
     ("value", "string", "A value."),
     ("verdict", "string", "A verdict."),
     ("via", "string", "This arcade's https address."),
@@ -773,6 +815,7 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("who", "string", "An @tag or address."),
     ("wif", "string", "A WIF private key."),
     ("with", "array", "Indexes to keep with a chain."),
+    ("wrap", "string", "How a multisig vault is held: sh, wsh or sh-wsh."),
 ];
 
 /// What one command says of one parameter: (command, parameter, allowed values (comma list, "" none), default (JSON,
@@ -806,7 +849,12 @@ pub const PARAM_RULES: &[(&str, &str, &str, &str, u64)] = &[
     ("wallet.send", "kind", "legacy,p2sh-p2wpkh,p2wpkh,p2tr", "", 0),
     ("borrow.send", "kind", "legacy,p2sh-p2wpkh,p2wpkh,p2tr", "", 0),
     ("wallet.addr_kind", "kind", "legacy,p2sh-p2wpkh,p2wpkh,p2tr", "", 0),
+    ("wallet.coins", "kind", "legacy,p2sh-p2wpkh,p2wpkh,p2tr", "", 0),
     ("wallet.import", "addr_kind", "legacy,p2sh-p2wpkh,p2wpkh", "\"legacy\"", 0),
+    ("multisig.key", "wrap", "sh,wsh,sh-wsh", "", 0),
+    ("multisig.create", "wrap", "sh,wsh,sh-wsh", "", 0),
+    ("multisig.create", "backup", "self,mesh", "\"self\"", 0),
+    ("multisig.import", "backup", "self,mesh", "\"self\"", 0),
     ("chains.add", "mode", "full,shared,chain", "\"full\"", 0),
     ("chains.plan", "mode", "full,shared,chain", "\"full\"", 0),
     ("chains.copy_start", "what", "coins,blocks", "\"coins\"", 0),

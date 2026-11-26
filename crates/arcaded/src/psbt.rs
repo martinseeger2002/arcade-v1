@@ -12,11 +12,11 @@
 //! OP_CODESEPARATOR and this wallet's P2PKH. The site wrote the inscription and builds the
 //! scriptSig itself; the wallet signs ALL over the P2PKH after the separator and leaves a partial
 //! signature, never a final scriptSig.
-use arcade_chain::encode::write_varint;
 use arcade_chain::{OutPoint, Tx};
 use arcade_wallet::legacy;
+use arcade_wallet::psbt::{get, read_map as map, write_map as put, MAGIC};
+pub use arcade_wallet::psbt::{decode_text, Map};
 
-const MAGIC: &[u8] = b"psbt\xff";
 const IN_NON_WITNESS_UTXO: u8 = 0x00;
 const IN_PARTIAL_SIG: u8 = 0x02;
 const IN_SIGHASH: u8 = 0x03;
@@ -26,8 +26,6 @@ const IN_FINAL_SCRIPTSIG: u8 = 0x07;
 const IN_DROPPED_ON_FINAL: [u8; 5] = [IN_PARTIAL_SIG, IN_SIGHASH, IN_REDEEM_SCRIPT, 0x05, 0x06];
 /// Most OP_DROPs a reveal lock may have (one per envelope push).
 pub const REVEAL_MOST_DROPS: usize = 200;
-
-pub type Map = Vec<(Vec<u8>, Vec<u8>)>;
 
 #[derive(Debug, Clone)]
 pub struct Psbt {
@@ -44,66 +42,6 @@ pub struct InputView {
     /// Its coin's value and script, from the input's own previous transaction (checked against the txid).
     pub coin: Option<(u64, Vec<u8>)>,
     pub finalized: bool,
-}
-
-fn varint(b: &[u8], at: &mut usize) -> Result<u64, String> {
-    let first = *b.get(*at).ok_or("the PSBT ends early")?;
-    *at += 1;
-    let n = match first {
-        0xfd => 2,
-        0xfe => 4,
-        0xff => 8,
-        v => return Ok(v as u64),
-    };
-    let s = b.get(*at..*at + n).ok_or("the PSBT ends early")?;
-    *at += n;
-    Ok(s.iter().rev().fold(0u64, |a, x| (a << 8) | *x as u64))
-}
-
-fn bytes<'a>(b: &'a [u8], at: &mut usize) -> Result<&'a [u8], String> {
-    let n = varint(b, at)? as usize;
-    let s = b.get(*at..*at + n).ok_or("the PSBT ends early")?;
-    *at += n;
-    Ok(s)
-}
-
-fn map(b: &[u8], at: &mut usize) -> Result<Map, String> {
-    let mut m = Map::new();
-    loop {
-        let k = bytes(b, at)?;
-        if k.is_empty() {
-            return Ok(m);
-        }
-        let v = bytes(b, at)?;
-        if m.iter().any(|(x, _)| x == k) {
-            return Err("the PSBT has a key twice".into());
-        }
-        m.push((k.to_vec(), v.to_vec()));
-    }
-}
-
-fn put(out: &mut Vec<u8>, m: &Map) {
-    for (k, v) in m {
-        write_varint(out, k.len() as u64);
-        out.extend_from_slice(k);
-        write_varint(out, v.len() as u64);
-        out.extend_from_slice(v);
-    }
-    out.push(0);
-}
-
-fn get<'a>(m: &'a Map, key: &[u8]) -> Option<&'a [u8]> {
-    m.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_slice())
-}
-
-/// Hex or base64, as wallets are handed PSBTs.
-pub fn decode_text(text: &str) -> Result<Vec<u8>, String> {
-    let t = text.trim();
-    if let Ok(b) = hex::decode(t) {
-        return Ok(b);
-    }
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.decode(t).map_err(|_| "that isn't a PSBT (hex or base64)".to_string())
 }
 
 impl Psbt {

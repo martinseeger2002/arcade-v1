@@ -85,7 +85,7 @@ launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 
 mkdir -p "$BIN" "$HOME_DIR" "$AGENTS" "$LOGS"
 chmod 700 "$HOME_DIR"
-progs="arcaded arcade"
+progs="arcaded arcade arcade-signer"
 [ "$DESKTOP" = 1 ] && [ -x "$SRC/bin/arcade-desktop" ] && progs="$progs arcade-desktop"
 for p in $progs; do
   install -m 755 "$SRC/bin/$p" "$BIN/$p.new"

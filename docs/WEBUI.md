@@ -60,6 +60,12 @@ It has to be named because the entrance presents itself to arcaded as this compu
   allow).
 - With the key, the window can do everything the app can (wallet included): treat the link like
   the wallet's words while it's valid.
+- **Approving a send** is the exception. A coin, token, or inscription card is signed by
+  `arcade-signer`, and the service cannot approve it. `arcade web` also prints a second link, to
+  the signer's own window on `127.0.0.1` (not the mesh). Open that once: the session is in the
+  link's fragment (`#s=…`), which the service never receives. When a send asks, confirm the
+  address, amount, fee, and every output in that window. Forward its port in the tunnel too, with
+  the same number on both ends. The approval lasts 5 minutes and signs once.
 - The files are served with the app's own content rules (CSP), `X-Frame-Options: DENY` and
   `frame-ancestors 'none'`, so no other page can frame the window.
 

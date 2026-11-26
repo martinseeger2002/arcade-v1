@@ -280,6 +280,24 @@ pub fn check_info(params: &ChainParams, blk: &Block, height: u32, spent: &[Vec<S
         if let Some(Err(why)) = vr.coinbase_rule.map(|f| f(height, cb, subsidy)) {
             return Err(broke(&cb.txid, why));
         }
+        // Litecoin MWEB: the HogEx's amounts against its extension block (Core's
+        // MWEB::Node::ConnectBlock). The HogEx before is known by the HogAddr it spends as input 0
+        // (Core keeps its hash with the block before; this reads it from the coin's script).
+        if params.format.mweb {
+            if let (Some(hogex), Some(hs)) = (blk.txs.last().filter(|t| t.hogex), spent.get(blk.txs.len() - 1)) {
+                let mw = match arcade_chain::mweb::MwebBlock::parse_extra(&blk.extra) {
+                    Ok(Some(mw)) => mw,
+                    _ => return Err(broke(&hogex.txid, "HogEx without a readable MWEB block (bad-blk-mweb)".into())),
+                };
+                let coins: Vec<(u64, bool)> = hs.iter().zip(&hogex.inputs)
+                    .map(|(s, i)| (s.value, i.prevout.vout == 0 && arcade_chain::mweb::hog_addr(s.script).is_some()))
+                    .collect();
+                let first = !coins.first().is_some_and(|c| c.1);
+                if let Err(e) = arcade_chain::mweb::check_hogex_amounts(blk, &mw, height, &coins, first) {
+                    return Err(broke(&hogex.txid, e.to_string()));
+                }
+            }
+        }
     }
     Ok(info)
 }

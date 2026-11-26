@@ -71,13 +71,15 @@ stop_background() {
   while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 300 ]; do sleep 1; n=$((n + 1)); done
   kill -9 "$pid" 2>/dev/null || true
   rm -f "$HOME_DIR/arcaded.pid"
+  # The signer stops with arcaded on Linux. This catches one that was left from an older build.
+  pkill -x arcade-signer 2>/dev/null || true
 }
 
 if [ -n "$PREBUILT" ]; then
   # --- ready-made programs ------------------------------------------------------------------------------------------
   FROM="$PREBUILT/bin"
   ICON_SRC="$PREBUILT/icon.png"
-  for b in arcaded arcade; do
+  for b in arcaded arcade arcade-signer; do
     if [ ! -x "$FROM/$b" ] || ldd "$FROM/$b" 2>&1 | grep -q "not found"; then
       echo "The prebuilt $b does not run on this system (too old a Linux?). Build from source instead:" >&2
       echo "  ARCADE_BUILD=1 bash install.sh" >&2
@@ -119,7 +121,7 @@ else
     export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"
   fi
 
-  PKGS=(-p arcaded -p arcade-cli)
+  PKGS=(-p arcaded -p arcade-cli -p arcade-signer)
   if [ "$DESKTOP" = 1 ]; then
     if pkg-config --exists webkit2gtk-4.1 gtk+-3.0 2>/dev/null; then
       PKGS+=(-p arcade-desktop)
@@ -145,6 +147,7 @@ systemctl --user stop arcaded.service 2>/dev/null || true
 stop_background
 install -m 0755 "$FROM/arcaded" "$BIN/arcaded"
 install -m 0755 "$FROM/arcade" "$BIN/arcade"
+install -m 0755 "$FROM/arcade-signer" "$BIN/arcade-signer"
 
 # A first install opens the app at the end (updates don't); ARCADE_NO_OPEN=1 never does.
 FIRST=0

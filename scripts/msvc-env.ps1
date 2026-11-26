@@ -6,7 +6,7 @@
 # Dot-source it (the variables have to land in this session):
 #
 #   . .\scripts\msvc-env.ps1
-#   cargo build --release --locked -p arcaded -p arcade-cli -p arcade-desktop
+#   cargo build --release --locked -p arcaded -p arcade-cli -p arcade-signer -p arcade-desktop
 #
 # Or let it run a command in that environment:
 #

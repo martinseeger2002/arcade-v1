@@ -115,7 +115,7 @@ Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 # The installer's firewall rule (added only when it ran as administrator; removing it needs one too).
 try { Remove-NetFirewallRule -DisplayName 'Arcade V1.0 (arcaded)' -ErrorAction SilentlyContinue } catch {}
-Get-Process -Name 'arcaded','arcade-desktop' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process -Name 'arcaded','arcade-signer','arcade-desktop' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 $startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'Arcade V1.0.lnk'
 $menu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Arcade V1.0.lnk'

@@ -394,39 +394,108 @@ pub fn build_send_outputs(
     dust: u64,
     time: u32,
 ) -> Result<Tx, String> {
-    if to.is_empty() {
-        return Err("nothing to send".into());
+    build_send_controlled(p, to, keys, coins, &CoinControl::default(), change_script, fee_per_kb, dust, time)
+}
+
+/// Coin control: which of the wallet's coins a send may spend.
+///
+/// - `picked` empty: automatic, as always (the largest coins first, as few as pay).
+/// - `picked` given: exactly those coins, every one of them, and no other; a picked coin not
+///   among the spendable ones (frozen, spent, held back for an inscription) is refused, never
+///   swapped for another.
+/// - `frozen`: coins never spent, automatically or by picking (unfreeze them first).
+#[derive(Debug, Clone, Default)]
+pub struct CoinControl {
+    pub picked: Vec<OutPoint>,
+    pub frozen: Vec<OutPoint>,
+}
+
+/// The coins a send spends and what it costs: (coins, their total, the fee).
+#[derive(Debug, Clone)]
+pub struct Choice {
+    pub coins: Vec<Utxo>,
+    pub have: u64,
+    pub fee: u64,
+}
+
+impl Choice {
+    /// What comes back as change after paying `amount`, and whether it is kept (at least
+    /// `dust`; less is left to the fee, not made into an output nobody could spend).
+    pub fn change(&self, amount: u64, dust: u64) -> (u64, bool) {
+        let c = self.have.saturating_sub(amount.saturating_add(self.fee));
+        (c, c >= dust)
     }
-    let amount = to.iter().try_fold(0u64, |a, (_, v)| add(a, *v)).map_err(|e| e.to_string())?;
-    let mut sorted: Vec<&Utxo> = coins.iter().collect();
-    sorted.sort_by(|a, b| b.value.cmp(&a.value));
-    let mut lens: Vec<usize> = to.iter().map(|(s, _)| s.len()).collect();
-    lens.push(change_script.len());
-    let fee_for = |c: &[Utxo]| fee_for_size(p, estimate_vsize_coins(c, &lens) as u64, fee_per_kb);
+}
+
+/// Choose the coins that pay `amount` plus the fee at `fee_per_kb`, for outputs whose scripts
+/// have the lengths `out_lens` (the change output among them), under coin control `cc`.
+pub fn choose_coins(p: &ChainParams, amount: u64, out_lens: &[usize], coins: &[Utxo], cc: &CoinControl, fee_per_kb: u64) -> Result<Choice, String> {
+    let fee_for = |c: &[Utxo]| fee_for_size(p, estimate_vsize_coins(c, out_lens) as u64, fee_per_kb);
+    let usable: Vec<&Utxo> = coins.iter().filter(|u| !cc.frozen.contains(&u.outpoint)).collect();
     let mut chosen: Vec<Utxo> = Vec::new();
     let mut have = 0u64;
-    for u in sorted {
-        chosen.push(u.clone());
-        have = add(have, u.value).map_err(|e| e.to_string())?;
-        if add(amount, fee_for(&chosen)).is_ok_and(|need| have >= need) {
-            break;
+    if cc.picked.is_empty() {
+        let mut sorted = usable;
+        sorted.sort_by_key(|u| std::cmp::Reverse(u.value));
+        for u in sorted {
+            chosen.push(u.clone());
+            have = add(have, u.value).map_err(|e| e.to_string())?;
+            if add(amount, fee_for(&chosen)).is_ok_and(|need| have >= need) {
+                break;
+            }
+        }
+    } else {
+        for op in &cc.picked {
+            if chosen.iter().any(|c| c.outpoint == *op) {
+                continue;
+            }
+            let Some(u) = usable.iter().find(|u| u.outpoint == *op) else {
+                let why = if cc.frozen.contains(op) { "it is frozen (unfreeze it first)" } else { "it can't be spent here (spent already, not ready yet, or kept back because it may hold an inscription)" };
+                return Err(format!("the coin {}:{} you picked isn't spendable: {why}", op.txid.to_hex(), op.vout));
+            };
+            chosen.push((*u).clone());
+            have = add(have, u.value).map_err(|e| e.to_string())?;
         }
     }
     let fee = fee_for(&chosen);
     let need = add(amount, fee).map_err(|e| e.to_string())?;
     if chosen.is_empty() || have < need {
-        return Err(BuildError::InsufficientFunds { have, need }.to_string());
+        let e = BuildError::InsufficientFunds { have, need }.to_string();
+        return Err(if cc.picked.is_empty() { e } else { format!("{e} (the coins you picked aren't enough: pick more, or send less)") });
     }
+    Ok(Choice { coins: chosen, have, fee })
+}
+
+/// As [`build_send_outputs`], spending the coins coin control `cc` allows (see [`CoinControl`]).
+#[allow(clippy::too_many_arguments)]
+pub fn build_send_controlled(
+    p: &ChainParams,
+    to: &[(&[u8], u64)],
+    keys: &[SecretKey],
+    coins: &[Utxo],
+    cc: &CoinControl,
+    change_script: &[u8],
+    fee_per_kb: u64,
+    dust: u64,
+    time: u32,
+) -> Result<Tx, String> {
+    if to.is_empty() {
+        return Err("nothing to send".into());
+    }
+    let amount = to.iter().try_fold(0u64, |a, (_, v)| add(a, *v)).map_err(|e| e.to_string())?;
+    let mut lens: Vec<usize> = to.iter().map(|(s, _)| s.len()).collect();
+    lens.push(change_script.len());
+    let choice = choose_coins(p, amount, &lens, coins, cc, fee_per_kb)?;
     if let Some((_, v)) = to.iter().find(|(_, v)| *v < dust) {
         return Err(format!("{v} is below the network's dust limit ({dust})"));
     }
     let mut outs: Vec<TxOutSpec> = to.iter().map(|(s, v)| TxOutSpec { value: *v, script: s.to_vec() }).collect();
-    let change = have - need;
-    if change >= dust {
+    let (change, kept) = choice.change(amount, dust);
+    if kept {
         outs.push(TxOutSpec { value: change, script: change_script.to_vec() });
     }
-    let tx = sign_keys(p, if p.format.segwit { 2 } else { 1 }, &chosen, &outs, keys, time)?;
-    if !verify_keyhash(p, &tx, &chosen) {
+    let tx = sign_keys(p, if p.format.segwit { 2 } else { 1 }, &choice.coins, &outs, keys, time)?;
+    if !verify_keyhash(p, &tx, &choice.coins) {
         return Err("the signed tx didn't verify".into());
     }
     Ok(tx)
@@ -672,18 +741,17 @@ pub fn insc_chunks(content: &[u8], ctype: &str, json: Option<&str>, id: [u8; 8])
         .collect())
 }
 
-/// Pay `amount` to `to_script` from coins of `key`'s P2PKH address, change back to it.
-pub fn build_send(
+/// What [`build_send`] signs, unsigned: coins of `pk`'s P2PKH address (largest first) that cover
+/// `amount` and the fee, the payment output, and change back to `pk` when it is at least `dust`.
+pub fn plan_send(
     p: &ChainParams,
     to_script: &[u8],
     amount: u64,
-    key: &SecretKey,
+    pk: &PublicKey,
     coins: &[Utxo],
     fee_per_kb: u64,
     dust: u64,
-    time: u32,
-) -> Result<Tx, BuildError> {
-    let pk = PublicKey::from_secret_key(SECP256K1, key);
+) -> Result<(Vec<Utxo>, Vec<TxOutSpec>), BuildError> {
     let change_script =
         arcade_ledger::address::p2pkh_script(&arcade_ledger::address::hash160(&pk.serialize()));
     let mut sorted: Vec<&Utxo> = coins.iter().filter(|u| u.script == change_script).collect();
@@ -708,6 +776,22 @@ pub fn build_send(
     if change >= dust {
         outs.push(TxOutSpec { value: change, script: change_script });
     }
+    Ok((chosen, outs))
+}
+
+/// Pay `amount` to `to_script` from coins of `key`'s P2PKH address, change back to it.
+pub fn build_send(
+    p: &ChainParams,
+    to_script: &[u8],
+    amount: u64,
+    key: &SecretKey,
+    coins: &[Utxo],
+    fee_per_kb: u64,
+    dust: u64,
+    time: u32,
+) -> Result<Tx, BuildError> {
+    let pk = PublicKey::from_secret_key(SECP256K1, key);
+    let (chosen, outs) = plan_send(p, to_script, amount, &pk, coins, fee_per_kb, dust)?;
     Ok(sign_p2pkh(p, &chosen, &outs, key, time))
 }
 
@@ -1013,5 +1097,108 @@ mod tests {
             build_claim(p, &tags::claim_payload("abc"), &k, &[], 1_000_000, 100_000, 0),
             Err(BuildError::InsufficientFunds { .. })
         ));
+    }
+
+    // ---------------- coin control ----------------
+
+    fn op(n: u8) -> OutPoint {
+        OutPoint { txid: Hash256([n; 32]), vout: n as u32 }
+    }
+
+    /// Three coins of one key on the Pepecoin test chain: 5, 3 and 2 coins.
+    fn three() -> (SecretKey, Vec<u8>, Vec<Utxo>) {
+        let k = key();
+        let me = crate::keys::p2pkh_script_for(&PublicKey::from_secret_key(SECP256K1, &k));
+        let coins = [(1, 500_000_000), (2, 300_000_000), (3, 200_000_000)].iter().map(|&(n, v)| Utxo { outpoint: op(n), value: v, script: me.clone() }).collect();
+        (k, me, coins)
+    }
+
+    fn ins(tx: &Tx) -> Vec<OutPoint> {
+        tx.inputs.iter().map(|i| i.prevout).collect()
+    }
+
+    #[test]
+    fn automatic_selection_never_spends_a_frozen_coin() {
+        let p = &PEPECOIN_TEST;
+        let (k, me, coins) = three();
+        let to = arcade_ledger::address::p2pkh_script(&[3; 20]);
+        let send = |cc: &CoinControl, amount| build_send_controlled(p, &[(&to, amount)], std::slice::from_ref(&k), &coins, cc, &me, 1_000_000, 1_000_000, 0);
+        // Unfrozen, the biggest coin pays.
+        assert_eq!(ins(&send(&CoinControl::default(), 100_000_000).unwrap()), vec![op(1)]);
+        // The biggest frozen: the next ones pay instead, the frozen one never.
+        let cc = CoinControl { frozen: vec![op(1)], ..Default::default() };
+        assert_eq!(ins(&send(&cc, 100_000_000).unwrap()), vec![op(2)]);
+        let tx = send(&cc, 400_000_000).unwrap();
+        assert_eq!(ins(&tx), vec![op(2), op(3)]);
+        // More than the unfrozen coins hold: not enough, though the wallet holds 10.
+        let e = send(&cc, 600_000_000).unwrap_err();
+        assert!(e.starts_with("not enough coins: have 500000000"), "{e}");
+    }
+
+    #[test]
+    fn picked_coins_are_spent_exactly() {
+        let p = &PEPECOIN_TEST;
+        let (k, me, coins) = three();
+        let to = arcade_ledger::address::p2pkh_script(&[3; 20]);
+        let send = |cc: &CoinControl, amount| build_send_controlled(p, &[(&to, amount)], std::slice::from_ref(&k), &coins, cc, &me, 1_000_000, 1_000_000, 0);
+        // The two small ones, though the big one alone would pay: exactly those, in the order picked, and both.
+        let cc = CoinControl { picked: vec![op(3), op(2), op(3)], ..Default::default() };
+        let tx = send(&cc, 100_000_000).unwrap();
+        assert_eq!(ins(&tx), vec![op(3), op(2)]);
+        assert_eq!(crate::verify::all(p, &tx, &[coins[2].clone(), coins[1].clone()]), Ok(()));
+        // Change: 5 coins in, 1 paid, the fee, the rest back to me.
+        let fee = 500_000_000 - tx.outputs.iter().map(|o| o.value).sum::<u64>();
+        assert_eq!(fee, fee_for_size(p, estimate_vsize_coins(&coins[1..], &[25, 25]) as u64, 1_000_000));
+        assert_eq!(tx.outputs[1].script_pubkey, me);
+        assert_eq!(tx.outputs[1].value, 400_000_000 - fee);
+        // One coin picked that can't pay: refused, never topped up with another coin.
+        let cc = CoinControl { picked: vec![op(3)], ..Default::default() };
+        let e = send(&cc, 250_000_000).unwrap_err();
+        assert!(e.contains("not enough coins") && e.contains("pick more"), "{e}");
+    }
+
+    #[test]
+    fn a_picked_coin_that_cant_be_spent_is_refused() {
+        let p = &PEPECOIN_TEST;
+        let (k, me, coins) = three();
+        let to = arcade_ledger::address::p2pkh_script(&[3; 20]);
+        let send = |cc: &CoinControl| build_send_controlled(p, &[(&to, 100_000_000)], std::slice::from_ref(&k), &coins, cc, &me, 1_000_000, 1_000_000, 0);
+        // Frozen: unfreeze it first.
+        let e = send(&CoinControl { picked: vec![op(1)], frozen: vec![op(1)] }).unwrap_err();
+        assert!(e.contains("frozen"), "{e}");
+        // Not among the spendable coins (one held back for an inscription is left out by the caller): refused, not swapped.
+        let e = send(&CoinControl { picked: vec![op(9), op(1)], ..Default::default() }).unwrap_err();
+        assert!(e.contains("may hold an inscription"), "{e}");
+    }
+
+    #[test]
+    fn change_too_small_goes_to_the_fee() {
+        let p = &PEPECOIN_TEST;
+        let (k, me, coins) = three();
+        let to = arcade_ledger::address::p2pkh_script(&[3; 20]);
+        let cc = CoinControl { picked: vec![op(3)], ..Default::default() };
+        let c = choose_coins(p, 0, &[25, 25], &coins, &cc, 1_000_000).unwrap();
+        assert_eq!((c.have, c.fee), (200_000_000, 1_000_000));
+        // 2 coins - 1.985 paid - 0.01 fee = 0.005 back: under the 0.01 dust, so no change output.
+        assert_eq!(c.change(198_500_000, 1_000_000), (500_000, false));
+        assert_eq!(c.change(150_000_000, 1_000_000), (49_000_000, true));
+        let tx = build_send_controlled(p, &[(&to, 198_500_000)], std::slice::from_ref(&k), &coins, &cc, &me, 1_000_000, 1_000_000, 0).unwrap();
+        assert_eq!(tx.outputs.len(), 1);
+    }
+
+    #[test]
+    fn picked_coins_of_several_address_types() {
+        use crate::keys::{kind_key, kind_script, AddrKind};
+        let p = &arcade_chain::params::LITECOIN_MAIN;
+        let seed = seed_from_phrase("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap();
+        let keys: Vec<_> = AddrKind::ALL.iter().map(|&k| (k, kind_key(&seed[..], k, p.bip44_coin_type, 0).unwrap())).collect();
+        let coins: Vec<Utxo> = keys.iter().enumerate().map(|(i, (kind, k))| Utxo { outpoint: op(i as u8 + 1), value: 10_000_000, script: kind_script(*kind, &k.public()) }).collect();
+        let sks: Vec<SecretKey> = keys.iter().map(|(_, k)| k.key).collect();
+        let to = arcade_ledger::address::p2pkh_script(&[3; 20]);
+        // A Legacy coin and a Taproot one, picked across kinds.
+        let cc = CoinControl { picked: vec![coins[0].outpoint, coins[3].outpoint], ..Default::default() };
+        let tx = build_send_controlled(p, &[(&to, 15_000_000)], &sks, &coins, &cc, &coins[2].script, 10_000, 5_460, 0).unwrap();
+        assert_eq!(ins(&tx), vec![coins[0].outpoint, coins[3].outpoint]);
+        assert_eq!(crate::verify::all(p, &tx, &[coins[0].clone(), coins[3].clone()]), Ok(()));
     }
 }

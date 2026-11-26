@@ -221,7 +221,7 @@ function Stop-Arcade([string]$Dir) {
         Remove-Item -LiteralPath $stop -Force -ErrorAction SilentlyContinue
     }
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    Get-Process -Name 'arcaded' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process -Name 'arcaded','arcade-signer' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 400
 }
 
@@ -309,7 +309,7 @@ function Build-Source([string]$Root) {
     $envScript = Join-Path $Root 'scripts\msvc-env.ps1'
     if (-not (Test-Path $envScript)) { throw "Missing $envScript" }
     . $envScript
-    $pkgs = @('build', '--release', '--locked') + $script:CargoTarget + @('-p', 'arcaded', '-p', 'arcade-cli')
+    $pkgs = @('build', '--release', '--locked') + $script:CargoTarget + @('-p', 'arcaded', '-p', 'arcade-cli', '-p', 'arcade-signer')
     $desktop = -not $NoDesktop
     Push-Location $Root
     try {
@@ -421,6 +421,7 @@ function Install-Programs([string]$FromDir, [string]$IconPng, [string]$IconIco) 
     New-Item -ItemType Directory -Force -Path $bin, $DataDir | Out-Null
     Copy-Item -LiteralPath (Join-Path $FromDir 'arcaded.exe') -Destination (Join-Path $bin 'arcaded.exe') -Force
     Copy-Item -LiteralPath (Join-Path $FromDir 'arcade.exe') -Destination (Join-Path $bin 'arcade.exe') -Force
+    Copy-Item -LiteralPath (Join-Path $FromDir 'arcade-signer.exe') -Destination (Join-Path $bin 'arcade-signer.exe') -Force
     # MPIR's DLLs (chiavdf links them) and its license go beside the programs.
     Get-ChildItem -LiteralPath $FromDir -Filter 'mpir*.dll' -ErrorAction SilentlyContinue | Copy-Item -Destination $bin -Force
     $mpirLicense = Join-Path $FromDir 'MPIR-LICENSE.txt'

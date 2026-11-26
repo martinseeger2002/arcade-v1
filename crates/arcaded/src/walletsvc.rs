@@ -881,10 +881,247 @@ pub(crate) fn arc_send(node: &Node, p: &'static arcade_chain::params::ChainParam
     Ok((tx.txid.to_hex(), fee, outs))
 }
 
+/// How a page's card is signed. Preview builds the outputs the window shows. Signer asks
+/// arcade-signer, which signs only that card. Market, repository and storage cards are not
+/// transactions of this shape and keep the path they had.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SignPath {
+    Preview,
+    Signer,
+}
+
+fn pk_of(k: &arcade_app::TagKey) -> Result<arcade_wallet::secp256k1::PublicKey, String> {
+    let raw = hex::decode(&k.pubkey).map_err(|e| e.to_string())?;
+    arcade_wallet::secp256k1::PublicKey::from_slice(&raw).map_err(|e| e.to_string())
+}
+
+/// The address that pays a card, without decrypting the seed when the address is already known.
+fn card_payer(node: &Node, r: &Value) -> Result<String, String> {
+    if let Some(f) = r["from"].as_str().filter(|f| ours(node).iter().any(|a| a == f)) {
+        return Ok(f.to_string());
+    }
+    let p = node.params;
+    let keys = node.app.tag_keys(p.chain_no).map_err(|e| e.to_string())?;
+    if let Some(k) = keys.iter().find(|k| crate::hometag::of_address(node, &k.address).is_some()) {
+        return Ok(k.address.clone());
+    }
+    if let Some(k) = keys.iter().find(|k| k.index == 0).or_else(|| keys.first()) {
+        return Ok(k.address.clone());
+    }
+    // First use of this wallet: remember the public key. Signing still happens in the signer.
+    if let Ok((pk, address)) = crate::signer::derive(&node.home, p, 0) {
+        let rec = arcade_app::TagKey { chain: p.chain_no, index: 0, address: address.clone(), pubkey: pk, tag: None };
+        node.app.put_tag_key(&rec).map_err(|e| e.to_string())?;
+        return Ok(address);
+    }
+    Ok(node.app.tag_key(p, 0).map_err(|e| e.to_string())?.0.address)
+}
+
+fn card_build(node: &Node, r: &Value, path: SignPath) -> Result<(String, u64, Vec<Value>, Option<Value>), String> {
+    if matches!(r["kind"].as_str(), Some("market") | Some("repo") | Some("fog")) {
+        return build_with_caution(node, r, path == SignPath::Signer);
+    }
+    let home = node.params;
+    if let Some(k) = r["chain"].as_str().filter(|k| *k != home.key) {
+        let ap = crate::chains::find(k).filter(|ap| crate::arcsvc::defines(ap.key)).ok_or_else(|| format!("a page's send is on {} or the ARCADE chain, not {k}", home.name))?;
+        return arc_card(node, ap, r, path);
+    }
+    home_card(node, r, path)
+}
+
+fn home_card(node: &Node, r: &Value, path: SignPath) -> Result<(String, u64, Vec<Value>, Option<Value>), String> {
+    let p = node.params;
+    let to = r["to"].as_str().unwrap_or("");
+    let to_script = arcade_ledger::address::script_for_address(p, to).ok_or("bad address")?;
+    let units = r["units"].as_u64().unwrap_or(0);
+    let kind = r["kind"].as_str().unwrap_or("");
+    let from = match kind {
+        "token" => {
+            let pid = r["propertyid"].as_u64().or_else(|| r["propertyid"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0) as u32;
+            ours(node).into_iter().find(|a| send_holdings(node, crate::pagechain::params(node), a).iter().any(|(x, u)| *x == pid && *u >= units)).ok_or("this wallet does not hold that much of that token")?
+        }
+        "inscription" => {
+            let id = r["inscription"].as_str().map(String::from).or_else(|| r["inscription"].as_u64().map(|n| n.to_string())).unwrap_or_default();
+            let i = crate::lentledger::inscription(node, p, &id).ok_or("no such inscription")?;
+            i["owner"].as_str().filter(|o| ours(node).iter().any(|a| a == o)).map(String::from).ok_or("that inscription is no longer this wallet's")?
+        }
+        _ => card_payer(node, r)?,
+    };
+    let rec = node.app.tag_keys(p.chain_no).map_err(|e| e.to_string())?.into_iter().find(|k| k.address == from).ok_or("that address is not this wallet's")?;
+    let pk = pk_of(&rec)?;
+    let from_script = arcade_ledger::address::p2pkh_script_for_address(p, &from).ok_or("bad address")?;
+    let coins = crate::claims::send_coins(node, &from_script);
+    let now = arcade_app::now() as u32;
+    let (chosen, spec) = match kind {
+        "coins" => arcade_wallet::tx::plan_send(p, &to_script, units, &pk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST).map_err(|e| e.to_string())?,
+        "token" => {
+            let pid = r["propertyid"].as_u64().or_else(|| r["propertyid"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0) as u32;
+            let mut payload = vec![0, 0, 0, 0];
+            payload.extend_from_slice(&pid.to_be_bytes());
+            payload.extend_from_slice(&units.to_be_bytes());
+            let extra = vec![arcade_wallet::tx::TxOutSpec { value: crate::claims::DUST, script: to_script.clone() }];
+            arcade_wallet::tx::plan_arcade(p, &payload, extra, &pk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST, 80).map_err(|e| e.to_string())?
+        }
+        _ => {
+            let id = r["inscription"].as_str().map(String::from).or_else(|| r["inscription"].as_u64().map(|n| n.to_string())).unwrap_or_default();
+            let i = crate::lentledger::inscription(node, p, &id).ok_or("no such inscription")?;
+            let mut d = b"INSC".to_vec();
+            d.extend_from_slice(&[1, 2]);
+            d.extend_from_slice(&hex::decode(i["txid"].as_str().unwrap_or("")).map_err(|e| e.to_string())?);
+            let extra = vec![arcade_wallet::tx::TxOutSpec { value: crate::claims::DUST, script: to_script.clone() }];
+            arcade_wallet::tx::plan_arcade(p, &arcade_wallet::tx::any_data(&d), extra, &pk, &coins, crate::claims::FEE_PER_KB, crate::claims::DUST, 80).map_err(|e| e.to_string())?
+        }
+    };
+    finish_card(node, p, r, to, &from, rec.index, now, &chosen, &spec, true, path)
+}
+
+/// A page's send on the ARCADE chain, planned from the public key and signed by arcade-signer.
+fn arc_card(node: &Node, p: &'static arcade_chain::params::ChainParams, r: &Value, path: SignPath) -> Result<(String, u64, Vec<Value>, Option<Value>), String> {
+    let to = r["to"].as_str().unwrap_or("").trim();
+    let to_script = arcade_ledger::address::script_for_address(p, to).ok_or_else(|| format!("{to} isn't an ARCADE address"))?;
+    let units = r["units"].as_u64().unwrap_or(0);
+    let mut slots = node.app.tag_keys(p.chain_no).map_err(|e| e.to_string())?;
+    if !slots.iter().any(|k| k.index == 0) {
+        if let Ok((pk, address)) = crate::signer::derive(&node.home, p, 0) {
+            let rec = arcade_app::TagKey { chain: p.chain_no, index: 0, address, pubkey: pk, tag: None };
+            node.app.put_tag_key(&rec).map_err(|e| e.to_string())?;
+            slots.push(rec);
+        } else {
+            let _ = node.app.tag_key(p, 0).map_err(|e| e.to_string())?;
+            slots = node.app.tag_keys(p.chain_no).map_err(|e| e.to_string())?;
+        }
+    }
+    let kind = r["kind"].as_str().unwrap_or("");
+    let pid = r["propertyid"].as_u64().or_else(|| r["propertyid"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0) as u32;
+    let insc = r["inscription"].as_str().map(String::from).or_else(|| r["inscription"].as_u64().map(|n| n.to_string())).unwrap_or_default();
+    let rec = match kind {
+        "token" => {
+            let mut held = 0u64;
+            let mut found = None;
+            for k in &slots {
+                let has = send_holdings(node, p, &k.address).iter().find(|(x, _)| *x == pid).map(|(_, u)| *u).unwrap_or(0);
+                if has >= units {
+                    found = Some(k.clone());
+                    break;
+                }
+                held = held.max(has);
+            }
+            found.ok_or_else(|| format!("this wallet does not hold that much of that token (at most {held} units on one of its {} addresses)", p.name))?
+        }
+        "inscription" => {
+            let i = crate::lentledger::inscription(node, p, &insc).ok_or("no such inscription")?;
+            let owner = i["owner"].as_str().unwrap_or("");
+            slots.into_iter().find(|k| k.address == owner).ok_or("that inscription is no longer this wallet's")?
+        }
+        "coins" => {
+            let from = r["from"].as_str().unwrap_or("");
+            let first = slots.first().cloned().ok_or("this wallet has no address on that chain yet")?;
+            slots.into_iter().find(|k| !from.is_empty() && k.address == from).unwrap_or(first)
+        }
+        _ => return Err("kind is coins, token or inscription".into()),
+    };
+    let pk = pk_of(&rec)?;
+    let script = arcade_wallet::keys::p2pkh_script_for(&pk);
+    let coins = if crate::arcsvc::borrowed(p) {
+        crate::ordsafe::keep_free(node, p, crate::borrow::own_coins(node, p, &script))
+    } else {
+        let mut c = crate::claims::arc_coins(node, p, &script);
+        c.extend(crate::arcsvc::waiting_outputs(&script).into_iter().map(|(op, value)| arcade_wallet::tx::Utxo { outpoint: op, value, script: script.clone() }));
+        c
+    };
+    let (fee_kb, dust, now) = (2 * arcade_arc::params::MIN_FEE_PER_KB, arcade_arc::params::DUST, arcade_app::now() as u32);
+    let reference = vec![arcade_wallet::tx::TxOutSpec { value: dust, script: to_script.clone() }];
+    let (chosen, spec) = match kind {
+        "coins" => arcade_wallet::tx::plan_send(p, &to_script, units, &pk, &coins, fee_kb, dust).map_err(|e| format!("could not build the send: {e}"))?,
+        "token" => {
+            let mut payload = vec![0, 0, 0, 0];
+            payload.extend_from_slice(&pid.to_be_bytes());
+            payload.extend_from_slice(&units.to_be_bytes());
+            arcade_wallet::tx::plan_arcade(p, &payload, reference, &pk, &coins, fee_kb, dust, arcade_wallet::tx::ARCADE_CLASS_C_MAX).map_err(|e| format!("could not build the token send: {e}"))?
+        }
+        _ => {
+            let i = crate::lentledger::inscription(node, p, &insc).ok_or("no such inscription")?;
+            let mut d = b"INSC".to_vec();
+            d.extend_from_slice(&[1, 2]);
+            d.extend_from_slice(&hex::decode(i["txid"].as_str().unwrap_or("")).map_err(|e| e.to_string())?);
+            arcade_wallet::tx::plan_arcade(p, &arcade_wallet::tx::any_data(&d), reference, &pk, &coins, fee_kb, dust, arcade_wallet::tx::ARCADE_CLASS_C_MAX).map_err(|e| format!("could not build the inscription send: {e}"))?
+        }
+    };
+    finish_card(node, p, r, to, &rec.address, rec.index, now, &chosen, &spec, false, path)
+}
+
+fn finish_card(
+    node: &Node,
+    p: &'static arcade_chain::params::ChainParams,
+    r: &Value,
+    to: &str,
+    from: &str,
+    index: u32,
+    time: u32,
+    chosen: &[arcade_wallet::tx::Utxo],
+    spec: &[arcade_wallet::tx::TxOutSpec],
+    home_caution: bool,
+    path: SignPath,
+) -> Result<(String, u64, Vec<Value>, Option<Value>), String> {
+    let ins: u64 = chosen.iter().map(|u| u.value).sum();
+    let fee = ins.saturating_sub(spec.iter().map(|o| o.value).sum());
+    let outs: Vec<Value> = spec
+        .iter()
+        .map(|o| {
+            let a = arcade_ledger::address::address_of(&o.script, p);
+            json!({"address": a, "value": o.value, "mine": a.as_deref().is_some_and(|a| a == from), "data": a.is_none(), "script": hex::encode(&o.script)})
+        })
+        .collect();
+    match path {
+        SignPath::Preview => {
+            let spent: Vec<arcade_chain::OutPoint> = chosen.iter().map(|u| u.outpoint).collect();
+            let caution = home_caution.then(|| crate::ordsafe::caution(node, p, &spent)).flatten();
+            Ok((String::new(), fee, outs, caution))
+        }
+        SignPath::Signer => {
+            let amount = r["units"].as_u64().unwrap_or(0);
+            let card = arcade_signer::Card {
+                to: to.to_string(),
+                amount,
+                fee,
+                outputs: spec
+                    .iter()
+                    .map(|o| arcade_signer::ShownOutput {
+                        address: arcade_ledger::address::address_of(&o.script, p),
+                        value: o.value,
+                        script: Some(hex::encode(&o.script)),
+                    })
+                    .collect(),
+            };
+            // Shown in the signer window. Proposing does not approve: the desktop program, or the
+            // browser session, still has to.
+            crate::signer::propose(&node.home, &card)?;
+            let job = arcade_signer::SignJob {
+                chain: p.key.into(),
+                index,
+                kind: r["kind"].as_str().unwrap_or("coins").into(),
+                to: to.to_string(),
+                amount,
+                fee,
+                time,
+                inputs: chosen
+                    .iter()
+                    .map(|u| arcade_signer::JobIn { txid: u.outpoint.txid.to_hex(), vout: u.outpoint.vout, value: u.value, script: hex::encode(&u.script) })
+                    .collect(),
+                outputs: spec.iter().map(|o| arcade_signer::JobOut { value: o.value, script: hex::encode(&o.script) }).collect(),
+            };
+            let raw = crate::signer::sign(&node.home, &job)?;
+            let tx = arcade_chain::Tx::parse_with(&raw, &p.format).map_err(|e| e.to_string())?;
+            crate::ownwait::send_own(node, p, &tx)?;
+            Ok((tx.txid.to_hex(), fee, outs, None))
+        }
+    }
+}
+
 /// What a request would send, as built now (for the approval card).
 pub fn preview(node: &Node, id: &str) -> Result<Value, String> {
     let r = get_req(node, id).ok_or("no such request")?;
-    let (_, fee, outs, caution) = build_with_caution(node, &r, false)?;
+    let (_, fee, outs, caution) = card_build(node, &r, SignPath::Preview)?;
     let mut v = r.clone();
     v["fee"] = json!(fee);
     v["outputs"] = json!(outs);
@@ -921,7 +1158,57 @@ fn page_card(node: &Node, page: &str) -> Value {
 static APPROVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn approve(node: &Node, id: &str) -> Result<Value, String> {
-    approve_with(node, id, |r| build(node, r, true))
+    // Coin, token and inscription cards are signed by arcade-signer, and only when that exact
+    // card was approved (the desktop program, or the browser session). Storage, market and
+    // repository cards are not those transactions.
+    let kind = get_req(node, id).and_then(|r| r["kind"].as_str().map(str::to_string));
+    if matches!(kind.as_deref(), Some("coins" | "token" | "inscription")) {
+        return approve_page_card(node, id);
+    }
+    approve_with(node, id, |r| card_build(node, r, SignPath::Signer).map(|(t, f, o, _)| (t, f, o)))
+}
+
+/// A page's send. While the signer is locked the request stays pending and the window is told
+/// where to confirm it. arcaded cannot approve the card itself.
+fn approve_page_card(node: &Node, id: &str) -> Result<Value, String> {
+    let _one = APPROVING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut r = get_req(node, id).ok_or("no such request")?;
+    if r["status"] != "pending" {
+        return Err(format!("that request is {}", r["status"].as_str().unwrap_or("closed")));
+    }
+    match card_build(node, &r, SignPath::Signer) {
+        Ok((txid, fee, _, _)) => {
+            if let Some(now) = get_req(node, id) {
+                r = now;
+            }
+            r["status"] = json!("sent");
+            r["txid"] = json!(txid);
+            r["fee"] = json!(fee);
+            r["answered"] = json!(arcade_app::now());
+            let _ = node.app.event("wallet", &format!("sent {} (approved) in {txid}", r["what"].as_str().unwrap_or("")));
+            put_req(node, &r);
+            Ok(r)
+        }
+        Err(e) if e.contains("the signer is locked") => {
+            let url = crate::signer::confirm_url(&node.home).unwrap_or_default();
+            Ok(json!({
+                "status": "confirm",
+                "id": r["id"],
+                "confirm_url": url,
+                "error": "Confirm this send in the signer window. It is not sent until you approve it there.",
+            }))
+        }
+        Err(e) => {
+            if let Some(now) = get_req(node, id) {
+                r = now;
+            }
+            r["status"] = json!("failed");
+            r["error"] = json!(e);
+            r["answered"] = json!(arcade_app::now());
+            put_req(node, &r);
+            Ok(r)
+        }
+    }
 }
 
 /// Approve with `send` building and broadcasting the transaction: (txid, fee, outputs).
@@ -984,7 +1271,9 @@ pub fn owner_send(node: &Node, page: &str, body: &Value) -> Result<Value, String
         return Err(r["error"].as_str().unwrap_or("refused").to_string());
     }
     let id = r["id"].as_str().unwrap_or("").to_string();
-    let mut done = approve(node, &id)?;
+    // A page this wallet itself holds sends without a second card. It still signs in this process;
+    // moving that path onto the signer is the next piece of this split.
+    let mut done = approve_with(node, &id, |r| build(node, r, true))?;
     done["own_page"] = json!(true);
     put_req(node, &done);
     if done["status"] != "sent" {

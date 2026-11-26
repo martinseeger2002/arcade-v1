@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 arcade-local = { version = "0.1.0", path = "../arcade-local" }
+arcade-signer = { version = "0.1.0", path = "../arcade-signer", default-features = false }
 base64 = "0.23.1"
 serde_json = "1.0.154"
 tauri = "2"

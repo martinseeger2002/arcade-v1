@@ -1220,6 +1220,11 @@ pub fn pool_txs(p: &ChainParams) -> Vec<Tx> {
     pool.iter().filter_map(|raw| Tx::parse_with(raw, &p.format).ok()).collect()
 }
 
+/// The block height of every coin followed on a borrowed chain that a block holds (crate::msigsvc shows it).
+pub fn coin_block_heights(node: &Node, key: &str) -> HashMap<OutPoint, u32> {
+    coin_rows(node, key).into_iter().filter_map(|(op, c)| Some((op, c["h"].as_u64().filter(|&h| h > 0)? as u32))).collect()
+}
+
 /// Every coin row of a chain: (outpoint, row).
 fn coin_rows(node: &Node, key: &str) -> Vec<(OutPoint, Value)> {
     let pre = k(key, "c/");
@@ -1552,7 +1557,9 @@ fn follow(node: Arc<Node>, p: &'static ChainParams, run: Arc<Run>) {
     let mut next_scan = arcade_app::now() + (p.chain_no as u64 % 8) * 10;
     while !run.stop.load(Ordering::Relaxed) {
         let w = watched(&node, p);
-        let scripts: HashSet<Vec<u8>> = w.iter().map(|x| x.script.clone()).collect();
+        let mut scripts: HashSet<Vec<u8>> = w.iter().map(|x| x.script.clone()).collect();
+        // Multisig vaults' addresses are followed too (crate::msigsvc), apart from the wallet's own balance.
+        scripts.extend(crate::msigsvc::scripts_on(&node, p));
         ST.watch.lock().unwrap().insert(p.key.to_string(), scripts.clone());
         drain();
         if lenders(&node, p).is_empty() {
@@ -2008,6 +2015,13 @@ fn tip_of(node: &Node, key: &str) -> u32 {
     state(node, key).and_then(|s| s["tip"].as_u64()).unwrap_or(0) as u32
 }
 
+/// The heights of the coins followed on borrowed chain `key` (0: not in a block yet), and its
+/// tip as last heard (coin control's list).
+pub fn coin_heights(node: &Node, key: &str) -> (std::collections::HashMap<OutPoint, u32>, u32) {
+    let h = coin_rows(node, key).into_iter().map(|(op, c)| (op, c["h"].as_u64().unwrap_or(0) as u32)).collect();
+    (h, tip_of(node, key))
+}
+
 fn pool_spent(key: &str) -> HashSet<OutPoint> {
     let pool = ST.pool.lock().unwrap();
     let mut out = HashSet::new();
@@ -2074,8 +2088,11 @@ pub fn coins(node: &Node, key: &str) -> R {
         return Err(format!("{} is not borrowed", p.name));
     }
     let spent = pool_spent(p.key);
+    // A multisig vault's coins are its own (crate::msigsvc), not the wallet's.
+    let vaults: HashSet<String> = crate::msigsvc::scripts_on(node, p).iter().map(hex::encode).collect();
     let rows: Vec<Value> = coin_rows(node, p.key)
         .into_iter()
+        .filter(|(_, c)| !c["s"].as_str().is_some_and(|s| vaults.contains(s)))
         .map(|(op, c)| json!({"txid": op.txid.to_hex(), "vout": op.vout, "value": c["v"],
                                // Rows kept before SegWit outputs had a name: name them from the script.
                                "address": if c["a"].is_null() { json!(c["s"].as_str().and_then(|s| hex::decode(s).ok()).and_then(|s| arcade_ledger::address::wallet_address_of(&s, p))) } else { c["a"].clone() },
@@ -2092,7 +2109,8 @@ pub fn coins(node: &Node, key: &str) -> R {
 
 // ---------------- sending ----------------
 
-fn fee_rate(node: &Node, p: &ChainParams) -> u64 {
+/// The fee rate a send on borrowed chain `p` pays: the lenders' estimate, within the chain's rules.
+pub fn fee_rate(node: &Node, p: &ChainParams) -> u64 {
     let fp = crate::coinsend::fee_policy(p);
     let fallback = fp.fallback_per_kb.max(fp.floor_per_kb);
     match call_any(node, p, json!([["estimatesmartfee", [6]]])) {
@@ -2107,6 +2125,12 @@ fn fee_rate(node: &Node, p: &ChainParams) -> u64 {
 /// wallet.send has them (crate::coinsend::own_spend), for the wallet's own addresses.
 #[allow(clippy::too_many_arguments)]
 pub fn send(node: &Node, key: &str, to: &str, amount: u64, from: Option<&str>, kind: Option<&str>, all_kinds: bool, broadcast: bool) -> R {
+    send_picked(node, key, to, amount, from, kind, all_kinds, broadcast, &[])
+}
+
+/// As [`send`], spending exactly the coins `picked` when any are (coin control, crate::coinctl).
+#[allow(clippy::too_many_arguments)]
+pub fn send_picked(node: &Node, key: &str, to: &str, amount: u64, from: Option<&str>, kind: Option<&str>, all_kinds: bool, broadcast: bool, picked: &[OutPoint]) -> R {
     let p = by_key(key).ok_or_else(|| format!("unknown chain {key}"))?;
     if !is_borrowed(p.key) {
         return Err(format!("{} is not borrowed here (installed chains send from the Wallet tab)", p.name));
@@ -2132,7 +2156,8 @@ pub fn send(node: &Node, key: &str, to: &str, amount: u64, from: Option<&str>, k
     // Coins carrying an inscription stay out (crate::ordsafe), as on a chain kept here.
     let coins = crate::ordsafe::keep_free(node, p, coins);
     let fp = crate::coinsend::fee_policy(p);
-    let tx = arcade_wallet::tx::build_send_keys(p, &to_script, amount, &keys, &coins, &change.1, fee_rate(node, p), fp.dust, arcade_app::now() as u32)?;
+    let cc = arcade_wallet::tx::CoinControl { picked: picked.to_vec(), frozen: crate::coinctl::frozen(node, p) };
+    let tx = arcade_wallet::tx::build_send_controlled(p, &[(to_script.as_slice(), amount)], &keys, &coins, &cc, &change.1, fee_rate(node, p), fp.dust, arcade_app::now() as u32)?;
     let ins: u64 = tx.inputs.iter().filter_map(|i| coins.iter().find(|c| c.outpoint == i.prevout).map(|c| c.value)).sum();
     let fee = ins.saturating_sub(tx.outputs.iter().map(|o| o.value).sum());
     let vsize = (tx.encode_legacy().len() * 3 + tx.raw.len()).div_ceil(4);
