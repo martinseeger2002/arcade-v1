@@ -3134,6 +3134,23 @@ pub fn light() -> Option<Headers<Clock>> {
     Some(Headers::new(d.net, &d.settings.genesis, d.settings.clock))
 }
 
+/// The newest blocks of this arcade's own copy, oldest first: enough for a borrowed copy's headers to go on from
+/// ([`Headers::resume`] needs more than an epoch of them), so a copy catching up borrows from where it already is,
+/// not from block 0 (Kiko 2026-11-25: love's borrowed view checked 6,000 headers from block 0 while her own copy
+/// was 150 behind, and her wallet read 0 meanwhile). None while the own copy doesn't run.
+pub fn own_window() -> Option<Vec<Entry>> {
+    let svc = svc()?;
+    let st = svc.st.lock().unwrap();
+    let c = &st.chain;
+    let tip = c.tip().height;
+    (tip.saturating_sub(params::EPOCH_BLOCKS + 1)..=tip).map(|h| c.id_at(h).and_then(|id| c.entry(&id).cloned())).collect()
+}
+
+/// The id at `height` on this arcade's own copy's best branch, while it runs.
+pub fn own_id_at(height: u64) -> Option<Hash256> {
+    svc()?.st.lock().unwrap().chain.id_at(height)
+}
+
 /// The headers-only chain, picked up from the newest headers this arcade had checked.
 pub fn light_from(entries: Vec<Entry>) -> Option<Headers<Clock>> {
     let d = DEF.get()?;

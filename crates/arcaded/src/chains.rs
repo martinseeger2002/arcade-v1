@@ -1230,6 +1230,15 @@ pub fn status(node: &Node, key: &str) -> Result<Value, String> {
             st = b;
             st["arcade"] = arcade;
             st["local"] = local;
+        } else if st["mode"] == "borrowed" {
+            // Installed and read through a borrowed copy while it catches up: which lenders answer, and how far the
+            // borrowed copy has got (Kiko 2026-11-25: love's row said "borrowed" with no lenders shown).
+            if let Some(b) = crate::borrow::status(node, st["key"].as_str().unwrap_or(key)) {
+                for k in ["lenders", "trust", "trust_note", "trust_hosts", "mismatch"] {
+                    st[k] = b[k].clone();
+                }
+                st["borrowed_copy"] = json!({"tip": b["tip"], "state": b["state"], "balance": b["balance"], "stages": b["stages"]});
+            }
         }
         return Ok(st);
     }
