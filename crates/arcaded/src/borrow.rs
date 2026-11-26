@@ -1433,7 +1433,10 @@ pub(crate) fn home_lag(node: &Node) -> (u32, bool) {
 /// How far an installed ARCADE chain's own copy is behind its lenders before a borrowed copy stands in for it. Not at
 /// every new block: a borrowed copy follows the headers from block 0, so a copy a block or two behind for a moment
 /// gets its blocks itself.
-const ARC_START_BEHIND: u64 = 30;
+/// 3 blocks (about 10 minutes of ARCADE blocks; 30 was about 1.7 hours of stale balances, ledger and tx status):
+/// the same line [`crate::arcsvc`] counts a copy behind by its peers' told heights. Borrowing then stays on until
+/// the own copy has caught up, so a block or two of lag doesn't flap it.
+const ARC_START_BEHIND: u64 = 3;
 
 /// Whether an installed ARCADE chain is borrowed: started once its own copy is [`ARC_START_BEHIND`] blocks behind,
 /// kept on until the own copy has caught up with the borrowed one (`own`).
@@ -3228,6 +3231,9 @@ mod tests {
     fn an_installed_arcade_chain_is_borrowed_while_far_behind() {
         // A fresh install syncing from block 0: borrowed, so coins and claims work at once.
         assert!(arc_borrows(false, false, 1_800));
+        // A copy ten blocks behind (about half an hour) reads from a lender, not its own stale copy.
+        assert!(arc_borrows(false, false, 10));
+        assert!(!arc_borrows(false, false, 1));
         // A block or two behind for a moment (a new block on the way): it gets its blocks itself.
         assert!(!arc_borrows(false, false, 2));
         assert!(!arc_borrows(false, false, ARC_START_BEHIND - 1));
