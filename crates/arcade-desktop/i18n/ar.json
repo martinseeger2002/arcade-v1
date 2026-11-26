@@ -1447,5 +1447,6 @@
  "{0} cores": "{0} أنوية",
  "reported": "مُبلَّغ عنه",
  "measured": "مقيس",
- "The language of this window's words. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "لغة كلمات هذه النافذة. يتغيّر فورًا. الاختيار خاص بهذه النافذة، مثل مظهرها: يختار تطبيق سطح المكتب وكل متصفح لأنفسهم. النص الذي لا ترجمة له بعد يظهر بالإنجليزية."
+ "The language of this window's words. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "لغة كلمات هذه النافذة. يتغيّر فورًا. الاختيار خاص بهذه النافذة، مثل مظهرها: يختار تطبيق سطح المكتب وكل متصفح لأنفسهم. النص الذي لا ترجمة له بعد يظهر بالإنجليزية.",
+ "Advanced options <0>relays, welcomes, system info, browser access</0>": "خيارات متقدمة <0>المرحّلات، الترحيب، معلومات النظام، الوصول من المتصفح</0>"
 }

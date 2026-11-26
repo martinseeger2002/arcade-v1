@@ -38,6 +38,28 @@ async function refreshHome() {
 // again whenever the screening stops working. Off until chosen: borrowing (within a daily cap) is one click; their own model
 // is encouraged.
 const ARC = (u) => { const a = u / 1e8; return a >= 0.01 ? a.toFixed(2) : a >= 0.0001 ? a.toFixed(4) : a > 0 ? a.toPrecision(2) : "0"; };
+// Home notices (.pp-banner.fold) fold down to their title and first line with Hide, and open again with Show
+// (or a click on the title). Each remembers its choice in this window; a notice that comes back still shows its
+// first line, so a problem is never hidden away completely.
+function foldNotice(box) {
+  const key = "arcade.fold." + box.id;
+  let folded = false;
+  try { folded = localStorage.getItem(key) === "1"; } catch {}
+  const btn = h("button", { class: "small fold-btn", type: "button" });
+  const set = (f, keep) => {
+    folded = f;
+    box.classList.toggle("folded", f);
+    btn.textContent = f ? "Show" : "Hide";
+    btn.setAttribute("aria-expanded", String(!f));
+    if (keep) try { localStorage.setItem(key, f ? "1" : "0"); } catch {}
+  };
+  btn.addEventListener("click", () => set(!folded, true));
+  box.querySelector(":scope > b")?.addEventListener("click", () => set(!folded, true));
+  box.append(btn);
+  set(folded, false);
+}
+document.querySelectorAll(".pp-banner.fold").forEach(foldNotice);
+
 const SCR = { busy: false, sig: null };
 async function drawScreening() {
   const st = await api("screening.status").catch(() => null);

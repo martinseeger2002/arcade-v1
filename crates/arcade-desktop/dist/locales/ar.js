@@ -84,6 +84,7 @@ I18N.add("ar", {
 "Addresses on {0}": "العناوين على {0}",
 "Addresses shown on your card": "العناوين الظاهرة على بطاقتك",
 "Admins": "المشرفون",
+"Advanced options <0>relays, welcomes, system info, browser access</0>": "خيارات متقدمة <0>المرحّلات، الترحيب، معلومات النظام، الوصول من المتصفح</0>",
 "Afterwards": "بعد ذلك",
 "Allow": "سماح",
 "Also: D... addresses look the same on DigiByte and Dogecoin, so make sure whoever you're paying uses DigiByte.": "تنبيه: عناوين D... تبدو متطابقة على DigiByte وDogecoin، فتأكد أن من تدفع له يستخدم DigiByte.",

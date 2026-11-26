@@ -84,6 +84,7 @@ I18N.add("zh-Hans", {
 "Addresses on {0}": "{0} 上的地址",
 "Addresses shown on your card": "名片上显示的地址",
 "Admins": "管理员",
+"Advanced options <0>relays, welcomes, system info, browser access</0>": "高级选项 <0>中继、欢迎、系统信息、浏览器访问</0>",
 "Afterwards": "之后",
 "Allow": "允许",
 "Also: D... addresses look the same on DigiByte and Dogecoin, so make sure whoever you're paying uses DigiByte.": "另外：D... 地址在 DigiByte 和 Dogecoin 上看起来一样，请确认收款方使用的是 DigiByte。",

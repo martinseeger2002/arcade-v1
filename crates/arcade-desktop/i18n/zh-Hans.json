@@ -1447,5 +1447,6 @@
  "{0} cores": "{0} 核",
  "reported": "自报",
  "measured": "实测",
- "The language of this window's words. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "此窗口文字所用的语言。切换立即生效。这个选择只属于此窗口，就像它的外观一样：桌面应用和每个浏览器各自选择。尚无翻译的文字以英文显示。"
+ "The language of this window's words. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "此窗口文字所用的语言。切换立即生效。这个选择只属于此窗口，就像它的外观一样：桌面应用和每个浏览器各自选择。尚无翻译的文字以英文显示。",
+ "Advanced options <0>relays, welcomes, system info, browser access</0>": "高级选项 <0>中继、欢迎、系统信息、浏览器访问</0>"
 }

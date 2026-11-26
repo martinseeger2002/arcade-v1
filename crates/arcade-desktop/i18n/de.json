@@ -1504,5 +1504,6 @@
  "🔑 revoked key": "🔑 widerrufener Schlüssel",
  "🔓 revealed": "🔓 enthüllt",
  "🪙 tipped": "🪙 getippt",
- "The language of this window's words. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "Die Sprache der Wörter dieses Fensters. Sie wechselt sofort. Die Wahl gilt nur für dieses Fenster, wie sein Aussehen: Die Desktop-App und jeder Browser wählen selbst. Text ohne Übersetzung erscheint auf Englisch."
+ "The language of this window's words. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "Die Sprache der Wörter dieses Fensters. Sie wechselt sofort. Die Wahl gilt nur für dieses Fenster, wie sein Aussehen: Die Desktop-App und jeder Browser wählen selbst. Text ohne Übersetzung erscheint auf Englisch.",
+ "Advanced options <0>relays, welcomes, system info, browser access</0>": "Erweiterte Optionen <0>Relays, Begrüßungen, Systeminfo, Browserzugang</0>"
 }

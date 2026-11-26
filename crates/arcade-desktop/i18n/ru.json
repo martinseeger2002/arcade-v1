@@ -1447,5 +1447,6 @@
  "{0} cores": "{0} ядер",
  "reported": "заявлено",
  "measured": "измерено",
- "The language of this window's words. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "Язык текста этого окна. Меняется сразу. Выбор принадлежит этому окну, как и его вид: настольное приложение и каждый браузер выбирают сами. Текст, у которого ещё нет перевода, показывается на английском."
+ "The language of this window's words. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "Язык текста этого окна. Меняется сразу. Выбор принадлежит этому окну, как и его вид: настольное приложение и каждый браузер выбирают сами. Текст, у которого ещё нет перевода, показывается на английском.",
+ "Advanced options <0>relays, welcomes, system info, browser access</0>": "Дополнительные настройки <0>ретрансляция, приветствия, сведения о системе, доступ из браузера</0>"
 }

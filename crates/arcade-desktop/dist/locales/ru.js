@@ -84,6 +84,7 @@ I18N.add("ru", {
 "Addresses on {0}": "Адреса в {0}",
 "Addresses shown on your card": "Адреса на вашей карточке",
 "Admins": "Администраторы",
+"Advanced options <0>relays, welcomes, system info, browser access</0>": "Дополнительные настройки <0>ретрансляция, приветствия, сведения о системе, доступ из браузера</0>",
 "Afterwards": "Потом",
 "Allow": "Разрешить",
 "Also: D... addresses look the same on DigiByte and Dogecoin, so make sure whoever you're paying uses DigiByte.": "Также: адреса D... выглядят одинаково в DigiByte и Dogecoin, поэтому убедитесь, что получатель использует именно DigiByte.",

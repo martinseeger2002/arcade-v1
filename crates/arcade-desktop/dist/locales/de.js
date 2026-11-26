@@ -90,6 +90,7 @@ I18N.add("de", {
 "Addresses on {0}": "Adressen auf {0}",
 "Addresses shown on your card": "Auf deiner Karte angezeigte Adressen",
 "Admins": "Admins",
+"Advanced options <0>relays, welcomes, system info, browser access</0>": "Erweiterte Optionen <0>Relays, Begrüßungen, Systeminfo, Browserzugang</0>",
 "Afterwards": "Danach",
 "Allow": "Erlauben",
 "Also: D... addresses look the same on DigiByte and Dogecoin, so make sure whoever you're paying uses DigiByte.": "Außerdem: D...-Adressen sehen auf DigiByte und Dogecoin gleich aus, achte also darauf, dass dein Gegenüber DigiByte verwendet.",

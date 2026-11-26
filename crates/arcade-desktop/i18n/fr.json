@@ -1447,5 +1447,6 @@
  "{0} cores": "{0} cœurs",
  "reported": "déclaré",
  "measured": "mesuré",
- "The language of this window's words. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "La langue des mots de cette fenêtre. Le changement est immédiat. Ce choix est propre à cette fenêtre, comme son apparence : l'app de bureau et chaque navigateur choisissent chacun de leur côté. Un texte pas encore traduit s'affiche en anglais."
+ "The language of this window's words. It changes at once. The choice is this window's own, like its look: the desktop app and each browser choose for themselves. Text that has no translation yet shows in English.": "La langue des mots de cette fenêtre. Le changement est immédiat. Ce choix est propre à cette fenêtre, comme son apparence : l'app de bureau et chaque navigateur choisissent chacun de leur côté. Un texte pas encore traduit s'affiche en anglais.",
+ "Advanced options <0>relays, welcomes, system info, browser access</0>": "Options avancées <0>relais, accueils, infos système, accès navigateur</0>"
 }

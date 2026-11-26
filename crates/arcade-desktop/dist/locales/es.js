@@ -84,6 +84,7 @@ I18N.add("es", {
 "Addresses on {0}": "Direcciones en {0}",
 "Addresses shown on your card": "Direcciones que se muestran en tu tarjeta",
 "Admins": "Administradores",
+"Advanced options <0>relays, welcomes, system info, browser access</0>": "Opciones avanzadas <0>relés, bienvenidas, información del sistema, acceso desde el navegador</0>",
 "Afterwards": "Después",
 "Allow": "Permitir",
 "Also: D... addresses look the same on DigiByte and Dogecoin, so make sure whoever you're paying uses DigiByte.": "Además: las direcciones D... se ven iguales en DigiByte y en Dogecoin, así que asegúrate de que la persona a quien pagas usa DigiByte.",

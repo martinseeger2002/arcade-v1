@@ -37,7 +37,7 @@
 <main>
   <!-- Home: the arcade mesh at a glance -->
   <section id="home" class="tab on">
-    <div class="pp-banner" id="h-screen" hidden>
+    <div class="pp-banner fold" id="h-screen" hidden>
       <b>Content screening</b> <span id="h-screen-text"></span>
       <p class="warn" id="h-screen-warn"></p>
       <p class="hint" id="h-screen-how"></p>
@@ -50,12 +50,12 @@
       <p class="hint">Arcade V1.0 is in beta: testing is happening now, and things can change or break. Thank you for trying it out! Questions, problems or ideas: team@arcade-nodes.com</p>
       <ol class="start-steps" id="h-steps"></ol>
     </div>
-    <div class="pp-banner" id="h-keep" hidden>
+    <div class="pp-banner fold" id="h-keep" hidden>
       <b>Keep ARCADE data?</b> <span id="h-keep-text"></span>
       <div class="row"><button class="primary" id="h-keep-go">Choose a keep share…</button><button id="h-keep-no">Not now</button></div>
       <p class="msg" id="h-keep-msg"></p>
     </div>
-    <div class="pp-banner" id="h-welcome" hidden>
+    <div class="pp-banner fold" id="h-welcome" hidden>
       <b>New arcades</b> <span id="h-welcome-text"></span>
       <ul class="welcome-list" id="h-welcome-list"></ul>
       <p class="msg" id="h-welcome-msg"></p>
@@ -520,6 +520,18 @@
     <p class="opt">Storage settings (keep share, blob cache, what to keep) are in the ARCADE Storage app. <button class="small" id="o-storage-open">Open ARCADE Storage</button></p>
     <p class="msg" id="o-storage-msg"></p>
 
+    <h2 id="o-cpu">How much of this computer the arcade uses</h2>
+    <div class="row"><select id="o-cpu-level" title="How much of this computer the arcade takes">
+      <option value="low">Low: lowest priority, at most a quarter of the CPU</option>
+      <option value="balanced">Balanced: low priority, at most half the CPU (default)</option>
+      <option value="full">Unthrottled: normal priority, every core, no cap</option>
+    </select></div>
+    <p class="opt">Your own programs always come first: at Low and Balanced the arcade runs below them, and all its heavy work (syncing and checking chains, building indexes, sealing) is held to a quarter or half of this computer's CPU, however many chains install at once. Chains install one at a time, smallest first.</p>
+    <p class="warn" id="o-cpu-warn" hidden><b>Unthrottled</b> lets the arcade use every core, up to 100% of the CPU while chains sync. Recommended only for machines dedicated to running an arcade.</p>
+    <p class="msg" id="o-cpu-msg"></p>
+
+    <details class="adv" id="o-adv">
+    <summary>Advanced options <small>relays, welcomes, system info, browser access</small></summary>
     <h2>Relay links for other arcades</h2>
     <div class="grid">
       <div class="card"><div class="k">Relay</div><div class="v" id="o-relay-state">—</div></div>
@@ -554,16 +566,6 @@
     <p class="opt">A new arcade needs 1 ARCADE to claim its @handle. Home shows each new arcade with a "Welcome to the arcade" button; the first arcade whose payment lands welcomes it and gets a point in the welcomers high scores. With automatic welcomes on, this arcade sends it by itself after people's 3-minute head start, from this wallet (it always keeps 1 ARCADE for itself, and sends at most 100 welcomes a day).</p>
     <p class="msg" id="o-wel-msg"></p>
 
-    <h2 id="o-cpu">How much of this computer the arcade uses</h2>
-    <div class="row"><select id="o-cpu-level" title="How much of this computer the arcade takes">
-      <option value="low">Low: lowest priority, at most a quarter of the CPU</option>
-      <option value="balanced">Balanced: low priority, at most half the CPU (default)</option>
-      <option value="full">Unthrottled: normal priority, every core, no cap</option>
-    </select></div>
-    <p class="opt">Your own programs always come first: at Low and Balanced the arcade runs below them, and all its heavy work (syncing and checking chains, building indexes, sealing) is held to a quarter or half of this computer's CPU, however many chains install at once. Chains install one at a time, smallest first.</p>
-    <p class="warn" id="o-cpu-warn" hidden><b>Unthrottled</b> lets the arcade use every core, up to 100% of the CPU while chains sync. Recommended only for machines dedicated to running an arcade.</p>
-    <p class="msg" id="o-cpu-msg"></p>
-
     <h2 id="o-sysinfo">Share system info</h2>
     <div class="row"><label class="sw"><input type="checkbox" id="o-si-on"> Share system info</label></div>
     <p class="opt">Off unless you turn it on. When on, this arcade tells the mesh what it runs on: the record below, exactly as it goes out, signed with this arcade's mesh key, at start, when a figure changes and about hourly. Other arcades show it beside this one on their Home tab, and the network adds it up. Figures are rounded and marked as reported; only the seal speed is measured, from this arcade's own seals. It is never written on a chain, and nothing that pays reads it. Never shared: this computer's name, user names, paths, serial numbers, MAC or IP addresses, other software. Turning it off tells every arcade to drop it at once.</p>
@@ -591,6 +593,7 @@
     </ol>
     <p class="opt"><b>On your home network</b> the operator can instead put a password-protected entrance in front of the arcade (an https address on this computer, for home-network addresses only), so another computer there needs no tunnel: just that address and the password. The tunnel above works from anywhere.</p>
     <p class="msg" id="o-web-msg"></p>
+    </details>
   </section>
 
   <!-- Activity -->
