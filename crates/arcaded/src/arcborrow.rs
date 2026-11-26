@@ -102,7 +102,26 @@ fn load(node: &Node, key: &str) -> Result<Headers<Clock>, String> {
     let pre = format!("borrow/{key}/ae/").into_bytes();
     let rows = node.app.store.read(|r| r.scan_prefix(arcade_app::META, &pre)).map_err(e)?;
     let entries: Option<Vec<Entry>> = rows.iter().map(|(_, v)| Entry::decode(v)).collect();
-    if let Some(light) = entries.filter(|l| !l.is_empty()).and_then(crate::arcsvc::light_from) {
+    let kept = entries.filter(|l| !l.is_empty()).and_then(crate::arcsvc::light_from);
+    // An installed copy catching up: go on from its own newest blocks, when they are further on than what the
+    // borrowed copy kept (checked by this arcade's own copy already; only the blocks after them are taken from lenders).
+    let own = crate::arcsvc::own_window().and_then(crate::arcsvc::light_from);
+    if let Some(own) = own.filter(|o| kept.as_ref().is_none_or(|k| o.tip().height > k.tip().height)) {
+        drop_rows(node, key, "ai");
+        drop_rows(node, key, "ae");
+        node.app
+            .store
+            .write(|w| {
+                for entry in own.entries() {
+                    w.put(arcade_app::META, &row(key, "ai", entry.height), &entry.id.0)?;
+                    w.put(arcade_app::META, &row(key, "ae", entry.height), &entry.encode())?;
+                }
+                Ok(())
+            })
+            .map_err(e)?;
+        return Ok(own);
+    }
+    if let Some(light) = kept {
         return Ok(light);
     }
     let light = crate::arcsvc::light().ok_or("this arcade knows no ARCADE chain")?;
@@ -169,8 +188,14 @@ pub fn id_at(node: &Node, p: &ChainParams, height: u64) -> Option<Hash256> {
     if let Some(entry) = LIGHT.lock().unwrap().as_ref().and_then(|l| l.at(height)) {
         return Some(entry.id);
     }
-    let v = node.app.store.read(|r| r.get(arcade_app::META, &row(p.key, "ai", height))).ok().flatten()?;
-    Some(Hash256(v.try_into().ok()?))
+    match node.app.store.read(|r| r.get(arcade_app::META, &row(p.key, "ai", height))).ok().flatten() {
+        Some(v) => Some(Hash256(v.try_into().ok()?)),
+        // Below where the borrowed headers went on from this arcade's own copy (`load`): that copy's block there.
+        None => {
+            let base = LIGHT.lock().unwrap().as_ref().map(|l| l.base())?;
+            if height < base { crate::arcsvc::own_id_at(height) } else { None }
+        }
+    }
 }
 
 /// A block as a lender sent it, read without checking it: only to see what it says it is.
