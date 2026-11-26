@@ -115,8 +115,10 @@ mod tests {
     fn an_own_transaction_goes_again_until_a_block_has_it() {
         let (t, tx) = pooled_spend();
         assert!(crate::mempoolshare::add(&t.node, t.p, &tx));
-        let now = arcade_app::now();
         send(&t.node, t.p, &tx);
+        // The time send() wrote down, not a clock read beside it: on a slow runner the second could turn over in
+        // between, and "due at now + FIRST" came out as not yet due (Windows CI, 2026-11-26).
+        let now = load(&t.node)[&tx.txid.to_hex()]["first"].as_u64().unwrap();
         assert_eq!(t.node.tx_outbox.lock().unwrap().as_slice(), &[tx.raw.clone()], "sent at once");
         t.node.tx_outbox.lock().unwrap().clear();
         // Not yet due: nothing goes.
