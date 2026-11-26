@@ -59,6 +59,9 @@ pub const A_COUNT: &str = "ledger.v1.a_count"; // C|target -> {"l": likes, "d": 
 pub const A_REPLY: &str = "ledger.v1.a_reply"; // C|target|00|height u32|pos u32 -> {"a": author address, "t", "txid"}
 pub const A_TIP: &str = "ledger.v1.a_tip"; // C|target|00|recipient address -> {"s": sats, "n": tips}
 pub const A_TIPPER: &str = "ledger.v1.a_tipper"; // C|target|00|tipper address -> {"s": sats, "n": tips}
+// A:// op 11, app records (aproto::app_key: app|00|kind|00), every record kept:
+pub const A_APP: &str = "ledger.v1.a_app"; // C|app|00|kind|00|height u32|pos u32 -> {"a": author address, "d": data hex, "txid"}
+pub const A_APP_BY: &str = "ledger.v1.a_app_by"; // C|app|00|kind|00|author address|00|height u32|pos u32 -> the same
 
 pub const MAX_AMOUNT: u64 = 9_223_372_036_854_775_807;
 const PROPERTY_TYPES: &[u16] = &[1, 2, 65, 66, 129, 130, 5];
@@ -437,6 +440,8 @@ impl Engine<'_, '_, '_> {
             Some(Ok(AOp::Wallets { .. })) if !crate::aproto::wallets_known(self.c, self.h as u64) => return Ok(Err("A:// record not valid: unknown A:// op".into())),
             // Ops 8 to 10 the same way, below their height.
             Some(Ok(op)) if crate::aproto::is_social(&op) && !crate::aproto::social_known(self.c, self.h as u64) => return Ok(Err("A:// record not valid: unknown A:// op".into())),
+            // Op 11 the same way, below its own height.
+            Some(Ok(AOp::App { .. })) if !crate::aproto::app_known(self.c, self.h as u64) => return Ok(Err("A:// record not valid: unknown A:// op".into())),
             Some(Ok(op)) => op,
             Some(Err(e)) => return Ok(Err(format!("A:// record not valid: {e}"))),
             None => return Ok(Err("malformed A:// record".into())),
@@ -561,6 +566,12 @@ impl Engine<'_, '_, '_> {
                     add(A_TIP, to, *sats)?;
                 }
                 add(A_TIPPER, me, all)?;
+            }
+            AOp::App { app, kind, data } => {
+                let ak = crate::aproto::app_key(&app, &kind);
+                let v = json!({"a": me, "d": hex::encode(&data), "txid": r.txid});
+                self.jput(A_APP, &k(self.c).bytes(&ak).u32(self.h).u32(r.pos).done(), &v)?;
+                self.jput(A_APP_BY, &k(self.c).bytes(&ak).bytes(me.as_bytes()).u8(0).u32(self.h).u32(r.pos).done(), &v)?;
             }
         }
         Ok(Ok(()))
@@ -1687,7 +1698,7 @@ impl Indexer for LedgerIndexer {
         vec![(arcade_chaindb::journal::LEDGER, self.tables().iter().map(|t| t.name).collect())]
     }
     fn tables(&self) -> Vec<TableDef> {
-        [ROWS, PROPERTY, PROPERTY_BY_BLOCK, BALANCE, BOOK, TAKE, INSCRIPTION, CHUNK, PIECE, OFFER, ASK, COLLECTION, META, BY_NUMBER, TAG, TAG_BY_ADDRESS, TAG_SEEN, TAG_DUE, TAG_REL, TAG_COMMIT, TAG_PEND, TAG_WIN, REPO, REPO_MAINT, REPO_LOG, REPO_ITEM, REPO_EVENT, A_PROFILE, A_FOLLOW, A_FOLLOWER, A_CONTACT, A_POST, A_WALLET, A_REACT, A_COUNT, A_REPLY, A_TIP, A_TIPPER]
+        [ROWS, PROPERTY, PROPERTY_BY_BLOCK, BALANCE, BOOK, TAKE, INSCRIPTION, CHUNK, PIECE, OFFER, ASK, COLLECTION, META, BY_NUMBER, TAG, TAG_BY_ADDRESS, TAG_SEEN, TAG_DUE, TAG_REL, TAG_COMMIT, TAG_PEND, TAG_WIN, REPO, REPO_MAINT, REPO_LOG, REPO_ITEM, REPO_EVENT, A_PROFILE, A_FOLLOW, A_FOLLOWER, A_CONTACT, A_POST, A_WALLET, A_REACT, A_COUNT, A_REPLY, A_TIP, A_TIPPER, A_APP, A_APP_BY]
             .iter()
             .map(|t| TableDef::plain(t))
             .collect()

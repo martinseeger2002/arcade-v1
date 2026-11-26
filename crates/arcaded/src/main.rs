@@ -45,6 +45,7 @@ mod reposvc;
 mod relrepo;
 mod arcledger;
 mod asocial;
+mod arecord;
 mod arccode;
 mod arcgenesis;
 mod arckeep;

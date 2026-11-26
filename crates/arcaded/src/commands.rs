@@ -271,6 +271,8 @@ cmds! {
     "a.react" Wallet "chain, txid, kind, client_ref?" "Like, unlike, dislike or undislike any chain's transaction, on the ARCADE chain (A:// op 8).";
     "a.reply" Wallet "chain, txid, text, client_ref?" "Reply to any chain's transaction (1 to 500 bytes), on the ARCADE chain (A:// op 9).";
     "a.tip" Wallet "chain, txid, amount, to?, memo?, client_ref?" "Tip on any chain's transaction: pay amount (sats of ARCADE) to `to` (an ARCADE address; default the transaction's author where one is found) with the tip record (A:// op 10, memo up to 100 bytes) in the same transaction.";
+    "a.record" Wallet "app, kind, data_hex, client_ref?" "Keep an app's own record on the ARCADE chain (A:// op 11, docs/APROTO.md): app and kind (1 to 16 bytes each of a-z, 0-9, _ and -) and data_hex (0 to 1,000 bytes, opaque: the app gives them meaning).";
+    "a.records" Public "app, kind, since?, author?, limit?, next?" "An app's records of one kind from the ARCADE chain's ledger (A:// op 11), oldest first, from height since on, only author's (@tag or ARCADE address) when given; a page of limit (100, at most 500), next the cursor for the page after: {chain, app, kind, records: [{height, pos, txid, author: {address, tag}, data_hex}], next, indexed}.";
     "ledger.balances" Read "address" "An address's arcade token balances on the ARCADE chain (free, reserved, offered, accepted).";
     "ledger.tag_commit" Wallet "tag, client_ref?" "Commit ahead to claiming a released @tag on the ARCADE chain.";
     "ledger.tag_checkin" Wallet "client_ref?" "Keep this wallet's @tag on the ARCADE chain with a check-in (0.1 ARCADE into the pot).";
@@ -317,6 +319,7 @@ cmds! {
     "explorer.omni_address" Public "chain?, address" "An address's Omni balances (omni_getallbalancesforaddress); none: an empty list.";
     "explorer.held" Public "chain?, address, offset?, limit?, order?" "The ord inscriptions an address holds, a page at a time by number (order old or new; limit 100, at most 500), without content: {total, items: [{id, n, h, ct, size, at, p}]}.";
     "explorer.a_reactions" Public "chain (the ARCADE chain), targets, me?" "The ledger's reacts, replies and tips on up to 100 targets ({chain, txid}; A:// ops 8 to 10, docs/APROTO.md), per recipient; what a.reactions reads, from any arcade keeping the ARCADE chain.";
+    "explorer.a_records" Public "chain (the ARCADE chain), app, kind, since?, author?, limit?, next?" "The ledger's app records of one (app, kind) (A:// op 11, docs/APROTO.md), oldest first; author an ARCADE address; what a.records reads, from any arcade keeping the ARCADE chain.";
     "explorer.a_replies" Public "chain (the ARCADE chain), target, offset?, limit?" "The ledger's replies to a target ({chain, txid}), oldest first; what a.replies reads.";
     "explorer.arc_ledger" Public "chain (the ARCADE chain), op, args" "An ARCADE ledger read (op: profile, a_profile, a_follows, a_posts, a_search, repo, repos, items, balances, contact_rows, cards, tag_rel, repo_row, holds_blob, wallet_state) on the answering arcade's own tables, about the address or tag in args; what arcades that only borrow ARCADE ask of arcades keeping it.";
     "explorer.arc_storage_summary" Public "" "ARCADE storage analytics: sealed segments by family, bytes, replicas and average copies, unheld segments, owners and genesis earners, total and drawing weight, the pot, issuance per month at the observed block time, blobs here by class, the viewer cache; fog storage (rules version 5): floors (each class's copy floor; boost: the copies a boost adds), short (segments and blobs below their floor: counts, each segment, the first 200 blob ids) and fog (rules on, grace and idle seconds, keep share, segments kept, blobs held and own here). From any arcade running ARCADE.";
@@ -559,6 +562,9 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("addr_kind", "string", "Address type: legacy, p2sh-p2wpkh or p2wpkh."),
     ("address", "string", "An address on the chain in question."),
     ("addresses", "array|string", "Addresses (an array, or a comma list)."),
+    ("app", "string", "An app's name in its A:// records: 1 to 16 bytes of a-z, 0-9, _ and -."),
+    ("data_hex", "string", "Bytes as hex."),
+    ("next", "string", "The next from the page before (absent: the first page)."),
     ("after", "integer|string", "Start after this key or position (exclusive)."),
     ("all", "boolean", "All of them, not only the newest or own."),
     ("all_kinds", "boolean", "Also spend the wallet's other address types' coins."),

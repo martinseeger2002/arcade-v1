@@ -1496,6 +1496,7 @@ pub fn define_text(node: &Arc<Node>, text: &str) -> Result<(), String> {
     // records too, and checks them against these (`run` sets them again, the same).
     arcade_ledger::aproto::set_wallets_from(def.params.chain_no, crate::walletproofs::known_from(def.params.net));
     arcade_ledger::aproto::set_social_from(def.params.chain_no, crate::asocial::known_from(def.params.net));
+    arcade_ledger::aproto::set_app_from(def.params.chain_no, crate::arecord::known_from(def.params.net));
     // The blob store and its viewer's cache, whether the chain runs here or is borrowed: a borrowing arcade keeps the
     // blobs it views under its home and serves them on (`run` points at the same place).
     blob_store(node, &net);
@@ -1643,6 +1644,8 @@ fn run(node: &Arc<Node>, def: &Def) -> Result<(), String> {
     arcade_ledger::aproto::set_wallets_from(p.chain_no, crate::walletproofs::known_from(p.net));
     // A:// ops 8 to 10, reacts, replies and tips (crate::asocial), likewise.
     arcade_ledger::aproto::set_social_from(p.chain_no, crate::asocial::known_from(p.net));
+    // A:// op 11, app records (crate::arecord), at its own height.
+    arcade_ledger::aproto::set_app_from(p.chain_no, crate::arecord::known_from(p.net));
     // The home chain's ledger, carried in (§15 step 19) right after block 0, before any record (`carry_in`). A store
     // that has blocks but no note of it built its ledger without the snapshot (its copy made again under an old
     // arcade's app-store flag, or from before the note): its ledger rows go and are made again, the snapshot first,

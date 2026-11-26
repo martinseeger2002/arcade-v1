@@ -134,7 +134,7 @@ pub const FORWARDABLE: &[&str] = &[
     "explorer.dogefeed", "explorer.dogefeed_tx", "explorer.dogefeed_inscription", "explorer.dogefeed_address",
     "explorer.inscription_types", "explorer.site", "explorer.sites", "explorer.ledger_bytes", "explorer.page", "explorer.app_cards",
     "explorer.ord_outpoints", "explorer.collections", "explorer.collection", "explorer.collection_of", "explorer.held",
-    "explorer.msg_rows", "explorer.msg_file", "explorer.a_reactions", "explorer.a_replies", "explorer.activity",
+    "explorer.msg_rows", "explorer.msg_file", "explorer.a_reactions", "explorer.a_replies", "explorer.a_records", "explorer.activity",
     "explorer.arc_storage_summary", "explorer.arc_segments", "explorer.arc_holders", "explorer.arc_payouts",
     "explorer.arc_ledger", "explorer.token_note", "explorer.prize_rows", "explorer.arc_blobs", "explorer.arc_fog_nodes",
     "explorer.richlist",
@@ -150,7 +150,7 @@ pub const PAGE_READS: &[&str] = &[
     "explorer.name", "explorer.maps", "explorer.map", "explorer.mempool", "explorer.ledger", "explorer.ledger_tokens",
     "explorer.ledger_token", "explorer.ledger_inscriptions", "explorer.ledger_inscription", "explorer.tag",
     "explorer.search", "explorer.dogefeed", "explorer.dogefeed_tx", "explorer.dogefeed_inscription",
-    "explorer.dogefeed_address", "explorer.dogefeed_keys", "explorer.earn", "explorer.a_reactions", "explorer.a_replies",
+    "explorer.dogefeed_address", "explorer.dogefeed_keys", "explorer.earn", "explorer.a_reactions", "explorer.a_replies", "explorer.a_records",
     "explorer.arc_storage_summary", "explorer.arc_segments", "explorer.arc_holders", "explorer.arc_payouts",
     "explorer.arc_machines", "explorer.arc_nodes", "explorer.arc_blobs", "explorer.arc_fog_nodes",
     "explorer.msg_rows", "explorer.msg_file", "explorer.richlist",
@@ -285,7 +285,7 @@ fn needed_index(cmd: &str, req: &Value) -> Option<&'static str> {
             _ => "messages",
         },
         "explorer.activity" | "explorer.richlist" => "addresses",
-        "explorer.page" | "explorer.app_cards" | "explorer.a_reactions" | "explorer.a_replies" | "explorer.prize_rows" => "ledger",
+        "explorer.page" | "explorer.app_cards" | "explorer.a_reactions" | "explorer.a_replies" | "explorer.a_records" | "explorer.prize_rows" => "ledger",
         c if c.starts_with("explorer.ledger") || c.starts_with("explorer.arc_") => "ledger",
         _ => return None,
     })
@@ -1159,6 +1159,8 @@ fn handle_here(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
         // A:// reacts, replies and tips (crate::asocial): the ARCADE chain's ledger.
         "explorer.a_reactions" => { x.need("ledger")?; crate::asocial::ledger_reactions(x.node, x.c(), req) }
         "explorer.a_replies" => { x.need("ledger")?; crate::asocial::ledger_replies(x.node, x.c(), req) }
+        // A:// app records (crate::arecord): the ARCADE chain's ledger.
+        "explorer.a_records" => { x.need("ledger")?; crate::arecord::ledger_records(x.node, x.c(), req) }
         "explorer.arc_ledger" => { x.need("ledger")?; crate::arcledger::serve(x.node, req) }
         "explorer.ledger" => { x.need("ledger")?; ledger_summary(&x) }
         "explorer.ledger_tokens" => {
