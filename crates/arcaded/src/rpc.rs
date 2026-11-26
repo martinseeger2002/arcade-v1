@@ -147,7 +147,17 @@ pub fn call_on(node: &Node, p: &'static arcade_chain::params::ChainParams, metho
                     v["tx"] = json!(b.txs.iter().map(|t| t.txid.to_hex()).collect::<Vec<_>>());
                     Ok(v)
                 }
-                _ => Err(err(-8, "verbosity 2 is not served; ask for 0 and decode")),
+                // Each transaction in full (a sidecar indexer, such as OmniLite, asks for this when it
+                // can't read a transaction from the raw block).
+                2 => {
+                    let b = Block::parse_with(&raw, &p.format).map_err(|x| err(-22, x.to_string()))?;
+                    let mut v = header_json(&hash)?;
+                    v["size"] = json!(raw.len());
+                    v["nTx"] = json!(b.txs.len());
+                    v["tx"] = json!(b.txs.iter().map(|t| tx_json(p, t)).collect::<Vec<_>>());
+                    Ok(v)
+                }
+                _ => Err(err(-8, "verbosity is 0, 1 or 2")),
             }
         }
         "getrawtransaction" => {
@@ -284,9 +294,17 @@ pub fn call_on(node: &Node, p: &'static arcade_chain::params::ChainParams, metho
                 "headers": best.as_ref().map(|b| b.height).unwrap_or(tip.height),
                 "bestblockhash": tip.hash.to_hex(),
                 "difficulty": db.header(c, &tip.hash).ok().flatten().map(|r| difficulty(r.header.bits)).unwrap_or(0.0),
-                "initialblockdownload": best.map(|b| b.height > tip.height + 6).unwrap_or(false),
+                "initialblockdownload": best.as_ref().map(|b| b.height > tip.height + 6).unwrap_or(false),
+                "verificationprogress": best.as_ref().filter(|b| b.height > 0).map(|b| (tip.height as f64 / b.height as f64).min(1.0)).unwrap_or(1.0),
                 "pruned": false,
             }))
+        }
+        // Every stored transaction is found by its id (the tx index is part of the chain store), so
+        // an indexer that needs Core's -txindex (OmniLite) can read from this arcade instead of
+        // from a second copy of the chain in a Core node.
+        "getindexinfo" => {
+            let best = db.best_header(c).map_err(e)?.and_then(|h| db.header(c, &h).ok().flatten()).map(|b| b.height).unwrap_or(tip.height);
+            Ok(json!({"txindex": {"synced": best <= tip.height + 6, "best_block_height": tip.height}}))
         }
         "getdifficulty" => Ok(json!(db.header(c, &tip.hash).ok().flatten().map(|r| difficulty(r.header.bits)).unwrap_or(0.0))),
         "getnetworkinfo" => Ok(json!({
@@ -650,6 +668,31 @@ mod tests {
         assert!(!lb.is_empty() && lb.iter().all(|x| *x == b), "{lb:?}");
         // This arcade's own RPC asked about neither.
         assert!(listed("").is_empty());
+    }
+
+    /// What an OmniLite sidecar needs to index from this arcade instead of from a Core node with
+    /// -txindex: the tx index reported, blocks in full (verbosity 2) and the sync progress.
+    #[test]
+    fn answers_an_indexer_needs() {
+        let t = crate::sitesvc::tests::shared();
+        let call = |m: &str, a: &[Value]| call_on(&t.node, t.p, m, a);
+        let info = call("getindexinfo", &[]).unwrap();
+        assert_eq!(info["txindex"]["synced"], json!(true), "{info}");
+        let chain = call("getblockchaininfo", &[]).unwrap();
+        assert_eq!(chain["verificationprogress"], json!(1.0), "{chain}");
+        let tip = call("getbestblockhash", &[]).unwrap();
+        let raw = hex::decode(call("getblock", &[tip.clone(), json!(0)]).unwrap().as_str().unwrap()).unwrap();
+        let b = Block::parse_with(&raw, &t.p.format).unwrap();
+        let full = call("getblock", &[tip.clone(), json!(2)]).unwrap();
+        let txs = full["tx"].as_array().unwrap();
+        assert_eq!(txs.len(), b.txs.len());
+        for (j, tx) in txs.iter().zip(&b.txs) {
+            assert_eq!(j["txid"], json!(tx.txid.to_hex()));
+            assert_eq!(j["hex"], json!(hex::encode(&tx.raw)));
+            let v = call("getrawtransaction", &[json!(tx.txid.to_hex()), json!(true)]).unwrap();
+            assert_eq!(v["blockhash"], tip, "found by id, with its block");
+        }
+        assert!(call("getblock", &[tip, json!(3)]).is_err());
     }
 
     #[test]
