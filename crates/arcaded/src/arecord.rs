@@ -24,8 +24,8 @@ pub fn known_from(net: &str) -> Option<u64> {
     }
 }
 
-/// ARCADE testnet's height for op 11. u64::MAX: not yet (no block reaches it).
-const ARCTEST_APP_FROM: Option<u64> = Some(u64::MAX); // SET AT RELEASE
+/// ARCADE testnet's height for op 11 (u64::MAX would mean not yet: no block reaches it).
+const ARCTEST_APP_FROM: Option<u64> = Some(6300); // set with v0.1.190 at block ~6170 (about 7 hours ahead at ~3.4 min a block)
 
 /// Rows in one answer: 100 unless asked, 500 at most.
 const DEFAULT_LIMIT: u64 = 100;
