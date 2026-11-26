@@ -164,7 +164,14 @@ fn rescan_group(node: &Node, gid: &str) -> Result<(), String> {
         let c = chain.chain_no;
         let mut cursor = None;
         loop {
-            let batch = candidates_on(node, chain, cursor, 500)?;
+            // One chain's trouble skips that chain, not the rest (the home's messages come last).
+            let batch = match candidates_on(node, chain, cursor, 500) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("messages: {} skipped this round: {e}", chain.name);
+                    break;
+                }
+            };
             if batch.is_empty() {
                 break;
             }
@@ -209,7 +216,14 @@ pub fn scan(node: &Node) -> Result<usize, String> {
             .filter(|v| v.len() == 8)
             .map(|v| (u32::from_be_bytes(v[..4].try_into().unwrap()), u32::from_be_bytes(v[4..].try_into().unwrap())));
         loop {
-            let batch = candidates_on(node, chain, cursor, 500)?;
+            // One chain's trouble skips that chain, not the rest (the home's messages come last).
+            let batch = match candidates_on(node, chain, cursor, 500) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("messages: {} skipped this round: {e}", chain.name);
+                    break;
+                }
+            };
             if batch.is_empty() {
                 break;
             }
@@ -290,7 +304,14 @@ pub fn scan(node: &Node) -> Result<usize, String> {
 /// itself yet, what arcades that keep it hold (crate::lentrows). The scan's cursor is the same (height, position)
 /// either way, so it goes on from there once this arcade's own copy has caught up.
 fn candidates_on(node: &Node, p: &'static arcade_chain::params::ChainParams, after: Option<(u32, u32)>, limit: usize) -> Result<Vec<(u32, u32, Value)>, String> {
-    let own = arcade_ledger::messages::candidates(&node.chain, p.chain_no, after, limit).map_err(|e| e.to_string())?;
+    // Only a copy that indexes messages has the table. A borrowed message chain (Pepecoin, Dogecoin: read from its
+    // lenders' rows) has none: reading it answered MDBX_NOTFOUND and stopped the whole scan before the ARCADE chain's
+    // messages (Kiko 2026-11-26: love, and the GX10 too, got no group invites or messages).
+    let own = if node.chain.indexers_for(p.chain_no).contains(&"messages.v1") {
+        arcade_ledger::messages::candidates(&node.chain, p.chain_no, after, limit).map_err(|e| e.to_string())?
+    } else {
+        Vec::new()
+    };
     if !crate::lentrows::lent(node, p) {
         return Ok(own);
     }
