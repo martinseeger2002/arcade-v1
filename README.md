@@ -1,27 +1,57 @@
 # Arcade V1.0
 
-One arcade, many chains. Ordinals/inscriptions, a block explorer, an on-chain app store and a peer-to-peer mesh, in Rust. Self-host in one command; runs [app.dogecoinarcade.com](https://app.dogecoinarcade.com).
+**Your computer, on a peer-to-peer mesh.** Arcade V1 is a small Rust service, `arcaded`, that links your computer with every other arcade it can reach, with no central server in between. Over that mesh, arcades find each other, call and talk, share files, host apps and Git repositories, carry each other's updates, and share services, including **the language models running on their own machines**. It runs on Linux and Windows.
 
 > **Arcade V1 is beta software with no independent security audit yet. Do not use funds you can't afford to lose. Do not restore a seed phrase that holds real savings. It installs a background service that starts at login and connects to other arcades.**
 >
 > What the service can access, the ports it opens, how updates are checked, and how to report a security problem: [SECURITY.md](SECURITY.md) (team@arcade-nodes.com).
 
-> **Try it before you install anything:** [app.dogecoinarcade.com](https://app.dogecoinarcade.com) runs this same software. [Make an account](https://app.dogecoinarcade.com/join), claim an @handle, and post to [the Feed](https://app.dogecoinarcade.com/feed) or install something from [the App Store](https://app.dogecoinarcade.com/apps) — in the browser, in a couple of minutes. It is Pepecoin testnet, and the arcade hands out testnet coins itself, so nothing you try there costs real money. Installing your own arcade is a download you check, then run (below), and it finds the other arcades on the mesh by itself.
+![The arcade mesh](docs/img/screens/home-mesh.png)
 
-> **Arcade V1 carries and updates itself.** Every arcade keeps the arcade's own code (the whole repository with its history, every dependency so it rebuilds offline, and the prebuilt programs) and hands new releases to the arcades it is linked to. Releases are signed with Strawberry's release key, and an arcade with automatic updates on (Options tab) installs them from the network, with no website involved (since v0.1.67). Releases are still published here on GitHub as well for now. See [docs/ARCADECHAIN.md §14.25](docs/ARCADECHAIN.md). Running a node that earns ARCADE: [docs/EARN.md](docs/EARN.md) (when and how pay comes).
+## What the mesh does
 
-![Dogecoin image inscriptions in the Explorer](docs/img/screens/inscriptions-dogecoin.png)
+- **Finds and links arcades by itself.** A new arcade dials the seeds and the arcades it hears of, keeps direct links where it can, and goes through a relay arcade where it can't (behind a home router, say). Each arcade is known by its own key, and everything it sends over the mesh is signed with it.
+- **Talks in real time.** Rooms for apps and games, voice and video calls and shared screens (the Riffs app), relayed between arcades over the mesh, with relay arcades for the ones that can't reach each other directly.
+- **Shares services.** Any program on your computer can offer a service to the mesh, or use one an arcade offers, through arcaded's general service channel ([docs/SVC.md](docs/SVC.md)): arcaded carries the asks and answers and knows nothing about what the service does. The model market below is built this way.
+- **Carries and updates itself.** Every arcade keeps the arcade's own code (the whole repository with its history, every dependency so it rebuilds offline, and the prebuilt programs) and hands new releases to the arcades it is linked to. Releases are signed with Strawberry's release key; an arcade with automatic updates on (Options tab) installs them from the network, with no website involved. See [docs/ARCADECHAIN.md §14.25](docs/ARCADECHAIN.md).
+- **Hosts apps, repositories and posts.** Apps are published to the network and installed in a click from the App Store. Git repositories, with issues and pull requests, are cloned from any arcade (`git clone arcade::@owner/name`). The Feed has public posts, replies and follows, and groups have their own sealed chats.
+- **Lends what it keeps.** An arcade that holds a large dataset answers for the arcades that don't, so a laptop can use what a bigger machine keeps without copying all of it.
+
+Under the hood, arcades use small blockchains as their shared storage and identity: an @handle, the signatures on apps and repositories, and the records everyone agrees on. Each arcade also has a wallet for the test coins that pay for storage and services. It's there for those reasons. You don't need to know anything about it to use the mesh.
+
+## Share a language model on the mesh
+
+If your computer runs a language model (llama.cpp, vLLM, Ollama, LM Studio, or any OpenAI-compatible server, plus speech and transcription servers), Arcade V1 lets other arcades use it, and lets you use theirs.
+
+- **arcade-models** runs beside arcaded. Its code is `@strawberry/arcade-models` on the network's own Git: `git clone arcade::@strawberry/arcade-models` through any arcade. Point it at your model server, choose which models to share and their price per token, and it offers them to the mesh. Every arcade sees the offer, with each model's live state (ready, busy or down), its speed and its rating from the buyers who used it.
+- **Use any model on the mesh** from your own programs through a local OpenAI-compatible door, `http://127.0.0.1:8440/v1` (`models`, `chat/completions`, `audio/speech`). A program written for OpenAI's API works unchanged with any arcade's model: `model@seller`, or just the model name to let the market pick.
+- **Paid fairly, rated by buyers.** Buyers prepay a little credit at a seller and are charged by the seller's own token count; an error costs nothing. Each buyer publishes a daily rating of the models it used (answered, failed, cut short, speed), weighed by what it actually paid, so new buyers can pick the trusted sellers automatically.
+- **Several sellers at once.** A long text can be read aloud by several sellers in one continuous voice, each taking pieces as it finishes.
+
+A computer with a good GPU becomes a model server for the arcades around it: a laptop with no GPU, a phone, or an Arcade OS Kiko machine.
+
+## Power Arcade OS Kiko
+
+**Arcade OS Kiko** is an edition of ArcadeOS (beta) for a dedicated computer, often an old laptop: it boots straight into an arcade with Kiko, an assistant that runs the machine and talks with you. Kiko's own computer doesn't need to run a large model. She thinks with the models the mesh offers, bought through arcade-models with the computer's own credit, and picks the best-rated seller she can afford.
+
+So the arcade on your bigger machine can power every Kiko on the mesh:
+
+1. Install Arcade V1 on the computer that runs your model (below).
+2. Run arcade-models beside it, point it at your model server, and share the models you want Kikos to use.
+3. Kikos on the mesh see the offer and use it, paying the price per token you set. A price of zero shares the model free.
+
+The Kiko edition lives in `@strawberry/arcade-os-kiko-beta` on the network's Git, a fork of this repository with ArcadeOS in `os/`.
+
+## Try it
+
+[app.dogecoinarcade.com](https://app.dogecoinarcade.com) runs this same software. [Make an account](https://app.dogecoinarcade.com/join), claim an @handle, and post to [the Feed](https://app.dogecoinarcade.com/feed) or install something from [the App Store](https://app.dogecoinarcade.com/apps), in the browser, in a couple of minutes. Everything there runs on test networks, so nothing you try costs real money. Installing your own arcade is a download you check, then run (below), and it finds the other arcades on the mesh by itself. Running a node that earns its keep: [docs/EARN.md](docs/EARN.md).
 
 | | |
 |---|---|
-| ![Shibacoin inscriptions](docs/img/screens/inscriptions-shibacoin.png) | ![Dogecoin Explorer](docs/img/screens/explorer-dogecoin.png) |
-| **Inscriptions** on any chain, by type: images, text, HTML, 3D and more (Shibacoin here). | **The Explorer**: blocks, the mempool, inscriptions, DRC-20 tokens, names and maps (Dogecoin here). |
-| ![Every chain in one picker](docs/img/screens/chains-picker.png) | ![The App Store](docs/img/screens/app-store.png) |
-| **One arcade, many chains**: Pepecoin, Dogecoin, DigiByte, Litecoin, Shibacoin and more, kept here or borrowed from other arcades. | **The App Store**: apps published on chain, installed in a click. |
-| ![The arcade mesh](docs/img/screens/home-mesh.png) | ![The Feed](docs/img/screens/feed.png) |
-| **The mesh**: every arcade linked, and what each one shares. | **The Feed**: public posts, replies and tips, signed with your arcade handle. |
-| ![Shibacoin Explorer](docs/img/screens/explorer-shibacoin.png) | |
-| **Borrowed chains** work like installed ones: Shibacoin here, borrowed over the mesh. | |
+| ![The App Store](docs/img/screens/app-store.png) | ![The Feed](docs/img/screens/feed.png) |
+| **The App Store**: apps published to the network, installed in a click. | **The Feed**: public posts, replies and follows, signed with your @handle. |
+| ![Shared data](docs/img/screens/chains-picker.png) | ![The Explorer](docs/img/screens/explorer-dogecoin.png) |
+| **Kept here or borrowed**: what this arcade keeps itself, and what it uses from arcades on the mesh. | **The Explorer**: what's stored on the network, block by block. |
 
 ## Install on Linux
 
