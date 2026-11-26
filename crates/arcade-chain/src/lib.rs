@@ -14,6 +14,7 @@ pub mod format;
 pub mod hash;
 pub mod kotia_pos;
 pub mod luckycoin;
+pub mod mweb;
 pub mod p2p;
 pub mod params;
 pub mod pepecoin;

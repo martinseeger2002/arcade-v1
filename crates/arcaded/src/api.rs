@@ -517,6 +517,8 @@ fn dispatch_cmd(node: &Node, req: &Value) -> Result<Value, String> {
         "screening.topup" => crate::screening::topup(node, &req),
         "sysinfo.status" => Ok(crate::sysinfo::status(node)),
         "sysinfo.set" => crate::sysinfo::set(node, &req),
+        "mweb.status" => Ok(crate::mwebsvc::status(node)),
+        "mweb.set" => crate::mwebsvc::set(node, &req),
         "mesh.relay" => Ok(crate::relaysvc::status(node)),
         "svc.offers" => crate::svcmesh::list_offers(node, req),
         "svc.services" => Ok(crate::svcmesh::services()),

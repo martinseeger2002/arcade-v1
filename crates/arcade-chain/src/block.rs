@@ -50,6 +50,11 @@ pub enum BlockError {
     NullPrevout(Hash256),
     #[error("transaction {0} spends the same coin twice (bad-txns-inputs-duplicate)")]
     DuplicateInput(Hash256),
+    /// Litecoin MWEB: the extension block doesn't match the block (a damaged copy: Core marks
+    /// nearly all of these "mutated", and a copy whose extension bytes were cut or made up
+    /// fails here while the real block is fine).
+    #[error("{0}")]
+    Mweb(#[from] crate::mweb::MwebError),
 }
 
 impl BlockError {

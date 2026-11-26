@@ -87,6 +87,8 @@ cmds! {
     "screening.topup" Admin "amount" "Pay credit to the screening seller (the one in use, or the cheapest that needs credit), with the Models marketplace's memo, from this wallet. amount: ARCADE base units, at most 10 ARCADE. It counts once in a block.";
     "sysinfo.status" Read "" "Whether this arcade shares its system info, and the exact record it sends (or would send), field by field: what is reported, what is measured (seal speed, after 64 MiB sealed) and what is never shared.";
     "sysinfo.set" Admin "on" "Share this arcade's system info with the mesh (on: true) or stop (on: false; every arcade drops it at once). Off by default; kept across restarts and updates.";
+    "mweb.status" Read "" "Litecoin MWEB (MimbleWimble Extension Blocks): whether the operator turned it on (off by default), the notice to accept first and whether it was, what the switch covers, and while on the MWEB pool of each installed Litecoin chain at its tip (what the HogEx holds, the extension block's kernels, outputs, inputs, peg-ins, peg-outs and fees). Extension blocks are read and checked whatever the switch says.";
+    "mweb.set" Admin "on, accept?" "Turn Litecoin MWEB on (on: true, with accept: the notice version from mweb.status, meaning the operator read and accepted the notice) or off (on: false). Off by default; kept across restarts and updates; a new notice version turns it off until accepted again.";
     "mesh.name_set" Admin "name" "Set the public name other arcades may dial this arcade by (wss://host/mesh or host:port, a host name): shared with every link, so networks that reach only names can find it. \"\" clears it.";
     "mesh.relay" Read "" "Relayed links: whether this arcade relays links for others, its month's traffic limit and cap on links, what it has passed this month and today, the links it passes now, and this arcade's own links through relays.";
     "mesh.relay_set" Admin "on?, limit_gb?, max_links?, price_per_gb?, free_mb?, pay_to?, pay_on?, pay_cap?" "Relay mesh links between arcades that can't reach each other (end-to-end encrypted: the relay sees only sealed bytes). Off by default; limit_gb is the month's traffic limit (default 50), max_links the links passed at once (default 32); price_per_gb (ARCADE, default 0: free) and free_mb (a month per arcade, default 100) are the usage fee, paid to pay_to (any ARCADE address; default this arcade's wallet, and no price without one). pay_on (on unless set false) and pay_cap (ARCADE a month, default 1) let this arcade pay relays that charge, so it keeps its relayed links past a relay's free allowance.";
@@ -544,6 +546,7 @@ pub fn find(name: &str) -> Option<&'static Cmd> {
 
 /// Every parameter name a command takes: (name, JSON type, what it is). A type "a|b" takes either.
 pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
+    ("accept", "integer", "The version of the notice the operator read and accepted (from the status command)."),
     ("activity", "boolean", "Also list the record's activity."),
     ("add", "boolean", "true adds, false removes."),
     ("addr_kind", "string", "Address type: legacy, p2sh-p2wpkh or p2wpkh."),
