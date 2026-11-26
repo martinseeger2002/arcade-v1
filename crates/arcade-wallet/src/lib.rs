@@ -1,11 +1,14 @@
 pub mod dd;
 pub mod ddtrade;
 pub mod ddlock;
+pub mod descriptor;
 pub mod htlc;
 pub mod ordwrite;
 pub mod keys;
 pub mod legacy;
 pub mod legs;
+pub mod multisig;
+pub mod psbt;
 pub mod taproot;
 pub mod tx;
 pub mod verify;

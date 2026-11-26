@@ -156,6 +156,22 @@ cmds! {
     "wallet.import" Local "chain, secret, addr_kind?, name?" "Import a wallet: a WIF key, or another wallet's words (one address, index 0); addr_kind legacy (default), p2sh-p2wpkh or p2wpkh. Kept encrypted here; nothing is published.";
     "wallet.imports" Local "" "Imported wallets, with balances on chains this arcade keeps addresses for.";
     "wallet.import_remove" Local "chain, address" "Forget an imported wallet and its key.";
+    // Multisig vaults (crate::msigsvc; docs/MULTISIG.md)
+    "multisig.key" Local "chain, wrap?" "This arcade's key for its next multisig vault on a (test) chain, to give the other co-signers: [fingerprint/48'/coin'/vault'/type']tpub.../<0;1>/*. wrap: sh (default where there is no SegWit), wsh (default on SegWit chains) or sh-wsh.";
+    "multisig.create" Local "chain, cosigners, name?, wrap?, backup?" "Make a 2-of-3 vault of this arcade's next key and two other co-signers' keys (cosigners: a list, or one per line). Returns its descriptor: give it to each co-signer and keep it with your 12 words. backup: self (the mesh copy comes with mesh co-signing).";
+    "multisig.import" Local "chain, descriptor, name?, backup?" "Add a vault made elsewhere from its descriptor (sh/wsh/sh(wsh(sortedmulti(2,...)))): watch-only, or signed for here when this wallet's phrase holds one of its keys.";
+    "multisig.list" Local "chain?" "Your vaults (on one chain, or all) with their descriptors, co-signers (here or elsewhere) and balances.";
+    "multisig.address" Local "id, index?, change?" "A vault's address: index on the receive (or change) branch; without index the next new receive address.";
+    "multisig.coins" Local "id, lenders?" "A vault's unspent coins and balance, from this arcade's address index or borrowed chain data (there, lenders: false answers at once from the coins followed here; by default a lender's scan is added, which can take a minute).";
+    "multisig.propose" Local "id, to, amount?, all?, coins?" "Propose a payment from a vault: amount (smallest units) to an address, or all: everything less the fee; coins (\"txid:vout\", a list) picks which coins, else the largest first. Change goes back to the vault's next change address. Returns the PSBT (give it to a co-signer) and its card; kept here as a proposal.";
+    "multisig.card" Local "id, psbt?, proposal?" "What signing a vault spend approves: each output (payment or change back to the vault, checked by its key paths), the fee, each coin's signatures and whether this arcade sees it unspent, and whether it is ready.";
+    "multisig.merge" Local "id, psbt" "Merge a co-signer's copy of a vault spend into the proposal kept here (a field the two disagree on is refused).";
+    "multisig.sign" Local "id, psbt?, proposal?" "Sign a vault spend with this wallet's key in the vault (SIGHASH_ALL; refused when this arcade sees one of its coins spent). Returns the PSBT to pass on.";
+    "multisig.finalize" Local "id, psbt?, proposal?, send?" "Finish a vault spend that has enough signatures (each checked) and, with send, broadcast it as tx.broadcast does; otherwise its hex.";
+    "multisig.drop" Local "id, proposal" "Forget a vault spend proposal here.";
+    "multisig.set_node" Local "id, place, arcade" "Name the arcade (its mesh node id, as multisig.key gives it) the co-signer key at place (from 0, as multisig.list shows the co-signers) is on, so spends can be sent there and taken from there; \"\" forgets it.";
+    "multisig.share" Local "id, proposal" "Send a vault spend (as signed here so far) to every co-signer's arcade named on the vault, over the mesh (end-to-end encrypted). Each takes it only from an arcade named on its vault, and only for that vault's coins; nothing is signed there until its user signs.";
+    "multisig.remove" Local "id" "Forget a vault here (its coins stay; its descriptor is needed to see or spend them again).";
     "tag.check" Public "tag, chain?" "Whether a @tag is free and valid on one chain (every chain has its own @tags): tag may name it (alice.doge), or chain does; else where new tags go. Answers full (alice.doge) and label (@alice · DOGE).";
     "tag.claim" Wallet "tag, chain?, client_ref?" "Claim a @tag on one chain: ARCADE, Pepecoin testnet (test coins asked for by themselves), or a mainnet chain tags live on here (pep, doge, dgb: kept with their ledger or borrowed; paid in that coin). tag may name the chain (alice.doge).";
     "tag.resolve" Public "tag" "What an @tag names: found one (its chain, address, label) or many (different people on several chains: each, to pick from) or none. alice.doge names Dogecoin's.";
@@ -537,6 +553,7 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("all", "boolean", "All of them, not only the newest or own."),
     ("all_kinds", "boolean", "Also spend the wallet's other address types' coins."),
     ("amount", "integer|string", "An amount in the chain's smallest unit (satoshis; 8 decimals unless the answer says otherwise)."),
+    ("arcade", "string", "An arcade's mesh node id (64 hex)."),
     ("args", "object", "The read's own arguments."),
     ("author", "string", "An author's @tag or address."),
     ("auto", "boolean", "Do it automatically (true) or only when asked (false)."),
@@ -588,6 +605,8 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("content_b64", "string", "A file's bytes as base64."),
     ("card", "object|string", "An app card: the JSON beside the inscription, e.g. {\"app\": {name, family, version, ...}}; a string is used as written."),
     ("as", "string", "An @tag to sign with: the key here (the wallet's own, or an imported one) that holds it."),
+    ("backup", "string", "Multisig vault descriptor backup: self (kept by you) or mesh (an encrypted copy for co-signers, not built yet)."),
+    ("change", "boolean", "The change branch of a multisig vault (false: receive)."),
     ("reason", "string", "Why, in a few words."),
     ("replaced_by", "string", "What replaces it: chain:txid, or a name."),
     ("versions", "array", "Card txids (64 hex)."),
@@ -667,6 +686,8 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("nonce", "string", "A sign-in nonce."),
     ("note", "string", "A note."),
     ("coin", "string", "A coin's chain key."),
+    ("coins", "array|string", "Coins as txid:vout (an array, or a comma list)."),
+    ("cosigners", "array|string", "Other co-signers' keys ([fingerprint/path]tpub.../<0;1>/*): an array, or one per line."),
     ("show", "boolean", "Show it (true) or not (false)."),
     ("undo", "boolean", "Give back what was counted."),
     ("origin", "string", "An arcade's node id, or its first hex digits."),
@@ -772,6 +793,10 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("pin", "string", "One offer to use only: \"model@<arcade id>\"; \"\" for none."),
     ("unchecked", "string", "What happens to content not checked yet: show_here or cover."),
     ("day_cap", "integer", "A daily spending cap, in ARCADE base units."),
+    ("descriptor", "string", "An output descriptor with its checksum (sh/wsh/sh(wsh(sortedmulti(...))))."),
+    ("lenders", "boolean", "Also ask a lender of a borrowed chain (slower)."),
+    ("place", "integer", "A place in a list, from 0 (a multisig vault's co-signer keys)."),
+    ("proposal", "string", "A multisig vault spend proposal (its unsigned txid)."),
     ("value", "string", "A value."),
     ("verdict", "string", "A verdict."),
     ("via", "string", "This arcade's https address."),
@@ -780,6 +805,7 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("who", "string", "An @tag or address."),
     ("wif", "string", "A WIF private key."),
     ("with", "array", "Indexes to keep with a chain."),
+    ("wrap", "string", "How a multisig vault is held: sh, wsh or sh-wsh."),
 ];
 
 /// What one command says of one parameter: (command, parameter, allowed values (comma list, "" none), default (JSON,
@@ -815,6 +841,10 @@ pub const PARAM_RULES: &[(&str, &str, &str, &str, u64)] = &[
     ("wallet.addr_kind", "kind", "legacy,p2sh-p2wpkh,p2wpkh,p2tr", "", 0),
     ("wallet.coins", "kind", "legacy,p2sh-p2wpkh,p2wpkh,p2tr", "", 0),
     ("wallet.import", "addr_kind", "legacy,p2sh-p2wpkh,p2wpkh", "\"legacy\"", 0),
+    ("multisig.key", "wrap", "sh,wsh,sh-wsh", "", 0),
+    ("multisig.create", "wrap", "sh,wsh,sh-wsh", "", 0),
+    ("multisig.create", "backup", "self,mesh", "\"self\"", 0),
+    ("multisig.import", "backup", "self,mesh", "\"self\"", 0),
     ("chains.add", "mode", "full,shared,chain", "\"full\"", 0),
     ("chains.plan", "mode", "full,shared,chain", "\"full\"", 0),
     ("chains.copy_start", "what", "coins,blocks", "\"coins\"", 0),

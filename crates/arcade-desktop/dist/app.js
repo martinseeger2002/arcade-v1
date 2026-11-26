@@ -668,8 +668,9 @@ function assetChanged() {
 function drawPane(ch) {
   document.querySelectorAll(".wl-tabs button").forEach((b) => b.classList.toggle("on", b.dataset.wt === W.tab));
   // Functions: ARCADE ID, accounts, sign-in and linked wallets (not a list of this wallet's rows).
-  const fn = W.tab === "functions";
-  $("w-functions").hidden = !fn; $("w-pane").hidden = fn;
+  const fn = W.tab === "functions", vt = W.tab === "vaults";
+  $("w-functions").hidden = !fn; $("w-vaults").hidden = !vt; $("w-pane").hidden = fn || vt;
+  if (vt) { $("w-note").hidden = true; drawVaults(ch); return; }
   if (fn) { $("w-note").hidden = true; drawAccounts(); drawLinks(ch); aidSites(); return; }
   const v = W.view, w = cur();
   const pane = $("w-pane");

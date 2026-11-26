@@ -189,6 +189,26 @@ marks the change. Hand `psbt` to the app as `{type: "psbt", chain, psbt, finaliz
 | `wallet.approve` | `/api/v1/wallet/approve` | local | id | Approve a request: sign and send it. |
 | `wallet.deny` | `/api/v1/wallet/deny` | local | id | Refuse a request. |
 
+### Multisig
+
+| method | route | needs | params | what |
+|---|---|---|---|---|
+| `multisig.key` | `/api/v1/multisig/key` | local | chain, wrap? | This arcade's key for its next multisig vault on a (test) chain, to give the other co-signers: [fingerprint/48'/coin'/vault'/type']tpub.../<0;1>/*. wrap: sh (default where there is no SegWit), wsh (default on SegWit chains) or sh-wsh. |
+| `multisig.create` | `/api/v1/multisig/create` | local | chain, cosigners, name?, wrap?, backup? | Make a 2-of-3 vault of this arcade's next key and two other co-signers' keys (cosigners: a list, or one per line). Returns its descriptor: give it to each co-signer and keep it with your 12 words. backup: self (the mesh copy comes with mesh co-signing). |
+| `multisig.import` | `/api/v1/multisig/import` | local | chain, descriptor, name?, backup? | Add a vault made elsewhere from its descriptor (sh/wsh/sh(wsh(sortedmulti(2,...)))): watch-only, or signed for here when this wallet's phrase holds one of its keys. |
+| `multisig.list` | `/api/v1/multisig/list` | local | chain? | Your vaults (on one chain, or all) with their descriptors, co-signers (here or elsewhere) and balances. |
+| `multisig.address` | `/api/v1/multisig/address` | local | id, index?, change? | A vault's address: index on the receive (or change) branch; without index the next new receive address. |
+| `multisig.coins` | `/api/v1/multisig/coins` | local | id, lenders? | A vault's unspent coins and balance, from this arcade's address index or borrowed chain data (there, lenders: false answers at once from the coins followed here; by default a lender's scan is added, which can take a minute). |
+| `multisig.propose` | `/api/v1/multisig/propose` | local | id, to, amount?, all?, coins? | Propose a payment from a vault: amount (smallest units) to an address, or all: everything less the fee; coins ("txid:vout", a list) picks which coins, else the largest first. Change goes back to the vault's next change address. Returns the PSBT (give it to a co-signer) and its card; kept here as a proposal. |
+| `multisig.card` | `/api/v1/multisig/card` | local | id, psbt?, proposal? | What signing a vault spend approves: each output (payment or change back to the vault, checked by its key paths), the fee, each coin's signatures and whether this arcade sees it unspent, and whether it is ready. |
+| `multisig.merge` | `/api/v1/multisig/merge` | local | id, psbt | Merge a co-signer's copy of a vault spend into the proposal kept here (a field the two disagree on is refused). |
+| `multisig.sign` | `/api/v1/multisig/sign` | local | id, psbt?, proposal? | Sign a vault spend with this wallet's key in the vault (SIGHASH_ALL; refused when this arcade sees one of its coins spent). Returns the PSBT to pass on. |
+| `multisig.finalize` | `/api/v1/multisig/finalize` | local | id, psbt?, proposal?, send? | Finish a vault spend that has enough signatures (each checked) and, with send, broadcast it as tx.broadcast does; otherwise its hex. |
+| `multisig.drop` | `/api/v1/multisig/drop` | local | id, proposal | Forget a vault spend proposal here. |
+| `multisig.set_node` | `/api/v1/multisig/set_node` | local | id, place, arcade | Name the arcade (its mesh node id, as multisig.key gives it) the co-signer key at place (from 0, as multisig.list shows the co-signers) is on, so spends can be sent there and taken from there; "" forgets it. |
+| `multisig.share` | `/api/v1/multisig/share` | local | id, proposal | Send a vault spend (as signed here so far) to every co-signer's arcade named on the vault, over the mesh (end-to-end encrypted). Each takes it only from an arcade named on its vault, and only for that vault's coins; nothing is signed there until its user signs. |
+| `multisig.remove` | `/api/v1/multisig/remove` | local | id | Forget a vault here (its coins stay; its descriptor is needed to see or spend them again). |
+
 ### Dd
 
 | method | route | needs | params | what |

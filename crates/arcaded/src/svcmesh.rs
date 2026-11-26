@@ -193,6 +193,18 @@ fn detach(node: &Node, service: &str, gen: u64) {
     let _ = node.app.event("svc", &format!("the helper for {service} went away"));
 }
 
+/// One whole answer from a service built into arcaded.
+fn finish_ok(t: Target, ev: Value) {
+    match t {
+        Target::Mesh { peer, rid, seq } => {
+            let _ = crate::crvia::send(&peer, Frame::new(json!({"t": "sv", "op": "a", "id": rid, "seq": seq, "end": true, "ev": ev})));
+        }
+        Target::Local(tx) => {
+            let _ = tx.send(Frame::new(json!({"op": "a", "end": true, "ev": ev})));
+        }
+    }
+}
+
 fn finish_err(t: Target, e: &str) {
     match t {
         Target::Mesh { peer, rid, seq } => {
@@ -279,6 +291,13 @@ fn send_wait(peer: &str, f: Frame) -> Result<(), String> {
 
 /// A request for `service` reached this arcade: to its helper, or refused.
 fn deliver(node: &Node, service: &str, from: &str, who: Option<String>, body: Value, target: Target) {
+    // Built in: multisig vault spends between co-signers' arcades (crate::msigmesh), answered here at once.
+    if service == crate::msigmesh::SERVICE {
+        return match crate::msigmesh::on_request(node, from, &body) {
+            Ok(ev) => finish_ok(target, ev),
+            Err(e) => finish_err(target, &e),
+        };
+    }
     let mut s = st().lock().unwrap();
     let Some(h) = s.helpers.get_mut(service) else {
         drop(s);

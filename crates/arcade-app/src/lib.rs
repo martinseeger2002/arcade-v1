@@ -285,7 +285,7 @@ impl AppDb {
 
     fn sname(&self, name: &str) -> String {
         let a = self.active.read().unwrap();
-        if a.is_empty() || !(name == "phrase" || name.starts_with("import/")) {
+        if a.is_empty() || !(name == "phrase" || name == "multisig_vaults" || name.starts_with("import/")) {
             name.to_string()
         } else {
             format!("acct/{a}/{name}")
@@ -355,6 +355,16 @@ impl AppDb {
 
     pub fn imported_key(&self, name: &str) -> Result<Option<Vec<u8>>> {
         self.secret(&format!("import/{name}"))
+    }
+
+    /// The account's multisig vaults (JSON list: descriptors and their state), kept encrypted like the phrase: a
+    /// descriptor holds no key that spends, but it shows every address of the vault.
+    pub fn put_vaults(&self, plain: &[u8]) -> Result<()> {
+        self.put_secret("multisig_vaults", plain)
+    }
+
+    pub fn vaults(&self) -> Result<Option<Vec<u8>>> {
+        self.secret("multisig_vaults")
     }
 
     pub fn drop_imported_key(&self, name: &str) -> Result<()> {

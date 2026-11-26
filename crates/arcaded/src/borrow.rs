@@ -1221,6 +1221,11 @@ pub fn pool_txs(p: &ChainParams) -> Vec<Tx> {
 }
 
 /// Every coin row of a chain: (outpoint, row).
+/// The block height of every coin followed on a borrowed chain (crate::msigsvc shows it).
+pub fn coin_heights(node: &Node, key: &str) -> HashMap<OutPoint, u32> {
+    coin_rows(node, key).into_iter().filter_map(|(op, c)| Some((op, c["h"].as_u64().filter(|&h| h > 0)? as u32))).collect()
+}
+
 fn coin_rows(node: &Node, key: &str) -> Vec<(OutPoint, Value)> {
     let pre = k(key, "c/");
     node.app
@@ -1552,7 +1557,9 @@ fn follow(node: Arc<Node>, p: &'static ChainParams, run: Arc<Run>) {
     let mut next_scan = arcade_app::now() + (p.chain_no as u64 % 8) * 10;
     while !run.stop.load(Ordering::Relaxed) {
         let w = watched(&node, p);
-        let scripts: HashSet<Vec<u8>> = w.iter().map(|x| x.script.clone()).collect();
+        let mut scripts: HashSet<Vec<u8>> = w.iter().map(|x| x.script.clone()).collect();
+        // Multisig vaults' addresses are followed too (crate::msigsvc), apart from the wallet's own balance.
+        scripts.extend(crate::msigsvc::scripts_on(&node, p));
         ST.watch.lock().unwrap().insert(p.key.to_string(), scripts.clone());
         drain();
         if lenders(&node, p).is_empty() {
@@ -2081,8 +2088,11 @@ pub fn coins(node: &Node, key: &str) -> R {
         return Err(format!("{} is not borrowed", p.name));
     }
     let spent = pool_spent(p.key);
+    // A multisig vault's coins are its own (crate::msigsvc), not the wallet's.
+    let vaults: HashSet<String> = crate::msigsvc::scripts_on(node, p).iter().map(hex::encode).collect();
     let rows: Vec<Value> = coin_rows(node, p.key)
         .into_iter()
+        .filter(|(_, c)| !c["s"].as_str().is_some_and(|s| vaults.contains(s)))
         .map(|(op, c)| json!({"txid": op.txid.to_hex(), "vout": op.vout, "value": c["v"],
                                // Rows kept before SegWit outputs had a name: name them from the script.
                                "address": if c["a"].is_null() { json!(c["s"].as_str().and_then(|s| hex::decode(s).ok()).and_then(|s| arcade_ledger::address::wallet_address_of(&s, p))) } else { c["a"].clone() },
