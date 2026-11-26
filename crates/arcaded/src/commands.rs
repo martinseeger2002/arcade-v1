@@ -141,7 +141,10 @@ cmds! {
     "dd.wallet" Read "chain?" "Your DigiDollar on DigiByte (chain dgb, the default, or dgbtest): address (DD.../TD...), cents, coins, borrowed, whole (false when only coins from the borrow floor on can be seen).";
     "dd.coins" Read "chain?, pubkey" "The DigiDollar address and coins (txid, vout, cents, height) of any DigiByte key (33-byte hex), as dd.wallet shows this wallet's: for a website whose accounts sign in their browsers.";
     "dd.send" Local "chain?, to, cents, send?, client_ref?" "Send DigiDollars (cents, $1 to $100,000 per send) to a DD.../TD... address, with DGB from the same wallet for the fee (0.35 DGB/kB, at least 0.1, at most 0.5 DGB); send: true broadcasts, otherwise it's only built and shown.";
-    "wallet.send" Local "chain?, to, amount, from?, kind?, all_kinds?, send?, client_ref?" "client_ref (with send): as for ledger.item_open. Pay amount (satoshis) on a chain (Pepecoin testnet by default, or any installed or borrowed one) from this wallet (from: one of its addresses or an imported wallet's; otherwise the own address with the most), signed here; kind: the address type it's sent from, change back to it (default: from's type, else the one the Wallet shows); all_kinds: also spend the wallet's other address types' coins; send: true broadcasts, otherwise it's only built and shown with its fee (and a warning when the address could be meant for another chain).";
+    "wallet.coins" Read "chain?, from?, kind?, all_kinds?" "Coin control: the coins a wallet.send with the same from, kind and all_kinds could spend (value, address, confirmations, age; status free, inscription or unchecked (small and nobody could check: kept back); frozen; spendable), with the chain's fee rule (fee_per_kb, per_started_kb, dust) and the change address (from).";
+    "wallet.freeze" Wallet "chain, coins, frozen?" "Coin control: freeze coins (frozen true, the default) so no automatic send spends them and they can't be picked, or unfreeze them (false). The chain's frozen coins after.";
+    "wallet.coin_prefs" Wallet "coin_control?, tip?" "Coin control's setting for the account in use (off until turned on) and whether its how-to tip shows; with either, change it first.";
+    "wallet.send" Local "chain?, to, amount, from?, kind?, all_kinds?, send?, client_ref?, coins?" "client_ref (with send): as for ledger.item_open. coins (coin control): spend exactly these coins (\"txid:vout\", from wallet.coins), all of them and no other; refused when one is frozen, kept back for an inscription or spent, or they don't pay the amount and fee. Pay amount (satoshis) on a chain (Pepecoin testnet by default, or any installed or borrowed one) from this wallet (from: one of its addresses or an imported wallet's; otherwise the own address with the most), signed here; kind: the address type it's sent from, change back to it (default: from's type, else the one the Wallet shows); all_kinds: also spend the wallet's other address types' coins; send: true broadcasts, otherwise it's only built and shown with its fee (and a warning when the address could be meant for another chain).";
     "wallet.link" Wallet "chain, wif, tag" "Link another wallet to your @tag (signed by both keys).";
     "wallet.unlink" Wallet "chain, address, tag" "Remove a linked wallet.";
     "wallet.links" Read "chain" "Your linked wallets on a chain.";
@@ -556,6 +559,10 @@ pub const PARAM_TYPES: &[(&str, &str, &str)] = &[
     ("clear", "boolean", "Empty it."),
     ("client_ref", "string", "Your idempotency key for a send (1 to 128 printable characters): a retry with the same one never signs again; it answers the first send's result (replayed: true). tx.status and tx.wait take it in place of a txid."),
     ("code", "string", "A code from an earlier answer."),
+    ("coin_control", "boolean", "Coin control on (pick which coins a send spends) or off (automatic)."),
+    ("coins", "array", "Coins, each \"txid:vout\"."),
+    ("frozen", "boolean", "true freezes (no automatic send spends them), false unfreezes."),
+    ("tip", "boolean", "Show the how-to tip (true) or not (false)."),
     ("content", "boolean", "Include inscription content previews."),
     ("contenttype", "string", "A MIME type."),
     ("count", "integer", "How many."),
@@ -806,6 +813,7 @@ pub const PARAM_RULES: &[(&str, &str, &str, &str, u64)] = &[
     ("wallet.send", "kind", "legacy,p2sh-p2wpkh,p2wpkh,p2tr", "", 0),
     ("borrow.send", "kind", "legacy,p2sh-p2wpkh,p2wpkh,p2tr", "", 0),
     ("wallet.addr_kind", "kind", "legacy,p2sh-p2wpkh,p2wpkh,p2tr", "", 0),
+    ("wallet.coins", "kind", "legacy,p2sh-p2wpkh,p2wpkh,p2tr", "", 0),
     ("wallet.import", "addr_kind", "legacy,p2sh-p2wpkh,p2wpkh", "\"legacy\"", 0),
     ("chains.add", "mode", "full,shared,chain", "\"full\"", 0),
     ("chains.plan", "mode", "full,shared,chain", "\"full\"", 0),

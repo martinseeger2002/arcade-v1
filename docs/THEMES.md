@@ -49,7 +49,7 @@ The card is an ordinary app card with `"category": "themes"`, e.g.
 
 | Field | What it sets |
 |---|---|
-| `layout` | `"window"`: one application window with a menu bar (File, Settings, Window, Go, View), a toolbar of the screens and a status bar. `"desktop"`: every screen in a window of its own on a desktop. |
+| `layout` | `"window"`: one application window with a menu bar (File, Settings (Options, Coin control, Theme), Window, Go, View), a toolbar of the screens and a status bar. `"desktop"`: every screen in a window of its own on a desktop. |
 | `colors` | The screens' colours: `bg panel panel-2 ink muted line accent accent-ink accent-soft warn-bg warn-line bad faint` (hex). `bg panel ink muted line accent accent-ink` are needed. |
 | `font`, `size`, `radius` | `system tahoma ubuntu mac serif mono`; 11–16 px; 0–16 px corners. |
 | `brand` | Text in the menu bar and at the head of the start menu. |

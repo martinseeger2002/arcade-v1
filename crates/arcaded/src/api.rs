@@ -614,10 +614,14 @@ fn dispatch_cmd(node: &Node, req: &Value) -> Result<Value, String> {
         "wallet.send" => {
             let amount = req["amount"].as_u64().ok_or("amount required (satoshis)")?;
             crate::coinsend::OWNER_CHANGE_OK.with(|c| c.set(req["owner_changed_ok"] == true));
-            let r = crate::coinsend::send(node, s("chain").as_deref(), &s("to").ok_or("to required")?, amount, s("from").as_deref(), s("kind").as_deref(), req["all_kinds"] == true, req["send"] == true);
+            let picked = crate::coinctl::parse_coins(&req["coins"])?;
+            let r = crate::coinsend::send(node, s("chain").as_deref(), &s("to").ok_or("to required")?, amount, s("from").as_deref(), s("kind").as_deref(), req["all_kinds"] == true, req["send"] == true, &picked);
             crate::coinsend::OWNER_CHANGE_OK.with(|c| c.set(false));
             r
         }
+        "wallet.coins" => crate::coinctl::coins(node, s("chain").as_deref(), s("from").as_deref(), s("kind").as_deref(), req["all_kinds"] == true),
+        "wallet.freeze" => crate::coinctl::freeze(node, &s("chain").ok_or("chain required")?, &crate::coinctl::parse_coins(&req["coins"])?, req["frozen"] != false),
+        "wallet.coin_prefs" => crate::coinctl::set_prefs(node, req["coin_control"].as_bool(), req["tip"].as_bool()),
         "wallet.addr_kind" => {
             let cp = crate::chains::find(&s("chain").ok_or("chain required")?).ok_or("unknown chain")?;
             crate::coinsend::addr_kind(node, cp, s("kind").as_deref())
