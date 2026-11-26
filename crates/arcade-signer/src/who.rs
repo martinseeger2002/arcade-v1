@@ -326,6 +326,8 @@ fn tcp_peer_pid(local: std::net::SocketAddr, peer: std::net::SocketAddr) -> Opti
     let (std::net::IpAddr::V4(local_ip), std::net::IpAddr::V4(peer_ip)) = (local.ip(), peer.ip()) else {
         return None;
     };
+    // In iphlpapi.dll; nothing else here links its import library (the Windows build failed with LNK2019).
+    #[link(name = "iphlpapi")]
     unsafe extern "system" {
         fn GetExtendedTcpTable(table: *mut u8, size: *mut u32, order: i32, family: u32, class: i32, reserved: u32) -> u32;
     }
