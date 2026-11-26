@@ -1220,12 +1220,12 @@ pub fn pool_txs(p: &ChainParams) -> Vec<Tx> {
     pool.iter().filter_map(|raw| Tx::parse_with(raw, &p.format).ok()).collect()
 }
 
-/// Every coin row of a chain: (outpoint, row).
-/// The block height of every coin followed on a borrowed chain (crate::msigsvc shows it).
-pub fn coin_heights(node: &Node, key: &str) -> HashMap<OutPoint, u32> {
+/// The block height of every coin followed on a borrowed chain that a block holds (crate::msigsvc shows it).
+pub fn coin_block_heights(node: &Node, key: &str) -> HashMap<OutPoint, u32> {
     coin_rows(node, key).into_iter().filter_map(|(op, c)| Some((op, c["h"].as_u64().filter(|&h| h > 0)? as u32))).collect()
 }
 
+/// Every coin row of a chain: (outpoint, row).
 fn coin_rows(node: &Node, key: &str) -> Vec<(OutPoint, Value)> {
     let pre = k(key, "c/");
     node.app

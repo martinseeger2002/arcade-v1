@@ -248,7 +248,7 @@ pub(crate) fn coins_with(node: &Node, id: &str, lenders: bool) -> Result<Value, 
     let w = watch(node, p).ok_or_else(|| format!("this arcade doesn't keep addresses for {} (install it with its address index, or borrow it)", p.name))?;
     let all = addresses(&v, p, &d)?;
     // A followed coin's block (none while its transaction waits).
-    let heights = if matches!(w, Watch::Borrowed) { crate::borrow::coin_heights(node, p.key) } else { Default::default() };
+    let heights = if matches!(w, Watch::Borrowed) { crate::borrow::coin_block_heights(node, p.key) } else { Default::default() };
     let mut found: Vec<(arcade_chain::OutPoint, u64, Option<u32>, usize)> = Vec::new();
     for (n, (_, _, _, script)) in all.iter().enumerate() {
         match w {
