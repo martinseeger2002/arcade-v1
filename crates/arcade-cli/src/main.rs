@@ -403,9 +403,40 @@ fn read_hidden(prompt: &str) -> std::io::Result<String> {
     got.map(|_| line.trim().to_string())
 }
 
+/// The signer window's link, printed only on the operator's own terminal. The session is in the
+/// fragment, which the arcade service never sees. A terminal the service opened gets nothing.
+fn signer_link(home: &std::path::Path) {
+    use std::io::IsTerminal;
+    if !arcade_signer::grant_may_be_shown(arcade_signer::running_under_arcaded(), std::io::stdout().is_terminal()) {
+        println!("The signer window's link is shown only in your own terminal, not to the arcade service. Run `arcade web` there to approve a send from the browser.");
+        return;
+    }
+    let token = arcade_signer::new_session_token();
+    let Some(hash) = arcade_signer::session_hash_hex(&token) else { return };
+    let mut client = match arcade_signer::Client::connect(home) {
+        Ok(c) => c,
+        Err(_) => {
+            println!("The signer is not running, so a send from the browser stays locked until it is.");
+            return;
+        }
+    };
+    if let Err(e) = client.bind_grant(&hash) {
+        println!("The signer did not accept a browser session ({e}).");
+        return;
+    }
+    let port = client.status().ok().and_then(|v| v["confirm_port"].as_u64()).unwrap_or(0);
+    if port == 0 {
+        println!("The signer has no confirmation window.");
+        return;
+    }
+    println!("\nTo approve a send from the browser, open this once. It holds a session the arcade service never sees:\n\n  http://127.0.0.1:{port}/approve#s={token}\n");
+    println!("From another computer, forward that port as well (the same number on both ends):\n\n  -L {port}:127.0.0.1:{port}\n");
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let sock = arcade_local::socket_path(&home(&args));
+    let home_dir = home(&args);
+    let sock = arcade_local::socket_path(&home_dir);
     if let Some(i) = args.iter().position(|a| a == "--home") {
         args.drain(i..i + 2);
     }
@@ -567,6 +598,7 @@ fn main() {
                 println!("Open in a browser on this computer:\n\n  {u}\n");
                 println!("From another computer, first open a tunnel (the same port on both ends):\n\n  {}\n", v["result"]["tunnel"].as_str().unwrap_or(""));
                 println!("The link holds this arcade's key: anyone with it and a way in can use the arcade as you. It changes each time the arcade starts.");
+                signer_link(&home_dir);
                 return;
             }
         }

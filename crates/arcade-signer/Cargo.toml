@@ -1,0 +1,45 @@
+[package]
+name = "arcade-signer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The process that holds the wallet seed and signs only a transaction the user approved."
+
+[[bin]]
+name = "arcade-signer"
+path = "src/main.rs"
+required-features = ["server"]
+
+[features]
+default = ["server"]
+# The desktop app links only the client (default-features = false): it approves a card on the
+# local socket and never opens the seed file.
+server = [
+    "dep:arcade-app",
+    "dep:arcade-chain",
+    "dep:arcade-ledger",
+    "dep:arcade-wallet",
+    "dep:chacha20poly1305",
+    "dep:zeroize",
+]
+
+[dependencies]
+arcade-local = { version = "0.1.0", path = "../arcade-local" }
+getrandom = "0.2"
+hex = "0.4.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+arcade-app = { version = "0.1.0", path = "../arcade-app", optional = true }
+arcade-chain = { version = "0.1.0", path = "../arcade-chain", optional = true }
+arcade-ledger = { version = "0.1.0", path = "../arcade-ledger", optional = true }
+arcade-wallet = { version = "0.1.0", path = "../arcade-wallet", optional = true }
+chacha20poly1305 = { version = "0.11.0", optional = true }
+zeroize = { version = "1.9.1", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+arcade-app = { version = "0.1.0", path = "../arcade-app" }
+tempfile = "3.27.0"

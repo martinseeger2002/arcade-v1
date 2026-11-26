@@ -576,6 +576,50 @@ impl AppDb {
         let all = self.store.read(|r| r.scan_prefix(EVENTS, b""))?;
         all.iter().rev().take(n).map(|(_, v)| dec(EVENTS, v)).collect()
     }
+
+    /// The phrase of the account in use (`""` is this arcade's own wallet), read without a write
+    /// lock. arcade-signer uses this to copy an existing wallet into its own seed file while
+    /// arcaded has the database open. The phrase is left where it was: nothing here deletes it.
+    /// None when this home has no database or that account has no wallet yet.
+    pub fn read_active_phrase(dir: &Path) -> Result<Option<(String, String)>> {
+        let db = dir.join("arcade.mdbx");
+        let kp = dir.join("secret.key");
+        if !db.exists() || !kp.exists() {
+            return Ok(None);
+        }
+        let h = std::fs::read_to_string(&kp)?;
+        let key: [u8; 32] = hex::decode(h.trim()).ok().and_then(|v| v.try_into().ok()).ok_or(AppError::BadSecret)?;
+        let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| AppError::BadSecret)?;
+        let store = Store::open_readonly(db, &APP_SCHEMA)?;
+        let account = store
+            .read(|r| r.get(META, b"active_account"))?
+            .map(|v| String::from_utf8_lossy(&v).into_owned())
+            .unwrap_or_default();
+        let name = if account.is_empty() { "phrase".to_string() } else { format!("acct/{account}/phrase") };
+        let Some(v) = store.read(|r| r.get(SECRETS, name.as_bytes()))? else { return Ok(None) };
+        if v.len() < 24 {
+            return Err(AppError::BadSecret);
+        }
+        let nonce: [u8; 24] = v[..24].try_into().unwrap();
+        let plain = cipher.decrypt(&XNonce::from(nonce), &v[24..]).map_err(|_| AppError::BadSecret)?;
+        Ok(Some((account, String::from_utf8(plain).map_err(|_| AppError::BadSecret)?)))
+    }
+}
+
+/// Leave `path` readable and writable by this user alone.
+/// Unix: permission bits `mode` (`0o600` for a file, `0o700` for a directory).
+/// Windows: the inherited ACL is replaced with one grant for the current user.
+pub fn restrict_to_owner(path: &Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+    }
+    #[cfg(windows)]
+    {
+        let _ = mode;
+        restrict_to_current_user(path)
+    }
 }
 
 /// `<dir>/secret.key` is empty: set the database aside and remove the empty key, when the database holds nothing

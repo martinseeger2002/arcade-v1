@@ -42,7 +42,16 @@ const SETTING: &[u8] = b"auto_update";
 const EVERY_SECS: u64 = 600;
 const FIRST_SECS: u64 = 120;
 /// The programs a release carries; each one present beside arcaded is replaced.
-const PROGRAMS: &[&str] = &["arcaded", "arcade", "arcade-desktop"];
+const PROGRAMS: &[&str] = &["arcaded", "arcade", "arcade-desktop", "arcade-signer"];
+
+/// Whether a release's program `name` is put in place: when the release has it, and either one is here already or it
+/// is one arcaded can't do without. arcade-signer (v0.1.176, #396) is new: an arcade that updates over the mesh has
+/// never had it, and without it a page's send card can't be signed. The window and the command line are left out where
+/// the operator never installed them.
+fn installs(name: &str, in_release: bool, here: bool) -> bool {
+    let base = name.strip_suffix(std::env::consts::EXE_SUFFIX).filter(|_| !std::env::consts::EXE_SUFFIX.is_empty()).unwrap_or(name);
+    in_release && (here || base == "arcaded" || base == "arcade-signer")
+}
 
 /// This build's release version (None for a local build).
 /// The longest an installed update waits for the next ARCADE block before it restarts.
@@ -342,7 +351,7 @@ fn install(node: &Node, c: &Candidate) -> Result<(), String> {
         #[allow(unreachable_code)]
         for name in PROGRAMS {
             let (new, at) = (bin.join(name), dir.join(name));
-            if !new.exists() || !(at.exists() || *name == "arcaded") {
+            if !installs(name, new.exists(), at.exists()) {
                 continue;
             }
             let tmp = dir.join(format!(".{name}.update"));
@@ -467,7 +476,7 @@ fn swap_windows(bin: &std::path::Path, dir: &std::path::Path) -> Result<(), Stri
     let mut names: Vec<String> = PROGRAMS
         .iter()
         .map(|n| format!("{n}{}", std::env::consts::EXE_SUFFIX))
-        .filter(|n| bin.join(n).exists() && (dir.join(n).exists() || n.starts_with("arcaded.")))
+        .filter(|n| installs(n, bin.join(n).exists(), dir.join(n).exists()))
         .collect();
     if let Ok(rd) = std::fs::read_dir(bin) {
         for e in rd.flatten() {
@@ -651,6 +660,22 @@ pub const RESTARTED: &str = "ARCADE_UPDATE_RESTARTED";
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_release_puts_the_signer_in_place_even_where_it_never_was() {
+        let exe = std::env::consts::EXE_SUFFIX;
+        // An arcade updated over the mesh since before #396 has no arcade-signer: it gets one.
+        assert!(installs(&format!("arcade-signer{exe}"), true, false));
+        assert!(installs(&format!("arcaded{exe}"), true, false));
+        // The window and the command line only where they were installed.
+        assert!(!installs(&format!("arcade-desktop{exe}"), true, false));
+        assert!(!installs(&format!("arcade{exe}"), true, false));
+        assert!(installs(&format!("arcade-desktop{exe}"), true, true));
+        // A release without the program changes nothing.
+        assert!(!installs(&format!("arcade-signer{exe}"), false, true));
+        assert!(PROGRAMS.contains(&"arcade-signer"));
+    }
+
     #[test]
     fn the_update_folder_is_private_and_in_the_home() {
         let home = std::env::temp_dir().join(format!("arcade-uptest-{}", std::process::id()));

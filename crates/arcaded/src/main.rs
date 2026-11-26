@@ -58,6 +58,7 @@ mod msigspend;
 mod msigsvc;
 mod walletsvc;
 mod coinctl;
+mod signer;
 mod coinsend;
 mod ddsvc;
 mod dproto;
@@ -575,6 +576,12 @@ fn main() {
     };
 
     let app = arcade_app::AppDb::open(&home).unwrap_or_else(|e| fail_start(&format!("opening arcade.mdbx: {e}")));
+    // Copy the phrase into the signer's own file before that process starts. The copy in this
+    // database stays, so an older build of arcaded can still open the wallet.
+    if let Ok(phrase) = app.phrase() {
+        let _ = arcade_signer::import_account(&home, &app.active_account(), &phrase);
+    }
+    signer::ensure_running(&home);
     let chain = arcade_chaindb::ChainDb::open(home.join("chain.mdbx")).unwrap_or_else(|e| fail_start(&format!("opening chain.mdbx: {e}")));
     // An original arcade moving to V1.0 keeps its node id: its mesh.key seed becomes the node identity.
     if let Some(i) = args.iter().position(|a| a == "--import-node-key") {

@@ -21,6 +21,7 @@ arcade-msg = { version = "0.1.0", path = "../arcade-msg" }
 arcade-mesh = { version = "0.1.0", path = "../arcade-mesh" }
 arcade-store = { version = "0.1.0", path = "../arcade-store" }
 arcade-wallet = { version = "0.1.0", path = "../arcade-wallet" }
+arcade-signer = { version = "0.1.0", path = "../arcade-signer" }
 base64 = "0.23.1"
 libc = "0.2"
 pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
@@ -66,6 +67,7 @@ depends = "libc6, libwebkit2gtk-4.1-0, libgtk-3-0, adduser, systemd"
 assets = [
     ["target/release/arcaded", "usr/bin/", "755"],
     ["target/release/arcade", "usr/bin/", "755"],
+    ["target/release/arcade-signer", "usr/bin/", "755"],
     ["target/release/arcade-desktop", "usr/bin/", "755"],
     ["../../packaging/arcade.desktop", "usr/share/applications/", "644"],
     ["../arcade-desktop/icons/icon.png", "usr/share/icons/hicolor/256x256/apps/arcade.png", "644"],

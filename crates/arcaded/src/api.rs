@@ -197,6 +197,8 @@ fn handle(node: Arc<Node>, s: UnixStream) {
 pub fn create_wallet(node: &Node, phrase: Option<&str>) -> Result<Value, String> {
     let restored = phrase.is_some();
     let words = node.app.create_wallet(phrase).map_err(|e| e.to_string())?;
+    // The database keeps the phrase. The signer gets its own copy, and drops any seed it held.
+    crate::signer::publish(&node.home, &node.app.active_account(), &words);
     // The wallet is saved: answer now. Finding a restored wallet's @handle can take minutes on a fresh install (its
     // tag index behind, other arcades asked over the mesh for each key slot), and a caller waiting for it gave up with
     // "timed out" though the words were right (a Kiko laptop, 2026-11-24). The handle comes in the background, shown

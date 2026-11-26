@@ -27,6 +27,7 @@ A port that is already taken moves to the next free one. `0` turns that port off
 | Port | Protocol | Where it listens | What it serves |
 |---|---|---|---|
 | **8420** | TCP | `127.0.0.1` by default (`--http-port`, `--http-bind`) | The app and its HTTP API, including the wallet. Other computers cannot open it unless you change the bind address. |
+| (ephemeral) | TCP | `127.0.0.1` only | `arcade-signer`'s confirmation window, for approving a send from the browser. Not the mesh, and not bound to any other address. The session in that window's link is not given to arcaded. |
 | **8421** | TCP | `0.0.0.0` (`--mesh-port`) | The mesh. Links are encrypted (X25519, then XChaCha20-Poly1305). Arcades exchange blocks, chain data, and signed records, including signed code releases. This port does not serve the wallet API or the 12 words. `--no-mesh` turns the links off. |
 | **3478** | UDP | `0.0.0.0` (`--stun-port`) | STUN, so arcades can find a path to each other, and by default a TURN media relay on the same socket (`turnsvc`). The relay forwards DTLS/SRTP between two addresses a logged-in client named and cannot read that media. It is on unless `ARCADE_MESH_TURN=0` or the mesh setting `turn` is false. A month's relay traffic stops at 100 GB unless that limit is changed. It does not serve the wallet. |
 

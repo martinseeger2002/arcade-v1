@@ -95,14 +95,14 @@ jobs:
         run: |
           export LIBCLANG_PATH="$(dirname "$(ls /usr/lib/llvm-*/lib/libclang.so* | head -1)")"
           export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"
-          cargo build --release --locked -p arcaded -p arcade-cli -p arcade-desktop
+          cargo build --release --locked -p arcaded -p arcade-cli -p arcade-signer -p arcade-desktop
 
       - name: Package
         if: runner.os == 'Linux'
         run: |
           name=arcade-v1-${{ matrix.platform }}
           mkdir -p "$name/bin" "$name/scripts"
-          cp target/release/arcaded target/release/arcade target/release/arcade-desktop "$name/bin/"
+          cp target/release/arcaded target/release/arcade target/release/arcade-signer target/release/arcade-desktop "$name/bin/"
           strip "$name"/bin/*
           cp crates/arcade-desktop/icons/icon.png "$name/icon.png"
           cp scripts/install-linux.sh "$name/scripts/"
@@ -147,7 +147,7 @@ jobs:
       - name: Build (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cargo build --release --locked -p arcaded -p arcade-cli -p arcade-desktop
+        run: cargo build --release --locked -p arcaded -p arcade-cli -p arcade-signer -p arcade-desktop
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -155,7 +155,7 @@ jobs:
         run: |
           $name = 'arcade-v1-${{ matrix.platform }}'
           New-Item -ItemType Directory -Force -Path "$name\bin","$name\scripts" | Out-Null
-          Copy-Item target\release\arcaded.exe,target\release\arcade.exe,target\release\arcade-desktop.exe "$name\bin\"
+          Copy-Item target\release\arcaded.exe,target\release\arcade.exe,target\release\arcade-signer.exe,target\release\arcade-desktop.exe "$name\bin\"
           # MPIR (LGPL), which chiavdf links on Windows: its DLLs beside arcaded.exe, with its license.
           $mpir = Get-ChildItem "$env:USERPROFILE\.cargo\registry\src" -Recurse -Directory -Filter mpir_gc_x64 | Select-Object -First 1
           if (-not $mpir) { throw 'MPIR (chiavdf) not found in the cargo registry' }
@@ -304,13 +304,13 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Build
-        run: cargo build --release --locked -p arcaded -p arcade-cli -p arcade-desktop
+        run: cargo build --release --locked -p arcaded -p arcade-cli -p arcade-signer -p arcade-desktop
 
       - name: Package
         run: |
           name=arcade-v1-${{ matrix.platform }}
           mkdir -p "$name/bin" "$name/scripts"
-          cp target/release/arcaded target/release/arcade target/release/arcade-desktop "$name/bin/"
+          cp target/release/arcaded target/release/arcade target/release/arcade-signer target/release/arcade-desktop "$name/bin/"
           strip "$name"/bin/*
           cp crates/arcade-desktop/icons/icon.png crates/arcade-desktop/icons/icon.icns "$name/"
           cp scripts/install-macos.sh "$name/scripts/"

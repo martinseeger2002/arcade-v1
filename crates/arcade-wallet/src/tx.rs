@@ -741,18 +741,17 @@ pub fn insc_chunks(content: &[u8], ctype: &str, json: Option<&str>, id: [u8; 8])
         .collect())
 }
 
-/// Pay `amount` to `to_script` from coins of `key`'s P2PKH address, change back to it.
-pub fn build_send(
+/// What [`build_send`] signs, unsigned: coins of `pk`'s P2PKH address (largest first) that cover
+/// `amount` and the fee, the payment output, and change back to `pk` when it is at least `dust`.
+pub fn plan_send(
     p: &ChainParams,
     to_script: &[u8],
     amount: u64,
-    key: &SecretKey,
+    pk: &PublicKey,
     coins: &[Utxo],
     fee_per_kb: u64,
     dust: u64,
-    time: u32,
-) -> Result<Tx, BuildError> {
-    let pk = PublicKey::from_secret_key(SECP256K1, key);
+) -> Result<(Vec<Utxo>, Vec<TxOutSpec>), BuildError> {
     let change_script =
         arcade_ledger::address::p2pkh_script(&arcade_ledger::address::hash160(&pk.serialize()));
     let mut sorted: Vec<&Utxo> = coins.iter().filter(|u| u.script == change_script).collect();
@@ -777,6 +776,22 @@ pub fn build_send(
     if change >= dust {
         outs.push(TxOutSpec { value: change, script: change_script });
     }
+    Ok((chosen, outs))
+}
+
+/// Pay `amount` to `to_script` from coins of `key`'s P2PKH address, change back to it.
+pub fn build_send(
+    p: &ChainParams,
+    to_script: &[u8],
+    amount: u64,
+    key: &SecretKey,
+    coins: &[Utxo],
+    fee_per_kb: u64,
+    dust: u64,
+    time: u32,
+) -> Result<Tx, BuildError> {
+    let pk = PublicKey::from_secret_key(SECP256K1, key);
+    let (chosen, outs) = plan_send(p, to_script, amount, &pk, coins, fee_per_kb, dust)?;
     Ok(sign_p2pkh(p, &chosen, &outs, key, time))
 }
 

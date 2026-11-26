@@ -10,4 +10,5 @@ path = "src/main.rs"
 
 [dependencies]
 arcade-local = { version = "0.1.0", path = "../arcade-local" }
+arcade-signer = { version = "0.1.0", path = "../arcade-signer", default-features = false }
 serde_json = "1.0.154"

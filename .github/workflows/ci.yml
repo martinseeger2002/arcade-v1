@@ -50,4 +50,4 @@ jobs:
 
       - name: Release build
         shell: pwsh
-        run: cargo build --release --locked -p arcaded -p arcade-cli -p arcade-desktop
+        run: cargo build --release --locked -p arcaded -p arcade-cli -p arcade-signer -p arcade-desktop

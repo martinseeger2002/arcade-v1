@@ -1007,6 +1007,27 @@
   document.addEventListener("visibilitychange", () => tell(document.hidden ? "minimized" : "restored"));
   window.addEventListener("beforeunload", () => tell("closing"));
 
+  // In the desktop app the first wallet.approve is already signed (that program told the signer).
+  // In a browser the signer stays locked until its own window is approved, so keep asking.
+  async function approveSeen(body) {
+    const first = await api("wallet.approve", body);
+    if (!first || first.status !== "confirm") return first;
+    if (IN_BROWSER && first.confirm_url) {
+      const w = window.open(first.confirm_url, "arcade-signer", "popup,width=520,height=720");
+      if (!w) {
+        const go = await card("Confirm this send in the signer window", ["Pop-ups are blocked. Open this address and approve the send there, then press Check.", first.confirm_url], "Check", "Cancel");
+        if (!go) { await api("wallet.deny", { id: body.id }); return first; }
+      }
+    }
+    const until = Date.now() + 5 * 60 * 1000;
+    while (Date.now() < until) {
+      const r = await api("wallet.approve", body);
+      if (!r || r.status !== "confirm") return r;
+      await new Promise((res) => setTimeout(res, 1000));
+    }
+    throw new Error("the send was not confirmed in the signer window");
+  }
+
   // Requests this page filed with POST /r/send: shown over it, one at a time, outside its reach.
   let showing = null;
   setInterval(async () => {
@@ -1066,8 +1087,12 @@
         const c = document.createElement("div"); c.className = "caution " + pv.caution.level; c.setAttribute("role", "alert"); c.textContent = pv.caution.note;
         lines.push(c);
       }
-      const yes = await card("Approve this send?", lines, "Approve and send", "Refuse");
-      await api(yes ? "wallet.approve" : "wallet.deny", { id: r.id });
+        const yes = await card("Approve this send?", lines, "Approve and send", "Refuse");
+        // kind, to, units, fee and the outputs are the card the user just saw. The desktop
+        // approves that exact transaction on the signer; a different one is refused. In a
+        // browser the signer window has to approve it (the service cannot), so wait for that.
+        if (!yes) { await api("wallet.deny", { id: r.id }); return; }
+        await approveSeen({ id: r.id, kind: pv.kind, to: pv.to, units: pv.units, fee: pv.fee, outputs: pv.outputs });
     } catch (_) { /* answered elsewhere */ }
     finally { showing = null; }
   }, 1500);
