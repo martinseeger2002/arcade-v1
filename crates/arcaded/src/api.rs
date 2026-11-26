@@ -1046,6 +1046,8 @@ fn dispatch_cmd(node: &Node, req: &Value) -> Result<Value, String> {
         "a.react" => crate::asocial::react(node, &req),
         "a.reply" => crate::asocial::reply(node, &req),
         "a.tip" => crate::asocial::tip(node, &req),
+        "a.record" => crate::arecord::record(node, &req),
+        "a.records" => crate::arecord::records(node, &req),
         "a.posts" => crate::arcledger::a_posts(node, &req),
         "ledger.balances" => crate::arcledger::balances(node, &s("address").ok_or("address required")?),
         "ledger.tag_commit" => crate::arcledger::tag_commit(node, &s("tag").ok_or("tag required")?),

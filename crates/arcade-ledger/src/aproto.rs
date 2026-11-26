@@ -26,6 +26,11 @@
 //!   its own transaction pays whoever the tipper chose: every output to an address other than the sender's counts as
 //!   tipped to that address (none: refused). The target isn't looked up. Known from [`set_social_from`]'s height on.
 //!   docs/APROTO.md describes them for app developers.
+//! - 11 **app record** (2026-11-25: one generic record any app can keep its own data in, nothing app-specific in the
+//!   arcade): `app` (u8 length ‖ 1 to [`MAX_APP_NAME`] bytes of `a-z 0-9 _ -`) ‖ `kind` (the same) ‖ `data` (the rest: 0
+//!   to [`MAX_APP_DATA`] opaque bytes; the app gives them meaning). Every record is kept, indexed by (app, kind) in
+//!   block order and by (app, kind, author). Known from [`set_app_from`]'s height on (refused as an unknown op below
+//!   it). A record whose app and kind are 13 bytes together or less fits one Class C output.
 
 use crate::tags::TYPE_ANY_DATA;
 use serde_json::Value;
@@ -42,6 +47,11 @@ pub const OP_WALLETS: u8 = 7;
 pub const OP_REACT: u8 = 8;
 pub const OP_REPLY: u8 = 9;
 pub const OP_TIP: u8 = 10;
+pub const OP_APP: u8 = 11;
+/// An app record's app and kind names: 1 to 16 bytes each.
+pub const MAX_APP_NAME: usize = 16;
+/// An app record's data: at most 1,000 bytes.
+pub const MAX_APP_DATA: usize = 1_000;
 pub const MAX_REPLY: usize = 500;
 pub const MAX_TIP_MEMO: usize = 100;
 /// A react's kinds.
@@ -69,6 +79,7 @@ pub enum AOp {
     React(Target, u8),
     Reply(Target, String),
     Tip(Target, String),
+    App { app: String, kind: String, data: Vec<u8> },
 }
 
 /// What a react, reply or tip is on: a transaction (a post) on any chain.
@@ -185,6 +196,69 @@ pub fn tip_paid<'a>(sender: &str, outputs: impl IntoIterator<Item = (Option<&'a 
 /// Whether `op` is one of ops 8 to 10.
 pub fn is_social(op: &AOp) -> bool {
     matches!(op, AOp::React(..) | AOp::Reply(..) | AOp::Tip(..))
+}
+
+/// Whether `s` is an app record's app or kind name: 1 to [`MAX_APP_NAME`] bytes of `a-z 0-9 _ -`.
+pub fn app_name_ok(s: &str) -> bool {
+    (1..=MAX_APP_NAME).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// The body of an app record (op 11): app (u8 length ‖ name) ‖ kind (u8 length ‖ name) ‖ data. None when a name or
+/// the data breaks the limits.
+pub fn app_body(app: &str, kind: &str, data: &[u8]) -> Option<Vec<u8>> {
+    if !app_name_ok(app) || !app_name_ok(kind) || data.len() > MAX_APP_DATA {
+        return None;
+    }
+    let mut b = vec![app.len() as u8];
+    b.extend_from_slice(app.as_bytes());
+    b.push(kind.len() as u8);
+    b.extend_from_slice(kind.as_bytes());
+    b.extend_from_slice(data);
+    Some(b)
+}
+
+fn app_of(body: &[u8]) -> Result<AOp, &'static str> {
+    let name = |b: &[u8]| -> Result<(String, usize), &'static str> {
+        let (&n, rest) = b.split_first().ok_or("an app record is an app, a kind and data")?;
+        let n = n as usize;
+        let s = rest.get(..n).and_then(|x| std::str::from_utf8(x).ok()).filter(|s| app_name_ok(s))
+            .ok_or("an app record's app and kind are 1 to 16 bytes of a-z, 0-9, _ and -")?;
+        Ok((s.to_string(), 1 + n))
+    };
+    let (app, a) = name(body)?;
+    let (kind, b) = name(&body[a..])?;
+    let data = &body[a + b..];
+    if data.len() > MAX_APP_DATA {
+        return Err("an app record's data is 1,000 bytes at most");
+    }
+    Ok(AOp::App { app, kind, data: data.to_vec() })
+}
+
+/// The ledger's key part for an app record's (app, kind): app ‖ 00 ‖ kind ‖ 00 (neither name holds a 00 byte, so no
+/// pair's rows run into another's).
+pub fn app_key(app: &str, kind: &str) -> Vec<u8> {
+    let mut b = app.as_bytes().to_vec();
+    b.push(0);
+    b.extend_from_slice(kind.as_bytes());
+    b.push(0);
+    b
+}
+
+static APP_FROM: std::sync::RwLock<std::collections::BTreeMap<u16, u64>> = std::sync::RwLock::new(std::collections::BTreeMap::new());
+
+/// The height from which chain `c` knows op 11 (app records); None = never. Set by the ARCADE chain's service when it
+/// starts, as [`set_social_from`] (its own height: not tied to ops 8 to 10).
+pub fn set_app_from(c: u16, from: Option<u64>) {
+    let mut m = APP_FROM.write().unwrap();
+    match from {
+        Some(h) => m.insert(c, h),
+        None => m.remove(&c),
+    };
+}
+
+/// Whether chain `c`'s block at `height` knows op 11.
+pub fn app_known(c: u16, height: u64) -> bool {
+    APP_FROM.read().unwrap().get(&c).is_some_and(|from| height >= *from)
 }
 
 /// One address's proof: its coin (a chain key), the address, and the signature of [`wallet_proof_message`].
@@ -420,6 +494,7 @@ pub fn parse(payload: &[u8]) -> Option<Result<AOp, &'static str>> {
                 }
                 Ok(AOp::Tip(t, std::str::from_utf8(rest).map_err(|_| "a tip's memo is UTF-8 text")?.to_string()))
             }
+            OP_APP => app_of(body),
             _ => Err("unknown A:// op"),
         }
     })())
@@ -460,7 +535,49 @@ mod tests {
         assert!(matches!(parse(&payload(OP_FOLLOW, b"admin")), Some(Err(_))));
         assert!(matches!(parse(&payload(OP_CONTACT, b"1234")), Some(Err(_))));
         assert!(matches!(parse(&payload(OP_POST, &vec![b'a'; 1001])), Some(Err(_))));
-        assert!(matches!(parse(&payload(11, b"x")), Some(Err(_))));
+        assert!(matches!(parse(&payload(12, b"x")), Some(Err(_))));
+    }
+
+    #[test]
+    fn app_records_read_back_and_bad_ones_are_named() {
+        let b = app_body("models", "rating", br#"{"v":1}"#).unwrap();
+        assert_eq!(b[0] as usize, 6);
+        assert_eq!(parse(&payload(OP_APP, &b)), Some(Ok(AOp::App { app: "models".into(), kind: "rating".into(), data: br#"{"v":1}"#.to_vec() })));
+        // Empty data, binary data, the longest names and data.
+        assert_eq!(parse(&payload(OP_APP, &app_body("a", "b", b"").unwrap())), Some(Ok(AOp::App { app: "a".into(), kind: "b".into(), data: vec![] })));
+        let bin = vec![0u8, 255, 1, 0];
+        assert_eq!(parse(&payload(OP_APP, &app_body("my_app-2", "x", &bin).unwrap())), Some(Ok(AOp::App { app: "my_app-2".into(), kind: "x".into(), data: bin })));
+        let long = "a".repeat(MAX_APP_NAME);
+        let full = app_body(&long, &long, &vec![7u8; MAX_APP_DATA]).unwrap();
+        assert!(matches!(parse(&payload(OP_APP, &full)), Some(Ok(AOp::App { .. }))));
+        // A rating fits one Class C output (4 + 1,024 bytes with the marker).
+        assert!(payload(OP_APP, &app_body("models", "rating", &vec![b'x'; MAX_APP_DATA]).unwrap()).len() <= 1_024);
+        // The builder refuses what parse refuses.
+        for (a, k) in [("", "x"), ("x", ""), ("Models", "x"), ("x", "a b"), ("x", "a.b"), (long.as_str(), "ab".repeat(9).as_str()), ("ü", "x")] {
+            assert!(app_body(a, k, b"").is_none(), "{a:?} {k:?}");
+        }
+        assert!(app_body("x", "y", &vec![0u8; MAX_APP_DATA + 1]).is_none());
+        let mut over = full.clone();
+        over.push(1);
+        assert!(matches!(parse(&payload(OP_APP, &over)), Some(Err(_))), "data past 1,000 bytes");
+        // Bad wire forms: no body, a name past its bytes, an upper-case name, a 17-byte name, no kind.
+        assert!(matches!(parse(&payload(OP_APP, b"")), Some(Err(_))));
+        assert!(matches!(parse(&payload(OP_APP, &[9, b'a', b'b'])), Some(Err(_))));
+        assert!(matches!(parse(&payload(OP_APP, &[1, b'A', 1, b'b'])), Some(Err(_))));
+        assert!(matches!(parse(&payload(OP_APP, &[[17u8].as_slice(), &[b'a'; 17], &[1, b'b']].concat())), Some(Err(_))));
+        assert!(matches!(parse(&payload(OP_APP, &[1, b'a'])), Some(Err(_))));
+        assert!(matches!(parse(&payload(OP_APP, &[1, b'a', 0])), Some(Err(_))), "an empty kind");
+        // Keys: one pair's rows never run into another's.
+        assert_eq!(app_key("ab", "c"), b"ab\0c\0".to_vec());
+        assert!(!app_key("a", "bc").starts_with(&app_key("a", "b")));
+        // Known only from its own height, apart from ops 8 to 10.
+        set_app_from(4343, Some(80));
+        assert!(!app_known(4343, 79) && app_known(4343, 80) && !app_known(4344, 99));
+        assert!(!social_known(4343, 80));
+        set_app_from(4343, Some(u64::MAX));
+        assert!(!app_known(4343, u32::MAX as u64), "u64::MAX: never on a real chain");
+        set_app_from(4343, None);
+        assert!(!app_known(4343, 80));
     }
 
     #[test]

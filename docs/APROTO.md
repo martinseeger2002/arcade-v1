@@ -157,3 +157,49 @@ recipient only):
  A website that serves apps
 can offer `arcade.social` the same way: the reads as public GETs, and the writes signed in the reader's own
 browser (the record's payload as above, in an ARCADE transaction from the reader's key).
+
+# A:// app records (op 11)
+
+One generic record any app can keep its own data in, on the ARCADE chain. The arcade gives the data no meaning:
+an app names itself and a kind, and writes up to 1,000 opaque bytes. Every valid record is kept (none replaces
+another), so an app reads them all back and decides itself what counts: the newest per author, a sum, a vote.
+
+    body: app  (u8 length ‖ 1 to 16 bytes of a-z, 0-9, _ and -)
+          kind (u8 length ‖ the same)
+          data (the rest: 0 to 1,000 bytes)
+
+| op | name       | body                    | limits |
+|----|------------|-------------------------|--------|
+| 11 | app record | app ‖ kind ‖ data       | app and kind 1 to 16 bytes of `a-z 0-9 _ -`; data at most 1,000 bytes |
+
+Its author is the transaction's sender, as for every A:// record. A record whose app and kind are 13 bytes together
+or less fits one OP_RETURN output (Class C, 1,024 bytes); a longer one goes out as Class B and costs more.
+
+Op 11 is known from its **own** height on each network (not tied to ops 8 to 10); below it it's refused as an unknown
+op, as releases without it refuse it anyway.
+
+| network | from block |
+|---------|------------|
+| ARCADE testnet (`arctest`) | not yet set: named in the release that turns it on |
+| closed test networks (`--arc-local`) | `ARCADE_A_APP_FROM` (default 0) |
+
+## Write: `a.record {app, kind, data_hex}`
+
+Signed by the wallet's key on ARCADE (its @tag's), or `"as": "@tag"` for another key held here, as every `a.*`
+write; `client_ref` as every send. Answers `{txid, fee, app, kind, bytes}`. Until op 11 is known it refuses with
+the height it's known from.
+
+## Read: `a.records {app, kind, since?, author?, limit?, next?}`
+
+The records of one (app, kind), oldest first (block order, then position in the block): from height `since` on,
+only `author`'s (`@tag` or ARCADE address) when given, a page of `limit` (100, at most 500). `next` is the cursor of
+the page after, `null` on the last page.
+
+    {"chain": "arctest", "app": "models", "kind": "rating", "indexed": 2410, "next": "0000096a00000003",
+     "records": [{"height": 2410, "pos": 3, "txid": "…", "author": {"address": "…", "tag": "alice"}, "data_hex": "7b2276…"}]}
+
+It reads the ARCADE chain's ledger here, or (borrowed, or not caught up) an arcade that keeps it
+(`explorer.a_records {chain, app, kind, since?, author? (an address), limit?, next?}`, forwarded like every ledger
+read, also a public page-API GET):
+
+    GET /r/explorer/a_records?args={"chain":"arctest","app":"models","kind":"rating","since":2400}
