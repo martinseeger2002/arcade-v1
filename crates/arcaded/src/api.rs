@@ -921,6 +921,8 @@ fn dispatch_cmd(node: &Node, req: &Value) -> Result<Value, String> {
         "prize.claim" => crate::prizesvc::claim(node, &s("page").unwrap_or_default(), req, req["send"] == true),
         "referee.get" => Ok(crate::refereesvc::setting(node)),
         "referee.set" => crate::refereesvc::set(node, &s("url").unwrap_or_default()),
+        "omni.sidecar_get" => Ok(crate::omnisvc::get(node)),
+        "omni.sidecar_set" => crate::omnisvc::set(node, &s("chain").unwrap_or_default(), &s("url").unwrap_or_default(), &s("path").unwrap_or_default()),
         "collections.known_get" => Ok(serde_json::json!({"known": crate::knowncoll::enabled(node)})),
         "dogefeed.registrar" => crate::dproto::registrar(node, req),
         "dogefeed.stamp" => crate::dproto::stamp(node, req),

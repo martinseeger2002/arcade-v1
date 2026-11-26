@@ -415,7 +415,20 @@ pub fn handle_with(node: &Node, cmd: &str, req: &Value, img_links: bool) -> R {
     if cmd == "explorer.blocks" && (req.get("offset").is_some() || req.get("limit").is_some()) {
         return blocks_page(node, req, img_links);
     }
+    // Omni on Litecoin (crate::omnisvc): from the operator's OmniLite sidecar, not this arcade's chain copy.
+    match cmd {
+        "explorer.omni" | "explorer.omni_property" | "explorer.omni_tx" | "explorer.omni_block" | "explorer.omni_address" => return crate::omnisvc::answer(node, cmd, req),
+        _ => {}
+    }
     let mut out = answer(node, cmd, req, img_links);
+    // The overview says when an Omni sidecar is named for the chain (the Explorer's Omni section).
+    if cmd == "explorer.summary" {
+        if let Ok(v) = out.as_mut() {
+            if v["chain"].as_str().is_some_and(|c| crate::omnisvc::on(node, c)) {
+                v["omni"] = json!(true);
+            }
+        }
+    }
     if img_links {
         if let Ok(v) = out.as_mut() {
             link_previews(v);
