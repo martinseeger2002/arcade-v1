@@ -134,10 +134,13 @@ pub fn answer_on(node: &Node, p: &'static ChainParams, calls: &[Value], max: usi
     for (n, c) in calls.iter().enumerate() {
         let method = c.get(0).and_then(Value::as_str).unwrap_or("");
         let params: Vec<Value> = c.get(1).and_then(Value::as_array).cloned().unwrap_or_default();
-        let a = match crate::rpc::call_on(node, p, method, &params) {
+        // A block with every transaction in full (getblock verbosity 2) is for an indexer on this computer
+        // (HTTP /chain/<key>): over the mesh, a big block's JSON is built in full before the reply cap applies.
+        let full_block = method == "getblock" && params.get(1).is_some_and(|v| v.as_i64() == Some(2));
+        let a = if full_block { json!({"e": [-8, "verbosity 2 is answered on this computer only; ask for 0 and decode"]}) } else { match crate::rpc::call_on(node, p, method, &params) {
             Ok(r) => json!({"r": r}),
             Err((code, m)) => json!({"e": [code, m]}),
-        };
+        } };
         if n > 0 {
             out.push(b',');
         }
@@ -270,6 +273,15 @@ mod tests {
         assert!(r.add(3, b" ", false).is_err());
         assert!(r.add(1, b" ", true).is_err());
         assert_eq!(r.add(4, b"[]", true), Ok(Some(b"[]".to_vec())), "room again once one is dropped");
+    }
+
+    #[test]
+    fn a_full_block_is_not_lent_over_the_mesh() {
+        let t = crate::sitesvc::tests::setup();
+        let tip = crate::rpc::call_on(&t.node, t.p, "getbestblockhash", &[]).unwrap();
+        let a: Vec<Value> = serde_json::from_slice(&answer_on(&t.node, t.p, &[json!(["getblock", [tip.clone(), 2]]), json!(["getblock", [tip, 0]])], MAX_REPLY).unwrap()).unwrap();
+        assert!(a[0]["e"][1].as_str().unwrap().contains("this computer only"), "{}", a[0]);
+        assert!(a[1]["r"].is_string(), "the raw block is lent as before: {}", a[1]);
     }
 
     #[test]
