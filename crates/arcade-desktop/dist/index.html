@@ -192,9 +192,12 @@
               <option value="ltc">Litecoin</option><option value="btc">Bitcoin</option>
             </select>
             <button id="w-aid-scan" title="Read the QR code with this device's camera">Scan</button>
+            <button id="w-aid-screen" title="Read a QR code shown on this device's own screen: pick the window or screen that shows it, or a screenshot">From screen (Desktop)</button>
+            <input type="file" id="w-aid-shot" accept="image/*" hidden>
             <button id="w-aid-check">Check</button>
           </div>
           <div id="aid-cam" hidden><video id="aid-video" playsinline muted></video><div class="row"><button id="aid-cam-stop">Stop camera</button></div></div>
+          <div id="aid-screen" class="row" hidden><span class="note">Looking for a QR code on the screen you shared…</span><button id="aid-screen-stop">Stop</button></div>
           <div id="w-aid-confirm" class="warn" hidden>
             <div id="w-aid-text"></div>
             <div class="row"><button class="primary" id="w-aid-send">Sign in</button><button id="w-aid-cancel">Cancel</button></div>

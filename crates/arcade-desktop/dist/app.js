@@ -989,7 +989,7 @@ function aidLoadJsqr() {
 }
 $("aid-cam-stop").addEventListener("click", aidCamStop);
 $("w-aid-scan").addEventListener("click", async () => {
-  msg($("w-aid-msg"), "");
+  msg($("w-aid-msg"), ""); aidScreenStop();
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { msg($("w-aid-msg"), "This window can't use a camera here: paste the code instead (a camera needs https or this computer's own address).", "bad"); return; }
   try {
     aidStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
@@ -1008,8 +1008,78 @@ $("w-aid-scan").addEventListener("click", async () => {
         else if (decode) { canvas.width = v.videoWidth; canvas.height = v.videoHeight; ctx.drawImage(v, 0, 0); const img = ctx.getImageData(0, 0, canvas.width, canvas.height); const got = decode(img.data, img.width, img.height); text = got ? got.data : ""; }
       }
     } catch (e) { /* the next frame */ }
-    if (/^(digiid|arcadelink|arcadesign):\/\//.test(text)) { aidCamStop(); $("w-aid-code").value = text; $("w-aid-code").dispatchEvent(new Event("input")); $("w-aid-check").click(); return; }
+    if (aidIsCode(text)) { aidCamStop(); aidUse(text); return; }
     setTimeout(tick, 250);
+  };
+  tick();
+});
+
+// From the screen: a code shown on this same device (a site open in a browser beside this app). The screen (or a
+// window) the person picks in the system's share dialog is read a few times a second, at full size so a small code
+// on a big screen still reads; nothing is kept or sent, and sharing stops as soon as a code is found. Where this
+// window can't share a screen (some desktop webviews, phones), a screenshot works the same: picked, or pasted.
+const aidIsCode = (t) => /^(digiid|arcadelink|arcadesign):\/\//i.test(String(t || "").trim());
+function aidUse(text) { $("w-aid-code").value = String(text).trim(); $("w-aid-code").dispatchEvent(new Event("input")); $("w-aid-check").click(); }
+async function aidReader() {
+  try {
+    if ("BarcodeDetector" in window && (await window.BarcodeDetector.getSupportedFormats()).includes("qr_code")) {
+      const det = new window.BarcodeDetector({ formats: ["qr_code"] });
+      return async (src) => { const got = await det.detect(src); const hit = got.find((g) => aidIsCode(g.rawValue)) || got[0]; return hit ? hit.rawValue : ""; };
+    }
+  } catch (e) { /* jsQR below */ }
+  const decode = await aidLoadJsqr();
+  const canvas = document.createElement("canvas"), ctx = canvas.getContext("2d", { willReadFrequently: true });
+  return async (src) => {
+    const w = src.videoWidth || src.width, hh = src.videoHeight || src.height;
+    if (!w || !hh) return "";
+    const k = Math.min(1, 2560 / Math.max(w, hh));
+    canvas.width = Math.round(w * k); canvas.height = Math.round(hh * k);
+    ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const got = decode(img.data, img.width, img.height, { inversionAttempts: "attemptBoth" });
+    return got ? got.data : "";
+  };
+}
+async function aidFromImage(file) {
+  if (!file) return;
+  msg($("w-aid-msg"), "Reading the screenshot…");
+  try {
+    const read = await aidReader(), text = await read(await createImageBitmap(file));
+    if (aidIsCode(text)) { msg($("w-aid-msg"), ""); aidUse(text); }
+    else msg($("w-aid-msg"), text ? "That QR code isn't an ARCADE ID or Digi-ID code." : "No QR code found in that picture. Take the screenshot with the whole code showing.", "bad");
+  } catch (e) { msg($("w-aid-msg"), e.message || String(e), "bad"); }
+}
+let aidShare = null;
+function aidScreenStop() { if (aidShare) aidShare.getTracks().forEach((t) => t.stop()); aidShare = null; $("aid-screen").hidden = true; }
+$("aid-screen-stop").addEventListener("click", aidScreenStop);
+$("w-aid-shot").addEventListener("change", () => { const f = $("w-aid-shot").files[0]; $("w-aid-shot").value = ""; aidFromImage(f); });
+$("w-aid-code").addEventListener("paste", (e) => {
+  const f = [...(e.clipboardData ? e.clipboardData.files : [])].find((x) => x.type.startsWith("image/"));
+  if (f) { e.preventDefault(); aidFromImage(f); }
+});
+$("w-aid-screen").addEventListener("click", async () => {
+  msg($("w-aid-msg"), ""); aidCamStop(); aidScreenStop();
+  const md = navigator.mediaDevices;
+  if (!md || !md.getDisplayMedia) { msg($("w-aid-msg"), "This window can't share the screen here: pick a screenshot of the code instead, or paste one (Ctrl+V) into the code box."); $("w-aid-shot").click(); return; }
+  try { aidShare = await md.getDisplayMedia({ video: { frameRate: { max: 5 } }, audio: false }); }
+  catch (e) {
+    if (e && e.name === "NotAllowedError") { msg($("w-aid-msg"), "Screen sharing was cancelled. You can also pick a screenshot of the code, or paste one (Ctrl+V) into the code box."); return; }
+    msg($("w-aid-msg"), "This window can't share the screen here: pick a screenshot of the code instead, or paste one (Ctrl+V) into the code box."); $("w-aid-shot").click(); return;
+  }
+  const share = aidShare, v = document.createElement("video");
+  v.muted = true; v.playsInline = true; v.srcObject = share; await v.play().catch(() => {});
+  share.getVideoTracks()[0].addEventListener("ended", () => { if (aidShare === share) aidScreenStop(); });
+  $("aid-screen").hidden = false;
+  let read;
+  try { read = await aidReader(); } catch (e) { aidScreenStop(); msg($("w-aid-msg"), e.message || String(e), "bad"); return; }
+  const until = Date.now() + 120000;
+  const tick = async () => {
+    if (aidShare !== share) return;
+    if (Date.now() > until) { aidScreenStop(); msg($("w-aid-msg"), "No code found on the shared screen. Make sure the site's QR code is showing, then try again.", "bad"); return; }
+    let text = "";
+    try { if (v.videoWidth) text = await read(v); } catch (e) { /* the next frame */ }
+    if (aidIsCode(text)) { aidScreenStop(); aidUse(text); return; }
+    setTimeout(tick, 400);
   };
   tick();
 });
@@ -1077,7 +1147,7 @@ function aidOpen() {
   $("aid-slot").append($("aid-panel"));
   $("aid-modal").hidden = false; aidSites();
 }
-function aidClose() { aidCamStop(); $("aid-home").append($("aid-panel")); $("aid-modal").hidden = true; }
+function aidClose() { aidCamStop(); aidScreenStop(); $("aid-home").append($("aid-panel")); $("aid-modal").hidden = true; }
 $("w-aid-open").addEventListener("click", aidOpen);
 $("aid-close").addEventListener("click", aidClose);
 $("aid-modal").addEventListener("click", (e) => { if (e.target === $("aid-modal")) aidClose(); });
