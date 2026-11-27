@@ -1,13 +1,13 @@
 :root {
   --bg: #f6f7f5; --panel: #ffffff; --ink: #1d231f; --muted: #66706a; --line: #dfe4df;
-  --accent: #2e8b44; --accent-ink: #ffffff; --warn-bg: #fff6e0; --warn-line: #e8c56a; --bad: #b3261e;
+  --accent: #2e8b44; --accent-ink: #ffffff; --warn-bg: #fff6e0; --warn-line: #e8c56a; --note-bg: #f0f2f0; --note-line: #dde2de; --bad: #b3261e;
   --trust-green: #2e8b44; --trust-yellow: #c58a00; --trust-grey: #6f7973; --trust-red: #b3261e; --trust-ink: #fff; --trust-ink-yellow: #241c00;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #121614; --panel: #1b201d; --ink: #e7ece8; --muted: #9aa59e; --line: #2c342f;
-    --accent: #4fbf68; --accent-ink: #0d1a10; --warn-bg: #2a2412; --warn-line: #7a6427; --bad: #ff8a80;
+    --accent: #4fbf68; --accent-ink: #0d1a10; --warn-bg: #2a2412; --warn-line: #7a6427; --note-bg: #1f2421; --note-line: #303833; --bad: #ff8a80;
     --trust-green: #4fbf68; --trust-yellow: #e6b93c; --trust-grey: #6b766f; --trust-red: #ff8a80; --trust-ink: #0d110e; --trust-ink-yellow: #0d110e;
     color-scheme: dark;
   }
@@ -221,7 +221,10 @@ main:has(#explorer.on) { max-width: 1240px; }
 .stages li.now { background: var(--accent-soft); border-radius: 8px; padding-inline: 8px; }
 .stages li.now .sn { color: var(--accent); }
 .stages li.info .bar { display: none; }
-.note { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 10px; padding: 12px 14px; }
+.note { background: var(--note-bg); border: 1px solid var(--note-line); border-radius: 10px; padding: 12px 14px; }
+/* Info boxes are light grey; yellow (.warn) is kept for real warnings: the 12 words, payments, strangers' content, a same-address chain. */
+.note.warn { background: var(--warn-bg); border-color: var(--warn-line); }
+#aid-panel .warn, .aid-req.warn { background: var(--note-bg); border-color: var(--note-line); }
 /* A send's caution (one source only, or none): a line of its own above Send, not a tooltip. */
 .caution { background: var(--panel); border: 1px solid var(--warn-line); border-left-width: 4px; border-radius: 8px; padding: 8px 10px; margin: 8px 0; font-weight: 600; }
 .caution.grey { border-color: var(--muted); font-weight: normal; }
@@ -277,7 +280,7 @@ button.small { padding: 4px 10px; font-size: 12px; }
 
 .mx-ghead { display: flex; gap: 10px; align-items: center; }
 .mx-gpic { width: 40px; height: 40px; border-radius: 10px; object-fit: cover; }
-.mx-pin { align-self: stretch; padding: 6px 10px; border-radius: 10px; background: var(--warn-bg); border: 1px solid var(--warn-line); font-size: 13px; }
+.mx-pin { align-self: stretch; padding: 6px 10px; border-radius: 10px; background: var(--note-bg); border: 1px solid var(--note-line); font-size: 13px; }
 .mx-who { font-size: 11px; font-weight: 600; color: var(--muted); }
 .mx-form { display: flex; flex-direction: column; gap: 8px; }
 .mx-form h3 { margin: 0; }
@@ -448,7 +451,7 @@ button.linkish { border: 0; background: none; padding: 0; font-size: 11px; color
 .wl-hint { color: var(--muted); font-size: 13px; }
 #w-pick { font: inherit; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink); }
 #w-asset, #w-ikind { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
-.x-mesh { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 10px; padding: 8px 12px; font-size: 13px; margin-bottom: 12px; }
+.x-mesh { background: var(--note-bg); border: 1px solid var(--note-line); border-radius: 10px; padding: 8px 12px; font-size: 13px; margin-bottom: 12px; }
 
 /* Home: getting started, until the owner has a handle. */
 .start { background: var(--panel); border: 1px solid var(--accent); border-radius: 16px; padding: 4px 20px 16px; margin-bottom: 18px; }
@@ -612,7 +615,24 @@ button.linkish { border: 0; background: none; padding: 0; font-size: 11px; color
 .pp-ok { color: var(--accent); font-size: 12px; white-space: nowrap; }
 .pp-no { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .pp-fee { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
-.pp-banner { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 10px; padding: 10px 12px; margin: 10px 0 14px; }
+.pp-banner { position: relative; background: var(--note-bg); border: 1px solid var(--note-line); border-radius: 10px; padding: 10px 12px; margin: 10px 0 14px; }
+/* A notice inside a Home banner is text, not a second warning box. */
+.pp-banner .warn { background: none; border: 0; border-radius: 0; padding: 0; }
+/* Foldable Home notices (app.js foldNotice): the title and its first line stay; the rest folds away. */
+.pp-banner.fold { padding-right: 76px; }
+.pp-banner.fold > b:first-child { cursor: pointer; }
+.pp-banner .fold-btn { position: absolute; top: 8px; right: 8px; padding: 2px 10px; font-size: 12px; color: var(--muted); }
+.pp-banner.folded .fold-btn { top: 50%; transform: translateY(-50%); }
+/* No empty status line at a notice's foot (it shows once there is something to say). */
+.pp-banner > .msg:empty { display: none; }
+.pp-banner > :last-child:not(.fold-btn), .pp-banner > :nth-last-child(2) { margin-bottom: 0; }
+.pp-banner.folded { display: flex; gap: 6px; align-items: baseline; padding-top: 8px; padding-bottom: 8px; }
+.pp-banner.folded > span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.pp-banner.folded > :not(b):not(span):not(.fold-btn) { display: none; }
+/* Options -> Advanced options: the less-used settings, folded until opened. */
+details.adv { margin: 28px 0 0; border-top: 1px solid var(--line); padding-top: 12px; }
+details.adv > summary { cursor: pointer; font-size: 15px; font-weight: 600; color: var(--muted); }
+details.adv > summary small { font-weight: 400; margin-left: 6px; }
 .pp-lock { border: 1px solid var(--accent); border-radius: 10px; padding: 10px 12px; margin: 10px 0 14px; }
 .pp-av { width: 56px; height: 56px; border-radius: 14px; flex: none; display: grid; place-items: center; font-weight: 700; font-size: 20px; color: #fff; background: var(--accent); object-fit: cover; }
 .pp-av.sm { width: 36px; height: 36px; border-radius: 10px; font-size: 14px; }
