@@ -221,7 +221,10 @@ main:has(#explorer.on) { max-width: 1240px; }
 .stages li.now { background: var(--accent-soft); border-radius: 8px; padding-inline: 8px; }
 .stages li.now .sn { color: var(--accent); }
 .stages li.info .bar { display: none; }
-.note { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 10px; padding: 12px 14px; }
+.note { background: var(--note-bg); border: 1px solid var(--note-line); border-radius: 10px; padding: 12px 14px; }
+/* Info boxes are light grey; yellow (.warn) is kept for real warnings: the 12 words, payments, strangers' content, a same-address chain. */
+.note.warn { background: var(--warn-bg); border-color: var(--warn-line); }
+#aid-panel .warn, .aid-req.warn { background: var(--note-bg); border-color: var(--note-line); }
 /* A send's caution (one source only, or none): a line of its own above Send, not a tooltip. */
 .caution { background: var(--panel); border: 1px solid var(--warn-line); border-left-width: 4px; border-radius: 8px; padding: 8px 10px; margin: 8px 0; font-weight: 600; }
 .caution.grey { border-color: var(--muted); font-weight: normal; }
@@ -277,7 +280,7 @@ button.small { padding: 4px 10px; font-size: 12px; }
 
 .mx-ghead { display: flex; gap: 10px; align-items: center; }
 .mx-gpic { width: 40px; height: 40px; border-radius: 10px; object-fit: cover; }
-.mx-pin { align-self: stretch; padding: 6px 10px; border-radius: 10px; background: var(--warn-bg); border: 1px solid var(--warn-line); font-size: 13px; }
+.mx-pin { align-self: stretch; padding: 6px 10px; border-radius: 10px; background: var(--note-bg); border: 1px solid var(--note-line); font-size: 13px; }
 .mx-who { font-size: 11px; font-weight: 600; color: var(--muted); }
 .mx-form { display: flex; flex-direction: column; gap: 8px; }
 .mx-form h3 { margin: 0; }
@@ -448,7 +451,7 @@ button.linkish { border: 0; background: none; padding: 0; font-size: 11px; color
 .wl-hint { color: var(--muted); font-size: 13px; }
 #w-pick { font: inherit; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink); }
 #w-asset, #w-ikind { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
-.x-mesh { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 10px; padding: 8px 12px; font-size: 13px; margin-bottom: 12px; }
+.x-mesh { background: var(--note-bg); border: 1px solid var(--note-line); border-radius: 10px; padding: 8px 12px; font-size: 13px; margin-bottom: 12px; }
 
 /* Home: getting started, until the owner has a handle. */
 .start { background: var(--panel); border: 1px solid var(--accent); border-radius: 16px; padding: 4px 20px 16px; margin-bottom: 18px; }
