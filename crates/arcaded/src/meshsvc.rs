@@ -1001,7 +1001,10 @@ pub fn listen(node: Arc<Node>, port: u16) {
 /// Inbound links once their handshake is done: at most this many in all and from one IP, so links that prove a
 /// free identity can't use up the process's open files.
 const MAX_INBOUND_LINKS: usize = 256;
-const MAX_INBOUND_LINKS_PER_IP: usize = 8;
+/// 32 per IP: a home network shows one public address for all its arcades (Starlink, carrier-grade NAT), and at 8 the
+/// relay closed every link past the eighth right after its handshake, unlogged (two Raspberry Pis on a network whose
+/// laptops already held the 8, 2026-11-27).
+const MAX_INBOUND_LINKS_PER_IP: usize = 32;
 
 /// An established inbound link's place, given back when dropped (see MAX_INBOUND_LINKS).
 struct LinkSlot(std::net::IpAddr);
@@ -1023,6 +1026,19 @@ impl Drop for LinkSlot {
     fn drop(&mut self) {
         inbound_links().give(self.0);
     }
+}
+
+/// An inbound link turned away by the caps above: said in the log, at most once a minute per IP.
+fn over_cap(ip: std::net::IpAddr, peer: &str) {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, Instant>>> = std::sync::OnceLock::new();
+    let mut m = LAST.get_or_init(Default::default).lock().unwrap();
+    if m.get(&ip).is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+        return;
+    }
+    m.insert(ip, Instant::now());
+    let h = inbound_links();
+    eprintln!("mesh: inbound link from {ip} ({}) closed: {} links from that address already (cap {MAX_INBOUND_LINKS_PER_IP}), {} in all (cap {MAX_INBOUND_LINKS})",
+        &peer[..peer.len().min(16)], h.by_ip.get(&ip).copied().unwrap_or(0), h.all);
 }
 
 fn inbound_links() -> std::sync::MutexGuard<'static, Handshakes> {
@@ -1060,7 +1076,10 @@ fn accept(node: Arc<Node>, l: std::net::TcpListener) {
             done.store(true, std::sync::atomic::Ordering::Relaxed);
             drop(slot);
             let Ok(mut link) = r else { return };
-            let Some(_held) = LinkSlot::take(ip) else { return };
+            let Some(_held) = LinkSlot::take(ip) else {
+                over_cap(ip, &link.peer_id);
+                return;
+            };
             let addr = format!("{peer_ip}:{}", link.peer_listen.unwrap_or(0));
             note_direct(&link.peer_id, ip);
             let key = crate::node::link_add(&node.links, &addr, &link.peer_id, now());
@@ -1098,7 +1117,10 @@ pub fn accept_ws(node: Arc<Node>, s: std::net::TcpStream, ip: std::net::IpAddr, 
         done.store(true, std::sync::atomic::Ordering::Relaxed);
         drop(slot);
         let Ok(mut link) = r else { return };
-        let Some(_held) = LinkSlot::take(ip) else { return };
+        let Some(_held) = LinkSlot::take(ip) else {
+            over_cap(ip, &link.peer_id);
+            return;
+        };
         let addr = format!("{ip}:{}", link.peer_listen.unwrap_or(0));
         let k = crate::node::link_add(&node.links, &addr, &link.peer_id, now());
         if let Err(e) = serve(&node, &mut link, &addr) {
