@@ -70,6 +70,20 @@ pub fn frozen(node: &Node, p: &ChainParams) -> Vec<OutPoint> {
         .collect()
 }
 
+/// `coins` without the ones frozen on chain `p`: every path that gathers coins on its own goes through this (wallet
+/// sends, ARCADE ledger records, tips, relay and service payments, staking), so a frozen coin is never spent by one
+/// (ARCADE #46: ledger records and staking spent frozen coins).
+pub fn unfrozen<T>(node: &Node, p: &ChainParams, coins: Vec<T>, op: impl Fn(&T) -> OutPoint) -> Vec<T> {
+    without(coins, &frozen(node, p), op)
+}
+
+fn without<T>(coins: Vec<T>, frozen: &[OutPoint], op: impl Fn(&T) -> OutPoint) -> Vec<T> {
+    if frozen.is_empty() {
+        return coins;
+    }
+    coins.into_iter().filter(|c| !frozen.contains(&op(c))).collect()
+}
+
 fn op_str(op: &OutPoint) -> String {
     format!("{}:{}", op.txid.to_hex(), op.vout)
 }
@@ -225,6 +239,19 @@ mod tests {
         assert_eq!(ord_status(Held::Yes, 100 * 100_000_000), "inscription");
         assert_eq!(ord_status(Held::Unknown, POSTAGE_MAX), "unchecked");
         assert_eq!(ord_status(Held::Unknown, POSTAGE_MAX + 1), "free");
+    }
+
+    #[test]
+    fn frozen_coins_are_left_out_of_what_a_payment_gathers() {
+        let op = |b: u8, v: u32| OutPoint { txid: arcade_chain::Hash256([b; 32]), vout: v };
+        let coins = vec![(op(1, 0), 500u64), (op(2, 1), 9_000), (op(3, 0), 70)];
+        // The largest coin frozen: a ledger record or a stake can't take it.
+        let left = without(coins.clone(), &[op(2, 1)], |c| c.0);
+        assert_eq!(left, vec![(op(1, 0), 500), (op(3, 0), 70)]);
+        // Nothing frozen: all of them, in their order.
+        assert_eq!(without(coins.clone(), &[], |c| c.0), coins);
+        // A frozen coin that isn't among them changes nothing.
+        assert_eq!(without(coins.clone(), &[op(9, 9)], |c| c.0), coins);
     }
 
     #[test]

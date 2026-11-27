@@ -233,7 +233,7 @@ pub(crate) fn arc_coins(node: &Node, p: &ChainParams, script: &[u8]) -> Vec<Utxo
         // waiting transactions spend; confirmed ones only, as below (waiting change is added where it is wanted).
         let mut out: Vec<Utxo> = crate::borrow::spendable(node, p, script).into_iter().filter(|u| crate::borrow::unspent_coin(node, p, &u.outpoint).is_some()).collect();
         out.sort_by(|a, b| b.value.cmp(&a.value));
-        return out;
+        return crate::coinctl::unfrozen(node, p, out, |u| u.outpoint);
     }
     let tip = node.chain.tip(p.chain_no).ok().flatten().map(|t| t.height).unwrap_or(0);
     let mut out = Vec::new();
@@ -251,7 +251,7 @@ pub(crate) fn arc_coins(node: &Node, p: &ChainParams, script: &[u8]) -> Vec<Utxo
         out.push(Utxo { outpoint: op, value, script: script.to_vec() });
     }
     out.sort_by(|a, b| b.value.cmp(&a.value));
-    out
+    crate::coinctl::unfrozen(node, p, out, |u| u.outpoint)
 }
 
 fn confirmed_coins(node: &Node, script: &[u8]) -> Vec<Utxo> {

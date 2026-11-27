@@ -264,10 +264,12 @@ fn stake_key(node: &Node, p: &ChainParams) -> Result<(arcade_wallet::SecretKey, 
 
 /// Mature coins of the staking address: (utxo, confirmations).
 fn stake_coins(node: &Node, p: &ChainParams, script: &[u8], tip: u32) -> Vec<(arcade_wallet::tx::Utxo, u32)> {
-    node.chain.coins_for_script(p, script).unwrap_or_default().into_iter()
+    let all: Vec<(arcade_wallet::tx::Utxo, u32)> = node.chain.coins_for_script(p, script).unwrap_or_default().into_iter()
         .filter(|(op, _, _)| node.chain.mempool_spender(p.chain_no, op).ok().flatten().is_none())
         .map(|(op, value, height)| (arcade_wallet::tx::Utxo { outpoint: OutPoint { txid: op.txid, vout: op.vout }, value, script: script.to_vec() }, tip + 1 - height.min(tip + 1)))
-        .collect()
+        .collect();
+    // A coin the user froze isn't staked either (ARCADE #46).
+    crate::coinctl::unfrozen(node, p, all, |c| c.0.outpoint)
 }
 
 pub fn status(node: &Node) -> Value {
