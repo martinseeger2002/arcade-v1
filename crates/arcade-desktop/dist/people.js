@@ -22,6 +22,14 @@
 
   // A picture blob, shown from its bytes (any arcade fetches it from the chain).
   const pics = {};
+  // The picture's type from its first bytes: a Blob without one isn't shown by every web engine.
+  function imageType(b) {
+    if (b[0] === 0x89 && b[1] === 0x50) return "image/png";
+    if (b[0] === 0xff && b[1] === 0xd8) return "image/jpeg";
+    if (b[0] === 0x47 && b[1] === 0x49) return "image/gif";
+    if (b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return "image/webp";
+    return "image/png";
+  }
   function avatar(p, small) {
     const name = (p && (p.profile?.n || p.tag)) || "?";
     const el = h("div", { class: "pp-av" + (small ? " sm" : "") }, name.replace(/^@/, "").slice(0, 1).toUpperCase());
@@ -29,11 +37,16 @@
     if (id) {
       const put = (src) => { const img = h("img", { class: "pp-av" + (small ? " sm" : ""), src, alt: "" }); el.replaceWith(img); };
       if (pics[id]) setTimeout(() => put(pics[id]));
-      else api("arc.blob", { id }).then((b) => {
-        const bytes = b.hex.match(/../g).map((x) => parseInt(x, 16));
-        pics[id] = URL.createObjectURL(new Blob([new Uint8Array(bytes)]));
-        put(pics[id]);
-      }).catch(() => {});
+      else {
+        // A picture just published may not reach a borrowing arcade at once (ARCADE #48: the profile kept its letter):
+        // asked again a few times instead of giving up on the first miss.
+        const load = (tries) => api("arc.blob", { id }).then((b) => {
+          const bytes = new Uint8Array(b.hex.match(/../g).map((x) => parseInt(x, 16)));
+          pics[id] = URL.createObjectURL(new Blob([bytes], { type: imageType(bytes) }));
+          put(pics[id]);
+        }).catch(() => { if (tries > 0) setTimeout(() => load(tries - 1), 20_000); });
+        load(3);
+      }
     }
     return el;
   }
@@ -141,7 +154,14 @@
     const shown = contacts;
     $("pp-cempty").hidden = contacts.length > 0;
     $("pp-crows").replaceChildren(...shown.map((c) => {
-      const send = h("button", {}, "Send"); send.onclick = () => { const to = c.tag ? "@" + c.tag : Object.values(c.addresses || {})[0]; goTab("wallet"); if ($("w-to") && to) $("w-to").value = to; };
+      const send = h("button", {}, "Send"); send.onclick = () => {
+        const to = c.tag ? "@" + c.tag : Object.values(c.addresses || {})[0];
+        goTab("wallet");
+        // The Send panel open with the contact in To, the amount next (ARCADE #49: it showed the Wallet tab only).
+        if ($("w-send-panel")?.hidden) showPanel("w-send-panel");
+        if ($("w-to") && to) $("w-to").value = to;
+        ($("w-amt") || $("w-to"))?.focus();
+      };
       const del = h("button", {}, "Delete");
       del.onclick = async () => {
         if (!del.dataset.sure) { del.dataset.sure = 1; del.textContent = "Delete: sure?"; return; }
@@ -165,6 +185,8 @@
       try {
         const r = await api("arc.blob_publish", { hex, type: f.type || "image/png", class: 0, send: true });
         picture = r.blob; dirty = true; cost();
+        // Shown from the file itself: the arcade may not hand the new blob back until a block has it.
+        pics[r.blob] = URL.createObjectURL(f);
         $("pp-picnote").textContent = `Picture sent (fee ${ARC(r.fee)}). Publish the profile to show it.`;
       } catch (err) { note(err.message, true); }
     };
