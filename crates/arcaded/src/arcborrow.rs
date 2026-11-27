@@ -77,6 +77,22 @@ impl Source for Lender<'_> {
     }
 }
 
+/// A lender's headers no further than `to` (the release checkpoint), so the ones checked without their proofs of time
+/// stop there.
+struct UpTo<'a>(Lender<'a>, u64);
+
+impl Source for UpTo<'_> {
+    fn headers(&self, from: u64) -> Result<Vec<Header>, String> {
+        let mut v = self.0.headers(from)?;
+        v.retain(|h| h.height <= self.1);
+        Ok(v)
+    }
+
+    fn id_at(&self, height: u64) -> Result<Hash256, String> {
+        self.0.id_at(height)
+    }
+}
+
 /// Every row of one kind, deleted.
 fn drop_rows(node: &Node, key: &str, part: &str) {
     let pre = format!("borrow/{key}/{part}/").into_bytes();
@@ -172,7 +188,26 @@ pub fn sync(node: &Node, p: &ChainParams, their: u64, call: Call) -> Result<(u64
     }
     let light = guard.as_mut().expect("just loaded");
     let was = (light.base(), light.tip().height);
-    let round = light.follow(&Lender(call), their, &crate::arcsvc::writer_weight, arcade_app::now()).map_err(e)?;
+    // Below the release checkpoint (it ships with the code, signed with it): the headers up to it are taken with every
+    // rule checked but their proofs of time, which are ~99% of the cost (a Raspberry Pi 3 spent most of an hour at 80 °C
+    // on them, Kiko 2026-11-27). The block at the checkpoint must then be the one the release names.
+    let cp = crate::arcsvc::light_checkpoint().filter(|(h, _)| light.tip().height < *h);
+    let round = match cp {
+        Some((ch, _)) => {
+            let _trust = crate::arcsvc::TrustStored::hold();
+            light.follow(&UpTo(Lender(call), ch), their.min(ch), &crate::arcsvc::writer_weight, arcade_app::now()).map_err(e)?
+        }
+        None => light.follow(&Lender(call), their, &crate::arcsvc::writer_weight, arcade_app::now()).map_err(e)?,
+    };
+    if let Some((ch, id)) = cp {
+        if light.tip().height >= ch && light.at(ch).map(|x| x.id) != Some(id) {
+            // Not the release's branch: start again from block 0 (and this lender's word counts as a failure).
+            *guard = None;
+            drop_rows(node, p.key, "ai");
+            drop_rows(node, p.key, "ae");
+            return Err(format!("the lender's headers don't hold the release checkpoint at block {ch}"));
+        }
+    }
     if !round.ids.is_empty() {
         if let Err(x) = keep(node, p.key, light, &round, was) {
             // What is in the store is what counts: read it again next round.
@@ -180,7 +215,7 @@ pub fn sync(node: &Node, p: &ChainParams, their: u64, call: Call) -> Result<(u64
             return Err(x);
         }
     }
-    Ok((light.tip().height, round.more))
+    Ok((light.tip().height, round.more || light.tip().height < their))
 }
 
 /// The id of the block at `height` on the branch this arcade follows.

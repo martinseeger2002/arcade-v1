@@ -114,10 +114,10 @@ thread_local! {
 /// theirs checked when they came in. That check is about 99% of a block's cost at start (the discriminant and every
 /// run of a time keeper's segmented proof): 200+ s for 6,000 blocks on the GX10, 7+ minutes on a 2-core laptop, while
 /// the arcade answered only "starting" (Kiko 2026-11-25). Blocks from other arcades are always checked.
-struct TrustStored;
+pub(crate) struct TrustStored;
 
 impl TrustStored {
-    fn hold() -> TrustStored {
+    pub(crate) fn hold() -> TrustStored {
         TRUST_STORED.with(|t| t.set(true));
         TrustStored
     }
@@ -3152,6 +3152,12 @@ pub fn own_window() -> Option<Vec<Entry>> {
 /// The id at `height` on this arcade's own copy's best branch, while it runs.
 pub fn own_id_at(height: u64) -> Option<Hash256> {
     svc()?.st.lock().unwrap().chain.id_at(height)
+}
+
+/// The newest release checkpoint of the ARCADE chain's settings (height, block id): a borrowed copy takes the headers
+/// up to it with their proofs of time unchecked, and holds that block there exactly ([`crate::arcborrow::sync`]).
+pub fn light_checkpoint() -> Option<(u64, Hash256)> {
+    DEF.get()?.settings.checkpoints.iter().max_by_key(|c| c.0).copied()
 }
 
 /// The headers-only chain, picked up from the newest headers this arcade had checked.
