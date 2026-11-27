@@ -29,5 +29,5 @@
  "segment_bytes": 16777216,
  "time": "vdf",
  "_checkpoints": "Release checkpoints (§15 step 18): each release adds the newest settled block of this chain.",
- "checkpoints": []
+ "checkpoints": [[6600, "b3e019ec172db90337f8aafc417f0412fcb564a631ca400111a2c845d495c633"]]
 }
