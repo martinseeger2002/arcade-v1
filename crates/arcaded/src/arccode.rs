@@ -135,6 +135,10 @@ impl Release {
     pub fn is_program(name: &str) -> bool {
         name.starts_with("program-")
     }
+
+    pub fn is_bundle(name: &str) -> bool {
+        name.ends_with(".bundle")
+    }
 }
 
 #[derive(Default)]
@@ -300,7 +304,9 @@ fn file_path(sha: &str) -> PathBuf {
     dir().join("files").join(sha)
 }
 
-/// The files to keep: every release's non-program files, and the programs of the newest KEEP_PROGRAMS of each name.
+/// The files to keep: the programs and git bundles of the newest KEEP_PROGRAMS releases of each name, the first
+/// release's bundle (the code the network started from), and every release's other files (its vendored dependencies,
+/// BUILD.txt). A bundle holds the whole history up to its commit, so the newest one already has every older one's.
 fn wanted(s: &State) -> BTreeMap<String, u64> {
     let mut by_name: BTreeMap<&str, Vec<&Release>> = BTreeMap::new();
     for r in s.releases.values() {
@@ -309,15 +315,55 @@ fn wanted(s: &State) -> BTreeMap<String, u64> {
     let mut out = BTreeMap::new();
     for (_, mut rs) in by_name {
         rs.sort_by(|a, b| newest_first(a, b));
+        let first = rs.len().saturating_sub(1);
         for (i, r) in rs.iter().enumerate() {
             for (name, (sha, bytes)) in &r.files {
-                if !Release::is_program(name) || i < KEEP_PROGRAMS {
+                let keep = if Release::is_program(name) {
+                    i < KEEP_PROGRAMS
+                } else if Release::is_bundle(name) {
+                    i < KEEP_PROGRAMS || i == first
+                } else {
+                    true
+                };
+                if keep {
                     out.insert(sha.clone(), *bytes);
                 }
             }
         }
     }
     out
+}
+
+/// Delete the files no longer [`wanted`] (an older release's programs and bundle): only the newest releases' were ever
+/// fetched, but nothing deleted the older ones, so every program ever taken stayed (Ashburn 2026-11-27: 385 program
+/// files, 8.6 GB of its 30 GB disk). Never before any release is known, and never a file being fetched. (files, bytes).
+fn prune(s: &mut State) -> (usize, u64) {
+    if s.releases.is_empty() {
+        return (0, 0);
+    }
+    let keep = wanted(s);
+    let gone: Vec<String> = s.have.iter().filter(|h| !keep.contains_key(*h) && !s.fetching.contains_key(*h)).cloned().collect();
+    let (mut n, mut bytes) = (0, 0);
+    for sha in gone {
+        let p = file_path(&sha);
+        let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        if std::fs::remove_file(&p).is_ok() || !p.exists() {
+            s.have.remove(&sha);
+            n += 1;
+            bytes += size;
+        }
+    }
+    if n > 0 {
+        s.have_gen += 1;
+    }
+    (n, bytes)
+}
+
+fn prune_now() {
+    let (n, bytes) = prune(&mut st());
+    if n > 0 {
+        eprintln!("arc code: {n} file(s) of older releases deleted ({} MB): only the newest {KEEP_PROGRAMS} releases' programs and bundles are kept", bytes >> 20);
+    }
 }
 
 /// Take a release record in (checked, saved). Whether it was new.
@@ -387,10 +433,19 @@ pub fn start(node: &Arc<Node>, test_key: Option<String>) {
             }
         }
     }
+    prune_now();
     let node = node.clone();
-    let _ = std::thread::Builder::new().name("arc code".into()).spawn(move || loop {
-        fetch_round(&node);
-        std::thread::sleep(Duration::from_secs(3));
+    let _ = std::thread::Builder::new().name("arc code".into()).spawn(move || {
+        let mut last_prune = Instant::now();
+        loop {
+            fetch_round(&node);
+            // A new release makes the oldest kept one's programs unwanted: deleted within the hour.
+            if last_prune.elapsed() > Duration::from_secs(3600) {
+                prune_now();
+                last_prune = Instant::now();
+            }
+            std::thread::sleep(Duration::from_secs(3));
+        }
     });
 }
 
@@ -675,6 +730,36 @@ mod order_tests {
         v.sort_by(newest_first);
         let ids: Vec<&str> = v.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["b", "c", "a", "e", "d"]);
+    }
+
+    /// Only the newest KEEP_PROGRAMS releases' programs and bundles are kept (and the first release's bundle);
+    /// every release's dependencies stay. What isn't wanted is deleted (Ashburn 2026-11-27: 8.6 GB of old programs).
+    #[test]
+    fn only_the_newest_releases_programs_and_bundles_stay() {
+        let mut s = State::default();
+        for i in 0..8u64 {
+            let mut r = rel(&format!("v0.1.{}", 100 + i), i, &format!("r{i}"));
+            r.files.insert("program-linux-x86_64".into(), (format!("prog{i}"), 70));
+            r.files.insert("arcade-v1.bundle".into(), (format!("bund{i}"), 11));
+            r.files.insert("vendor.tar.zst".into(), (if i < 4 { "vendA".to_string() } else { "vendB".to_string() }, 62));
+            s.releases.insert(r.id.clone(), r);
+        }
+        let w = wanted(&s);
+        for i in 0..8 {
+            assert_eq!(w.contains_key(&format!("prog{i}")), i >= 3, "program of release {i}");
+            assert_eq!(w.contains_key(&format!("bund{i}")), i >= 3 || i == 0, "bundle of release {i} (the first is kept)");
+        }
+        assert!(w.contains_key("vendA") && w.contains_key("vendB"), "every release's dependencies stay");
+        // Held here: all of them, plus one being fetched that no release names yet.
+        s.have = w.keys().cloned().chain((0..8).flat_map(|i| [format!("prog{i}"), format!("bund{i}")])).chain(["busy".to_string()]).collect();
+        s.fetching.insert("busy".into(), "peer".into());
+        let (n, _) = prune(&mut s);
+        assert_eq!(n, 5, "programs 0-2 and bundles 1-2");
+        assert!(!s.have.contains("prog0") && !s.have.contains("bund1") && s.have.contains("bund0") && s.have.contains("prog7"));
+        assert!(s.have.contains("busy"), "a file being fetched is never deleted");
+        // No release known (a fresh start that hasn't read them yet): nothing is deleted.
+        let mut empty = State { have: ["x".to_string()].into_iter().collect(), ..Default::default() };
+        assert_eq!(prune(&mut empty).0, 0);
     }
 }
 
